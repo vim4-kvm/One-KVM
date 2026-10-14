@@ -305,6 +305,10 @@ async fn build_streamer(
         resolution.height
     );
     let streamer = Streamer::new();
+    #[cfg(feature = "vim4")]
+    streamer
+        .set_vim4_output(config.video.output, config.video.quality)
+        .await;
     streamer.set_event_bus(events.clone()).await;
     if let Some(device_path) = config.video.device.as_ref() {
         if let Err(error) = streamer
@@ -334,6 +338,8 @@ fn build_webrtc(
     resolution: Resolution,
 ) -> Arc<WebRtcStreamer> {
     let webrtc = WebRtcStreamer::with_config(WebRtcStreamerConfig {
+        #[cfg(feature = "vim4")]
+        output: config.video.output,
         resolution,
         input_format,
         fps: config.video.fps,

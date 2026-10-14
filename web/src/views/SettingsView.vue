@@ -71,6 +71,7 @@ import LanguageToggleButton from '@/components/LanguageToggleButton.vue'
 import TerminalDialog from '@/components/TerminalDialog.vue'
 import TotpSettingsCard from '@/components/TotpSettingsCard.vue'
 import VideoInputFields from '@/components/VideoInputFields.vue'
+import Vim4VideoSettings from '@/components/Vim4VideoSettings.vue'
 import ExtensionConfigModeEditor from '@/components/ExtensionConfigModeEditor.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
@@ -3034,6 +3035,9 @@ watch(isWindows, () => {
             </Card>
 
             <!-- Encoder Settings -->
+            <Card v-if="isVim4 && activeSection === 'video'">
+              <CardContent class="pt-6"><Vim4VideoSettings /></CardContent>
+            </Card>
             <Card>
               <CardHeader>
                 <CardTitle>{{ t('settings.encoderBackend') }}</CardTitle>

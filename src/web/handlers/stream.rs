@@ -297,6 +297,8 @@ pub async fn stream_set_bitrate(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SetBitrateRequest>,
 ) -> Result<Json<LoginResponse>> {
+    #[cfg(feature = "vim4")]
+    crate::platform::vim4::validate_bitrate(req.bitrate_preset)?;
     // Update config
     state
         .config

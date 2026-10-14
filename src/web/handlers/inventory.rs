@@ -208,6 +208,12 @@ fn validated_video_node(path: &str, sysfs_root: &std::path::Path) -> Option<std:
 pub async fn video_input_status(
     Query(query): Query<VideoInputStatusQuery>,
 ) -> Result<Json<crate::video::device::VideoInputStatus>> {
+    #[cfg(feature = "vim4")]
+    if query.device == crate::platform::vim4::VIDEO_DEVICE {
+        // This is a VFM capture node, not V4L2. Reading HDMI sysfs also avoids
+        // opening the exclusive capture device while the encoder owns it.
+        return Ok(Json(crate::platform::vim4::input_status()));
+    }
     #[cfg(unix)]
     let path = validated_video_node(
         &query.device,
@@ -241,6 +247,19 @@ pub async fn video_input_status(
 #[cfg(all(test, unix))]
 mod tests {
     use super::validated_video_node;
+
+    #[cfg(feature = "vim4")]
+    #[tokio::test]
+    async fn board_status_does_not_require_opening_a_v4l2_device() {
+        use super::{video_input_status, VideoInputStatusQuery};
+        use axum::extract::Query;
+        assert!(video_input_status(Query(VideoInputStatusQuery {
+            device: "/dev/video_cap".into(),
+        })).await.is_ok());
+        assert!(video_input_status(Query(VideoInputStatusQuery {
+            device: "/dev/video_cap/../mem".into(),
+        })).await.is_err());
+    }
 
     #[test]
     fn only_accepts_dev_video_nodes_present_in_sysfs() {

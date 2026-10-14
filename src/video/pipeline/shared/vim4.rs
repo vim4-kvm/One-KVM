@@ -10,7 +10,7 @@ impl Drop for Capture {
     }
 }
 
-fn description(config: &SharedVideoPipelineConfig, fps: u32) -> Result<String> {
+fn description(config: &SharedVideoPipelineConfig, source: Resolution, fps: u32) -> Result<String> {
     let codec = match config.output_codec {
         VideoEncoderType::H264 => "h264",
         VideoEncoderType::H265 => "h265",
@@ -20,7 +20,8 @@ fn description(config: &SharedVideoPipelineConfig, fps: u32) -> Result<String> {
             ))
         }
     };
-    Ok(format!("vfmcapsrc ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! \
+    let filter = config.output.filter(source, fps);
+    Ok(format!("vfmcapsrc ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! {filter}\
         amlvenc name=encoder bitrate={} gop={} framerate={} min-force-key-unit-interval=250000000 ! \
         video/x-{codec} ! {codec}parse config-interval=-1 ! \
         video/x-{codec},stream-format=byte-stream,alignment=au ! appsink name=frames sync=false max-buffers=2",
@@ -33,7 +34,7 @@ impl SharedVideoPipeline {
             return Ok(());
         }
         let config = self.config.read().await.clone();
-        description(&config, config.fps.max(1))?;
+        description(&config, config.resolution, config.fps.max(1))?;
         gst::init().map_err(|e| AppError::VideoError(e.to_string()))?;
         *self.parameter_sets.lock() = CachedH26xParameterSets::default();
         *self.bootstrap_frame.write() = None;
@@ -59,7 +60,7 @@ impl SharedVideoPipeline {
 
     fn run_vim4(&self, mut config: SharedVideoPipelineConfig) {
         while self.running_flag.load(Ordering::Acquire) {
-            let Some((_, fps)) = crate::platform::vim4::signal() else {
+            let Some(source) = crate::platform::vim4::signal() else {
                 self.notify_state(PipelineStateNotification::no_signal(
                     SignalStatus::NoSignal,
                     Some(250),
@@ -68,7 +69,7 @@ impl SharedVideoPipeline {
                 continue;
             };
             config.bitrate_preset = self.config.blocking_read().bitrate_preset;
-            match self.capture_vim4(&config, fps) {
+            match self.capture_vim4(&config, source) {
                 Ok(()) => {}
                 Err(e) => {
                     warn!("VIM4 video: {e}");
@@ -88,9 +89,15 @@ impl SharedVideoPipeline {
         }
     }
 
-    fn capture_vim4(&self, config: &SharedVideoPipelineConfig, fps: u32) -> Result<()> {
+    fn capture_vim4(
+        &self,
+        config: &SharedVideoPipelineConfig,
+        source: (Resolution, u32),
+    ) -> Result<()> {
+        let fps = config.output.frame_rate(source.1, 60);
         let error = |e: &dyn std::fmt::Display| AppError::VideoError(e.to_string());
-        let element = gst::parse::launch(&description(config, fps)?).map_err(|e| error(&e))?;
+        let element =
+            gst::parse::launch(&description(config, source.0, fps)?).map_err(|e| error(&e))?;
         let capture = Capture(
             element
                 .downcast::<gst::Pipeline>()
@@ -127,8 +134,8 @@ impl SharedVideoPipeline {
                 if self.config.blocking_read().bitrate_preset != config.bitrate_preset {
                     break;
                 }
-                let rate = crate::platform::vim4::signal().map(|(_, fps)| fps);
-                rate_changes = if rate != Some(fps) {
+                let signal = crate::platform::vim4::signal();
+                rate_changes = if signal != Some(source) {
                     rate_changes + 1
                 } else {
                     0

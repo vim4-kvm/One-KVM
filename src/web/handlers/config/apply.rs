@@ -36,6 +36,13 @@ pub async fn apply_video_config(
         .unwrap_or(crate::video::format::PixelFormat::Mjpeg);
 
     let resolution = crate::video::format::Resolution::new(new_config.width, new_config.height);
+    #[cfg(feature = "vim4")]
+    {
+        state.webrtc.set_vim4_output(new_config.output).await?;
+        state.stream_manager
+            .set_vim4_output(new_config.output, new_config.quality)
+            .await;
+    }
 
     state
         .stream_manager

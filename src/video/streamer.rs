@@ -40,6 +40,8 @@ const MIN_CAPTURE_FRAME_SIZE: usize = 128;
 /// Streamer configuration
 #[derive(Debug, Clone)]
 pub struct StreamerConfig {
+    #[cfg(feature = "vim4")]
+    pub output: crate::platform::vim4::OutputSettings,
     /// Device path (None = auto-detect)
     pub device_path: Option<PathBuf>,
     /// Desired resolution
@@ -55,6 +57,8 @@ pub struct StreamerConfig {
 impl Default for StreamerConfig {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "vim4")]
+            output: Default::default(),
             device_path: None,
             resolution: Resolution::HD1080,
             format: PixelFormat::Mjpeg,
@@ -298,6 +302,17 @@ impl Streamer {
     pub async fn current_video_config(&self) -> (PixelFormat, Resolution, u32) {
         let config = self.config.read().await;
         (config.format, config.resolution, config.fps)
+    }
+
+    #[cfg(feature = "vim4")]
+    pub async fn set_vim4_output(
+        &self,
+        output: crate::platform::vim4::OutputSettings,
+        quality: u32,
+    ) {
+        let mut config = self.config.write().await;
+        config.output = output;
+        config.jpeg_quality = quality.clamp(1, 100) as u8;
     }
 
     /// Get current capture configuration for direct pipelines

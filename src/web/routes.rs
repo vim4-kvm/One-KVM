@@ -360,6 +360,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let upload_routes = Router::new();
 
     // Combine API routes
+    #[cfg(feature = "vim4")]
+    let protected_routes = protected_routes.route(
+        "/vim4/video",
+        get(handlers::vim4::status).post(handlers::vim4::update),
+    );
+
     let api_routes = Router::new()
         .merge(public_routes)
         .merge(protected_routes)

@@ -12,6 +12,9 @@ StateDirectory=one-kvm
 StateDirectoryMode=0700
 WorkingDirectory=/var/lib/one-kvm
 Environment=GST_PLUGIN_PATH=/usr/lib/vim4-kvm/gstreamer-1.0
+Environment=LD_LIBRARY_PATH=/opt/vim4-onekvm/lib
+Environment=GST_REGISTRY=/var/lib/one-kvm/gstreamer-registry.bin
+ExecStartPre=/usr/bin/test -r /opt/vim4-onekvm/lib/libgst-aml-dma-allocator.so
 ExecStart=/opt/vim4-onekvm/one-kvm --data-dir /var/lib/one-kvm
 Restart=on-failure
 RestartSec=3

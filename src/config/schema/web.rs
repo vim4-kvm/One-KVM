@@ -22,6 +22,9 @@ impl Default for AuthConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct VideoConfig {
+    #[cfg(feature = "vim4")]
+    #[typeshare(skip)]
+    pub output: crate::platform::vim4::OutputSettings,
     pub device: Option<String>,
     pub format: Option<String>,
     pub width: u32,
@@ -33,6 +36,8 @@ pub struct VideoConfig {
 impl Default for VideoConfig {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "vim4")]
+            output: Default::default(),
             device: None,
             format: None,
             width: 1920,

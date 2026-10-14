@@ -45,6 +45,9 @@ impl AuthConfigUpdate {
 #[typeshare]
 #[derive(Debug, Deserialize)]
 pub struct VideoConfigUpdate {
+    #[cfg(feature = "vim4")]
+    #[typeshare(skip)]
+    pub output: Option<crate::platform::vim4::OutputSettings>,
     pub device: Option<String>,
     pub format: Option<String>,
     pub width: Option<u32>,
@@ -71,6 +74,10 @@ impl VideoConfigUpdate {
     }
 
     pub fn validate(&self) -> crate::error::Result<()> {
+        #[cfg(feature = "vim4")]
+        if let Some(output) = self.output {
+            output.validate()?;
+        }
         if let Some(width) = self.width {
             if !(320..=7680).contains(&width) {
                 return Err(AppError::BadRequest(
@@ -101,6 +108,10 @@ impl VideoConfigUpdate {
     }
 
     pub fn apply_to(&self, config: &mut VideoConfig) {
+        #[cfg(feature = "vim4")]
+        if let Some(output) = self.output {
+            config.output = output;
+        }
         if let Some(ref device) = self.device {
             config.device = Some(device.clone());
         }
@@ -129,6 +140,8 @@ mod video_config_update_tests {
     #[test]
     fn source_following_parameters_are_silently_discarded() {
         let mut update = VideoConfigUpdate {
+            #[cfg(feature = "vim4")]
+            output: None,
             device: Some("/dev/video0".to_string()),
             format: Some("MJPEG".to_string()),
             width: Some(7680),
@@ -202,6 +215,10 @@ pub struct StreamConfigUpdate {
 
 impl StreamConfigUpdate {
     pub fn validate(&self) -> crate::error::Result<()> {
+        #[cfg(feature = "vim4")]
+        if let Some(preset) = self.bitrate_preset {
+            crate::platform::vim4::validate_bitrate(preset)?;
+        }
         // BitratePreset is always valid (enum)
         // Validate STUN server format
         if let Some(ref stun) = self.stun_server {

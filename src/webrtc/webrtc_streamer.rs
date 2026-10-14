@@ -44,6 +44,8 @@ fn update_signal_recovery_edge(pending: &AtomicBool, state: &str) -> bool {
 
 #[derive(Debug, Clone)]
 pub struct WebRtcStreamerConfig {
+    #[cfg(feature = "vim4")]
+    pub output: crate::platform::vim4::OutputSettings,
     pub webrtc: WebRtcConfig,
     pub video_codec: VideoCodecType,
     pub resolution: Resolution,
@@ -57,6 +59,8 @@ pub struct WebRtcStreamerConfig {
 impl Default for WebRtcStreamerConfig {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "vim4")]
+            output: Default::default(),
             webrtc: WebRtcConfig::default(),
             video_codec: VideoCodecType::H264,
             resolution: Resolution::HD720,
@@ -498,6 +502,8 @@ impl WebRtcStreamer {
         let pipeline_config = {
             let config = self.config.read().await;
             SharedVideoPipelineConfig {
+                #[cfg(feature = "vim4")]
+                output: config.output,
                 control_mode: self
                     .capture_device
                     .read()
@@ -830,6 +836,19 @@ impl WebRtcStreamer {
     }
 
     // === Configuration ===
+
+    #[cfg(feature = "vim4")]
+    pub async fn set_vim4_output(
+        &self,
+        output: crate::platform::vim4::OutputSettings,
+    ) -> Result<()> {
+        if self.config.read().await.output != output {
+            self.close_all_sessions().await;
+            self.stop_video_pipeline_and_release().await?;
+            self.config.write().await.output = output;
+        }
+        Ok(())
+    }
 
     /// Update video configuration
     ///

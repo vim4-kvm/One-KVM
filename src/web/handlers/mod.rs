@@ -2,6 +2,8 @@ pub mod config;
 pub mod devices;
 pub mod extensions;
 pub mod terminal;
+#[cfg(feature = "vim4")]
+pub mod vim4;
 
 mod account;
 mod atx_api;

@@ -365,6 +365,8 @@ impl PipelineStateNotification {
 /// Shared video pipeline configuration
 #[derive(Debug, Clone)]
 pub struct SharedVideoPipelineConfig {
+    #[cfg(feature = "vim4")]
+    pub output: crate::platform::vim4::OutputSettings,
     /// Whether the capture mode is configured by the client or follows HDMI.
     pub control_mode: VideoControlMode,
     /// Input resolution
@@ -384,6 +386,8 @@ pub struct SharedVideoPipelineConfig {
 impl Default for SharedVideoPipelineConfig {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "vim4")]
+            output: Default::default(),
             control_mode: VideoControlMode::Configurable,
             resolution: Resolution::HD720,
             input_format: PixelFormat::Yuyv,

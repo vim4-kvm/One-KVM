@@ -35,6 +35,8 @@ import { useConfigStore } from '@/stores/config'
 import { useVideoDeviceConfiguration } from '@/composables/useVideoDeviceConfiguration'
 import type { VideoRotation } from '@/composables/useVideoScaling'
 import VideoInputFields from '@/components/VideoInputFields.vue'
+import Vim4VideoSettings from '@/components/Vim4VideoSettings.vue'
+import { useSystemStore } from '@/stores/system'
 
 export type VideoMode = 'mjpeg' | 'h264' | 'h265' | 'vp8' | 'vp9'
 
@@ -53,6 +55,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const configStore = useConfigStore()
+const systemStore = useSystemStore()
 
 // Device list
 const devices = ref<VideoDevice[]>([])
@@ -173,7 +176,10 @@ const selectedDevice = ref<string>('')
 const selectedFormat = ref<string>('')
 const selectedResolution = ref<string>('')
 const selectedFps = ref<number | null>(30)
-const selectedBitratePreset = ref<'Speed' | 'Balanced' | 'Quality'>('Balanced')
+const selectedBitratePreset = ref<'Speed' | 'Balanced' | 'Quality' | 'Custom'>('Balanced')
+watch(() => configStore.stream?.bitrate_preset, preset => {
+  if (preset) selectedBitratePreset.value = preset.type
+}, { immediate: true })
 const isDirty = ref(false)
 
 const videoConfiguration = useVideoDeviceConfiguration({
@@ -557,7 +563,7 @@ watch(
     </PopoverTrigger>
     <PopoverContent
       @open-auto-focus="focusConsolePanel"
-      class="console-config-panel w-[min(320px,92vw)] p-3"
+      class="console-config-panel w-[min(320px,92vw)] p-3 max-h-[75vh] overflow-y-auto"
       align="start"
       :side="props.side ?? 'bottom'"
     >
@@ -781,6 +787,7 @@ watch(
             <Loader2 v-if="applying" class="size-3.5 mr-1.5 animate-spin" />
             <span>{{ applying ? t('actionbar.applying') : t('common.apply') }}</span>
           </Button>
+          <Vim4VideoSettings v-if="open && systemStore.platform?.mode_label === 'VIM4 Ubuntu'" />
           </div>
       </div>
     </PopoverContent>

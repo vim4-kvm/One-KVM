@@ -464,6 +464,16 @@ impl VideoStreamManager {
         Ok(())
     }
 
+    /// Configure VIM4 output limits before applying/restarting capture.
+    #[cfg(feature = "vim4")]
+    pub async fn set_vim4_output(
+        &self,
+        output: crate::platform::vim4::OutputSettings,
+        quality: u32,
+    ) {
+        self.streamer.set_vim4_output(output, quality).await;
+    }
+
     /// Apply video configuration (device, format, resolution, fps)
     ///
     /// This is called when video settings change. It will restart the
