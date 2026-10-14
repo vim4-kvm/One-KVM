@@ -84,6 +84,8 @@ impl std::fmt::Display for VideoEncoderType {
 /// Encoder backend type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EncoderBackend {
+    /// VIM4 DMA-buf capture and Amlogic encoder, managed as one pipeline.
+    Amlogic,
     /// Intel/AMD/NVIDIA VAAPI (Linux)
     Vaapi,
     /// NVIDIA NVENC
@@ -129,6 +131,7 @@ impl EncoderBackend {
     pub fn display_name(&self) -> &'static str {
         match self {
             EncoderBackend::Vaapi => "VAAPI",
+            EncoderBackend::Amlogic => "Amlogic",
             EncoderBackend::Nvenc => "NVENC",
             EncoderBackend::Qsv => "QSV",
             EncoderBackend::Amf => "AMF",
@@ -142,6 +145,7 @@ impl EncoderBackend {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
+            "amlogic" => Some(EncoderBackend::Amlogic),
             "vaapi" => Some(EncoderBackend::Vaapi),
             "nvenc" => Some(EncoderBackend::Nvenc),
             "qsv" => Some(EncoderBackend::Qsv),
@@ -298,6 +302,24 @@ impl EncoderRegistry {
     ///
     /// This queries hwcodec/FFmpeg for available encoders and populates the registry.
     pub fn detect_encoders(&mut self, width: u32, height: u32) {
+        #[cfg(feature = "vim4")]
+        {
+            self.encoders.clear();
+            self.detection_resolution = (width, height);
+            for format in [VideoEncoderType::H264, VideoEncoderType::H265] {
+                self.encoders.insert(
+                    format,
+                    vec![AvailableEncoder {
+                        format,
+                        codec_name: "amlvenc".into(),
+                        backend: EncoderBackend::Amlogic,
+                        priority: 0,
+                        is_hardware: true,
+                    }],
+                );
+            }
+            return;
+        }
         info!("Detecting available video encoders at {}x{}", width, height);
 
         self.encoders.clear();

@@ -3,7 +3,7 @@
 use super::{FeatureCapability, PlatformCapabilities, PlatformMode};
 
 pub fn capabilities() -> PlatformCapabilities {
-    PlatformCapabilities {
+    let mut capabilities = PlatformCapabilities {
         mode: PlatformMode::Linux,
         mode_label: PlatformMode::Linux.label(),
         video_capture: FeatureCapability::available(["v4l2"]),
@@ -20,5 +20,19 @@ pub fn capabilities() -> PlatformCapabilities {
         diagnostics: FeatureCapability::available(["linux"]),
         extensions: FeatureCapability::available(["linux"]),
         service_installation: FeatureCapability::available(["systemd"]),
+    };
+    #[cfg(feature = "vim4")]
+    {
+        capabilities.mode_label = "VIM4 Ubuntu";
+        capabilities.video_capture = FeatureCapability::available(["vfm_cap"]);
+        capabilities.encoder = FeatureCapability::available(["auto"]);
+        capabilities.hid = FeatureCapability::available(["otg", "none"]);
+        capabilities.atx = FeatureCapability::unsupported("No ATX hardware is connected");
+        capabilities.otg = FeatureCapability::unsupported(
+            "USB descriptors and networking are managed by VIM4 board services",
+        );
+        capabilities.service_installation =
+            FeatureCapability::unsupported("Installed as the vim4-onekvm Ubuntu package");
     }
+    capabilities
 }

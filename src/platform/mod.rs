@@ -6,6 +6,8 @@ pub mod defaults;
 pub mod linux;
 #[cfg(unix)]
 pub mod usb_reset;
+#[cfg(feature = "vim4")]
+pub mod vim4;
 #[cfg(windows)]
 pub mod windows;
 

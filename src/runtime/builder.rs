@@ -234,6 +234,12 @@ async fn load_runtime_config(
     config_store.load().await?;
     let mut config = (*config_store.get()).clone();
     config.apply_platform_defaults();
+    #[cfg(feature = "vim4")]
+    if !config.initialized {
+        // The setup API reads the store, while runtime construction uses this
+        // snapshot. Both must see the board defaults on first use.
+        config_store.set(config.clone()).await?;
+    }
     normalize_msd_config(data_dir, &config_store, &mut config).await?;
 
     Ok((db, config_store, config))

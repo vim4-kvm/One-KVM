@@ -2,6 +2,14 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
+    if std::env::var_os("CARGO_FEATURE_VIM4").is_some() {
+        // The bundled TurboJPEG uses a different libjpeg ABI than Ubuntu's
+        // libyuv/GStreamer. Do not let its static JPEG symbols interpose on
+        // those shared libraries (MJPEG decoding otherwise corrupts memory).
+        // rustc bundles native archives inside hashed .rlib files, so exclude
+        // all static archives rather than relying on the original archive name.
+        println!("cargo:rustc-link-arg=-Wl,--exclude-libs,ALL");
+    }
     // Compile protobuf files for RustDesk protocol
     compile_protos();
 

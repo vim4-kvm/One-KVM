@@ -172,6 +172,7 @@ const consoleLayoutOptions: Array<{
 const EMPTY_SELECT_VALUE = '__one-kvm-empty-select-value__'
 
 const isWindows = computed(() => systemStore.platform?.mode === 'windows')
+const isVim4 = computed(() => systemStore.platform?.mode_label === 'VIM4 Ubuntu')
 
 const activeSection = ref<SettingsSectionId>('appearance')
 const loading = ref(false)
@@ -1246,6 +1247,7 @@ const atxDriverOptions = computed(() => {
     { value: 'usbrelay' as AtxDriverType, label: t('settings.atxDriverUsbRelay') },
     { value: 'serial' as AtxDriverType, label: t('settings.atxDriverSerial') },
   ]
+  if (isVim4.value) return options.filter(option => option.value === 'none')
   return isWindows.value
     ? options.filter(option => ['none', 'serial'].includes(option.value))
     : options
@@ -3212,7 +3214,7 @@ watch(isWindows, () => {
                 </template>
 
                 <!-- OTG Descriptor Settings -->
-                <template v-if="config.hid_backend === 'otg'">
+                <template v-if="config.hid_backend === 'otg' && !isVim4">
                   <Separator class="my-4" />
                   <div class="space-y-4">
                     <div>
@@ -3466,7 +3468,7 @@ watch(isWindows, () => {
               </CardContent>
             </Card>
 
-            <Card>
+            <Card v-if="!isVim4">
               <CardHeader class="flex flex-row items-start justify-between space-y-0">
                 <div class="space-y-1.5">
                   <CardTitle>{{ t('settings.otgSelfCheck.title') }}</CardTitle>
@@ -3561,7 +3563,7 @@ watch(isWindows, () => {
               </CardContent>
             </Card>
 
-            <Card>
+            <Card v-if="!isVim4">
               <CardHeader class="flex flex-row items-start justify-between space-y-0">
                 <div class="space-y-1.5">
                   <CardTitle>{{ t('settings.encoderSelfCheck.title') }}</CardTitle>
@@ -5290,7 +5292,7 @@ watch(isWindows, () => {
 
           <!-- About Section -->
           <div v-show="activeSection === 'about'" class="space-y-4">
-            <Card>
+            <Card v-if="!isVim4">
               <CardHeader class="flex flex-row items-start justify-between space-y-0">
                 <div class="space-y-1.5">
                   <CardTitle>{{ t('settings.onlineUpgrade') }}</CardTitle>

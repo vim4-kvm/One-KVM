@@ -70,6 +70,7 @@ impl std::fmt::Display for H265EncoderType {
 impl From<EncoderBackend> for H265EncoderType {
     fn from(backend: EncoderBackend) -> Self {
         match backend {
+            EncoderBackend::Amlogic => H265EncoderType::None,
             EncoderBackend::Nvenc => H265EncoderType::Nvenc,
             EncoderBackend::Qsv => H265EncoderType::Qsv,
             EncoderBackend::Amf => H265EncoderType::Amf,

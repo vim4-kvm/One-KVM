@@ -35,13 +35,25 @@ use super::encoder_state::{build_encoder_state, should_parallel_decode_mjpeg, En
 use super::frame_mailbox::{FrameMailbox, PublishResult};
 use super::mjpeg_admission::{MjpegAdmissionPolicy, MjpegAdmissionStage, MjpegDropReason};
 
-#[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
+#[cfg(all(
+    target_os = "linux",
+    all(
+        not(feature = "vim4"),
+        any(target_arch = "aarch64", target_arch = "arm")
+    )
+))]
 #[path = "dmabuf.rs"]
 mod dmabuf;
 
 #[cfg(any(
     test,
-    all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm"))
+    all(
+        target_os = "linux",
+        all(
+            not(feature = "vim4"),
+            any(target_arch = "aarch64", target_arch = "arm")
+        )
+    )
 ))]
 fn rkmpp_dma_eligible(
     backend: Option<EncoderBackend>,
@@ -269,7 +281,10 @@ fn spawn_mjpeg_decode_workers(
     senders
 }
 
-#[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+#[cfg(all(
+    not(feature = "vim4"),
+    any(target_arch = "aarch64", target_arch = "arm")
+))]
 use hwcodec::ffmpeg_hw::last_error_message as ffmpeg_hw_last_error;
 
 /// Encoded video frame for distribution
@@ -291,6 +306,9 @@ pub struct EncodedVideoFrame {
     /// Codec type
     pub codec: VideoEncoderType,
 }
+
+#[cfg(feature = "vim4")]
+mod vim4;
 
 enum PipelineCmd {
     SetBitrate {
@@ -726,7 +744,10 @@ impl SharedVideoPipeline {
         match cmd {
             PipelineCmd::SetBitrate { preset } => {
                 let bitrate_kbps = preset.bitrate_kbps();
-                #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+                #[cfg(all(
+                    not(feature = "vim4"),
+                    any(target_arch = "aarch64", target_arch = "arm")
+                ))]
                 if state.ffmpeg_hw_enabled {
                     if let Some(ref mut pipeline) = state.ffmpeg_hw_pipeline {
                         pipeline
@@ -1082,6 +1103,10 @@ impl SharedVideoPipeline {
         subdev_path: Option<std::path::PathBuf>,
         bridge_kind: Option<String>,
     ) -> Result<()> {
+        #[cfg(feature = "vim4")]
+        if device_path == std::path::Path::new(crate::platform::vim4::VIDEO_DEVICE) {
+            return self.start_vim4().await;
+        }
         if *self.running_rx.borrow() {
             warn!("Pipeline already running");
             return Ok(());
@@ -1154,7 +1179,13 @@ impl SharedVideoPipeline {
             Err(e) => return Err(e),
         };
 
-        #[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
+        #[cfg(all(
+            target_os = "linux",
+            all(
+                not(feature = "vim4"),
+                any(target_arch = "aarch64", target_arch = "arm")
+            )
+        ))]
         if dmabuf::eligible(&config) {
             if let Some(stream) = preopened.as_ref().filter(|s| s.supports_rkmpp_dmabuf()) {
                 match dmabuf::prepare(stream, &config) {
@@ -1817,7 +1848,10 @@ impl SharedVideoPipeline {
 
         let pts_ms = self.pts_ms();
 
-        #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+        #[cfg(all(
+            not(feature = "vim4"),
+            any(target_arch = "aarch64", target_arch = "arm")
+        ))]
         if state.ffmpeg_hw_enabled {
             if input_format != PixelFormat::Mjpeg {
                 return Err(AppError::VideoError(
@@ -2527,9 +2561,15 @@ mod tests {
             nv12_converter: None,
             yuv420p_converter: None,
             encoder_needs_yuv420p: false,
-            #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+            #[cfg(all(
+                not(feature = "vim4"),
+                any(target_arch = "aarch64", target_arch = "arm")
+            ))]
             ffmpeg_hw_pipeline: None,
-            #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+            #[cfg(all(
+                not(feature = "vim4"),
+                any(target_arch = "aarch64", target_arch = "arm")
+            ))]
             ffmpeg_hw_enabled: false,
             fps: 30,
             codec: VideoEncoderType::H264,

@@ -42,4 +42,6 @@ CLAUDE.md
 secrets.toml
 .env
 /docs/
-web/package-lock.json
+# Python deployment tests
+__pycache__/
+

@@ -766,7 +766,7 @@ onUnmounted(() => {
               @update:model-value="changeDiskMode"
             >
               <ToggleGroupItem value="single" :class="segmentedItemClass">{{ t('msd.singleDiskMode') }}</ToggleGroupItem>
-              <ToggleGroupItem value="multi" :class="segmentedItemClass">{{ t('msd.multiDiskMode') }}</ToggleGroupItem>
+              <ToggleGroupItem v-if="systemStore.platform?.mode_label !== 'VIM4 Ubuntu'" value="multi" :class="segmentedItemClass">{{ t('msd.multiDiskMode') }}</ToggleGroupItem>
             </ToggleGroup>
           </span>
         </DialogDescription>

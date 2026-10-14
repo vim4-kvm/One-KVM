@@ -9,12 +9,18 @@ use std::ffi::c_int;
 
 include!(concat!(env!("OUT_DIR"), "/ffmpeg_ram_ffi.rs"));
 
-#[cfg(any(target_arch = "aarch64", target_arch = "arm", feature = "rkmpp"))]
+#[cfg(all(
+    not(feature = "vim4"),
+    any(target_arch = "aarch64", target_arch = "arm", feature = "rkmpp")
+))]
 pub mod decode;
 
 // Provide a small stub on non-ARM builds so dependents can still compile, but decoder
 // construction will fail (since the C++ RKMPP decoder isn't built/linked).
-#[cfg(not(any(target_arch = "aarch64", target_arch = "arm", feature = "rkmpp")))]
+#[cfg(not(all(
+    not(feature = "vim4"),
+    any(target_arch = "aarch64", target_arch = "arm", feature = "rkmpp")
+)))]
 pub mod decode {
     use crate::ffmpeg::AVPixelFormat;
 

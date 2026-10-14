@@ -102,7 +102,7 @@ pub enum EncoderType {
     Qsv,
     Amf,
     Rkmpp,
-    #[serde(alias = "amlogic")]
+    Amlogic,
     V4l2m2m,
 }
 
@@ -117,6 +117,7 @@ impl EncoderType {
             EncoderType::Amf => "AMD AMF",
             EncoderType::Rkmpp => "Rockchip MPP",
             EncoderType::V4l2m2m => "V4L2 M2M",
+            EncoderType::Amlogic => "Amlogic",
         }
     }
 }
