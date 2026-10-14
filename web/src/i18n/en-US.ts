@@ -8,7 +8,7 @@ export default {
     title: 'VIM4 video settings', applied: 'Settings applied',
     outputSize: 'Maximum output resolution', outputFps: 'Maximum output frame rate', source: 'Follow input',
     jpegQuality: 'MJPEG quality (1–100)', bitrate: 'Custom bitrate (1000–60000 kbps; higher rates require more bandwidth)',
-    outputHint: 'Preserves aspect ratio without upscaling. MJPEG is limited to 10 fps; use H.264 / H.265 for higher rates.',
+    outputHint: 'Preserves aspect ratio without upscaling. MJPEG frame rate depends on resolution, JPEG quality and network bandwidth.',
     edidHint: 'Changing display capabilities makes the host detect the display again and may briefly interrupt video.',
     white: 'SDR white point (nits)', peak: 'HDR peak (nits)',
     hdrHint: 'Shares the manager curve and applies immediately when saved. SDR input is unaffected.',
