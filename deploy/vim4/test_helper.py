@@ -96,6 +96,7 @@ class UsbProfileTest(unittest.TestCase):
         self.enterContext(patch.object(helper, 'PROFILE_DIR', self.root / 'profile'))
         self.enterContext(patch.object(helper.time, 'sleep'))
         self.network = self.enterContext(patch.object(helper, 'configure_network'))
+        self.enterContext(patch.object(helper, 'settle_usb'))
         descriptors = dict(zip(helper.DESCRIPTORS, ['0x1d6b', '0x0104', 'Board', 'KVM', 'serial']))
         for key, value in descriptors.items():
             path = self.gadget / key
@@ -141,6 +142,22 @@ class UsbProfileTest(unittest.TestCase):
         self.profile['descriptor']['strings/0x409/serialnumber'] = None
         helper.configure_profile(self.profile)
         self.assertEqual((self.gadget / 'strings/0x409/serialnumber').read_text(), 'serial')
+
+    def test_reenable_after_disabling_every_usb_function(self):
+        controllers = self.root / 'udc'
+        (controllers / 'controller').mkdir(parents=True)
+        original = Path.write_text
+        def reject_double_unbind(path, text, *args, **kwargs):
+            if path == self.gadget / 'UDC' and not text.strip() and not path.read_text().strip():
+                raise OSError(19, 'No such device')
+            return original(path, text, *args, **kwargs)
+        disabled = copy.deepcopy(self.profile)
+        disabled['hid'] = dict.fromkeys(disabled['hid'], False)
+        with patch.object(helper, 'UDC_ROOT', controllers), patch.object(Path, 'write_text', reject_double_unbind):
+            helper.configure_profile(disabled)
+            self.assertFalse((self.gadget / 'UDC').read_text().strip())
+            helper.configure_profile(self.profile)
+        self.assertEqual((self.gadget / 'UDC').read_text(), 'controller')
 
     def test_bind_failure_rolls_back_descriptors_and_links(self):
         self.profile['descriptor']['strings/0x409/product'] = 'New name'

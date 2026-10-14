@@ -12,6 +12,7 @@ import uuid
 
 MEDIA = Path('/var/lib/one-kvm/msd')
 GADGET = Path('/sys/kernel/config/usb_gadget/kvm')
+UDC_ROOT = Path('/sys/class/udc')
 LUN = GADGET / 'functions/mass_storage.disk0/lun.0'
 FUNCTIONS = ('ncm.usb0', 'mass_storage.disk0', 'uac2.usb0')
 PROFILE_DIR = Path('/run/vim4-onekvm-usb')
@@ -96,8 +97,9 @@ def replace_usb(target):
     config = GADGET / 'configs/c.1'
     udc = GADGET / 'UDC'
     controller = udc.read_text().strip()
+    was_bound = bool(controller)
     if not controller:
-        controllers = sorted(Path('/sys/class/udc').iterdir())
+        controllers = sorted(UDC_ROOT.iterdir())
         if not controllers:
             raise ValueError('VIM4 USB controller is unavailable')
         controller = controllers[0].name
@@ -112,7 +114,7 @@ def replace_usb(target):
         for name in state['links']:
             (config / name).symlink_to(GADGET / 'functions' / name)
 
-    if controller:
+    if was_bound:
         udc.write_text('\n')
         time.sleep(0.5)
     try:
@@ -120,7 +122,8 @@ def replace_usb(target):
         if controller and target['links']:
             udc.write_text(controller)
     except Exception:
-        udc.write_text('\n')
+        if udc.read_text().strip():
+            udc.write_text('\n')
         write(old)
         if controller and old['links']:
             udc.write_text(controller)
@@ -149,6 +152,12 @@ def nmcli(*args):
     if result.returncode:
         raise ValueError('USB network configuration failed: ' + result.stderr.strip())
     return result.stdout.strip()
+
+
+def settle_usb():
+    # Device nodes can precede their udev permissions. The unprivileged HID
+    # backend must not attempt to open a newly bound consumer node too early.
+    subprocess.run(['/usr/bin/udevadm', 'settle', '--timeout=3'], check=True, capture_output=True, timeout=5)
 
 
 def configure_network(mode):
@@ -202,6 +211,7 @@ def configure_profile(profile):
     ensure_functions(profile)
     replace_usb(target)
     try:
+        settle_usb()
         configure_network(profile['network'])
         save_json(profile_file('profile.json'), profile)
     except Exception:
@@ -284,7 +294,8 @@ def configure_media(name, cdrom, readonly):
             if profile:
                 configure_network(profile['network'])
         except Exception:
-            udc.write_text('\n')
+            if udc.read_text().strip():
+                udc.write_text('\n')
             for key in functions:
                 (config / key).unlink(missing_ok=True)
             (LUN / 'file').write_text('\n')
