@@ -696,7 +696,16 @@ impl SharedVideoPipeline {
 
     /// Subscribe to encoded frames
     pub fn subscribe(&self) -> EncodedVideoFrameReceiver {
-        let (tx, rx) = mpsc::channel(1);
+        // VIM4 captures continuously. A large IDR can take several frame periods
+        // to send; a one-slot queue loses its reference chain during that burst,
+        // then repeatedly requests more large IDRs. Bound the burst allowance
+        // to eight access units (133 ms at 60 fps); sustained slow readers still
+        // use the existing drop-and-keyframe recovery policy.
+        self.subscribe_with_capacity(if cfg!(feature = "vim4") { 8 } else { 1 })
+    }
+
+    fn subscribe_with_capacity(&self, capacity: usize) -> EncodedVideoFrameReceiver {
+        let (tx, rx) = mpsc::channel(capacity);
         if let Some(frame) = self.bootstrap_frame.read().clone() {
             let batch: EncodedBatch = vec![frame].into();
             let _ = tx.try_send(batch);
@@ -2492,7 +2501,7 @@ mod tests {
     fn bounded_prefetch_drops_only_with_pending_frame_and_output_backpressure() {
         let pipeline = delivery_test_pipeline();
         let mailbox = VideoFrameMailbox::new();
-        let mut receiver = pipeline.subscribe();
+        let mut receiver = pipeline.subscribe_with_capacity(1);
         let reservations = pipeline.reserve_outputs().unwrap();
         pipeline.broadcast_encoded_batch(vec![delivery_test_frame(1, true)].into(), reservations);
         assert!(pipeline.reserve_outputs().is_none());
@@ -2669,7 +2678,7 @@ mod tests {
         });
 
         pipeline.broadcast_encoded_batch(vec![bootstrap.clone()].into(), Vec::new());
-        let mut subscriber = pipeline.subscribe();
+        let mut subscriber = pipeline.subscribe_with_capacity(1);
         let received = subscriber
             .try_recv()
             .expect("cached bootstrap frame should seed the subscriber queue");
@@ -2711,7 +2720,7 @@ mod tests {
     #[test]
     fn encoded_batch_delivers_all_frames_in_order() {
         let pipeline = delivery_test_pipeline();
-        let mut receiver = pipeline.subscribe();
+        let mut receiver = pipeline.subscribe_with_capacity(1);
         let reservations = pipeline.reserve_outputs().unwrap();
         pipeline.broadcast_encoded_batch(
             vec![
@@ -2734,7 +2743,7 @@ mod tests {
     #[test]
     fn single_subscriber_backpressure_preserves_reference_chain() {
         let pipeline = delivery_test_pipeline();
-        let mut receiver = pipeline.subscribe();
+        let mut receiver = pipeline.subscribe_with_capacity(1);
         let reservations = pipeline.reserve_outputs().unwrap();
         pipeline.broadcast_encoded_batch(vec![delivery_test_frame(1, true)].into(), reservations);
         assert!(pipeline.reserve_outputs().is_none());
@@ -2749,6 +2758,25 @@ mod tests {
         assert_eq!(stats.encoded_frames_skipped_for_slow_subscribers, 0);
     }
 
+    #[cfg(feature = "vim4")]
+    #[test]
+    fn vim4_keyframe_send_burst_preserves_following_reference_frames() {
+        let pipeline = delivery_test_pipeline();
+        let mut receiver = pipeline.subscribe();
+        // Model capture continuing while the receiver sends a large keyframe.
+        for sequence in 1..=6 {
+            let reservations = pipeline.reserve_outputs().expect("burst capacity");
+            pipeline.broadcast_encoded_batch(
+                vec![delivery_test_frame(sequence, sequence == 1)].into(),
+                reservations,
+            );
+        }
+        for sequence in 1..=6 {
+            assert_eq!(receiver.try_recv().unwrap().sequence, sequence);
+        }
+        assert_eq!(pipeline.stats_snapshot().encoded_frames_skipped_for_slow_subscribers, 0);
+    }
+
     #[test]
     fn output_capacity_wakes_encoder_with_latest_raw_frame() {
         use std::sync::mpsc as sync_mpsc;
@@ -2756,7 +2784,7 @@ mod tests {
         let pipeline = delivery_test_pipeline();
         let mailbox = Arc::new(VideoFrameMailbox::new());
         *pipeline.frame_mailbox.lock() = Some(mailbox.clone());
-        let mut receiver = pipeline.subscribe();
+        let mut receiver = pipeline.subscribe_with_capacity(1);
         let reservations = pipeline.reserve_outputs().unwrap();
         pipeline.broadcast_encoded_batch(vec![delivery_test_frame(1, true)].into(), reservations);
         mailbox.publish(1, delivery_test_raw_frame(1));
@@ -2796,7 +2824,7 @@ mod tests {
         let pipeline = delivery_test_pipeline();
         let mailbox = Arc::new(VideoFrameMailbox::new());
         *pipeline.frame_mailbox.lock() = Some(mailbox.clone());
-        let receiver = pipeline.subscribe();
+        let receiver = pipeline.subscribe_with_capacity(1);
         let reservations = pipeline.reserve_outputs().unwrap();
         pipeline.broadcast_encoded_batch(vec![delivery_test_frame(1, true)].into(), reservations);
         mailbox.publish(1, delivery_test_raw_frame(1));
@@ -2825,8 +2853,8 @@ mod tests {
     #[test]
     fn slow_subscriber_is_isolated_and_resumes_at_keyframe() {
         let pipeline = delivery_test_pipeline();
-        let mut fast_receiver = pipeline.subscribe();
-        let mut slow_receiver = pipeline.subscribe();
+        let mut fast_receiver = pipeline.subscribe_with_capacity(1);
+        let mut slow_receiver = pipeline.subscribe_with_capacity(1);
         let reservations = pipeline.reserve_outputs().unwrap();
         pipeline.broadcast_encoded_batch(vec![delivery_test_frame(1, true)].into(), reservations);
         pipeline.keyframe_requested.store(false, Ordering::Release);
@@ -2866,7 +2894,7 @@ mod tests {
     #[test]
     fn send_statistics_include_successes_errors_and_duration() {
         let pipeline = delivery_test_pipeline();
-        let receiver = pipeline.subscribe();
+        let receiver = pipeline.subscribe_with_capacity(1);
         receiver.record_send(true);
         receiver.record_send(false);
         let stats = pipeline.stats_snapshot();
