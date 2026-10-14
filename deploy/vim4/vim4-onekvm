@@ -1,0 +1,97 @@
+#!/usr/bin/python3
+"""Restricted VIM4 media operations; board services retain gadget ownership."""
+import fcntl
+import os
+from pathlib import Path
+import stat
+import sys
+import time
+
+MEDIA = Path('/var/lib/one-kvm/msd')
+GADGET = Path('/sys/kernel/config/usb_gadget/kvm')
+LUN = GADGET / 'functions/mass_storage.disk0/lun.0'
+FUNCTIONS = ('ncm.usb0', 'mass_storage.disk0', 'uac2.usb0')
+
+
+def open_image(name, writable):
+    path = Path(name)
+    if path.parent not in (MEDIA / 'images', MEDIA / 'ventoy') or path.suffix.lower() not in ('.iso', '.img'):
+        raise ValueError('Image must be in the One-KVM media directory')
+    # Walk every parent without following symlinks, then give configfs the
+    # validated descriptor so replacing the path cannot change the image.
+    directory = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parent.parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        fd = os.open(path.name, (os.O_RDWR if writable else os.O_RDONLY) | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    finally:
+        os.close(directory)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_size < 512 or info.st_nlink != 1:
+        os.close(fd)
+        raise ValueError('Image must be a regular file of at least 512 bytes without hard links')
+    return fd
+
+
+def configure_media(name, cdrom, readonly):
+    fd = open_image(name, not readonly) if name else None
+    try:
+        old = {key: (LUN / key).read_text().strip() for key in ('file', 'cdrom', 'ro')}
+        if fd is None and not old['file']:
+            return
+        config = GADGET / 'configs/c.1'
+        udc = GADGET / 'UDC'
+        controller = udc.read_text().strip()
+        old_links = [key for key in FUNCTIONS if (config / key).is_symlink()]
+        if controller:
+            udc.write_text('\n')
+            time.sleep(0.5)
+        try:
+            for key in FUNCTIONS:
+                (config / key).unlink(missing_ok=True)
+            (LUN / 'file').write_text('\n')
+            (LUN / 'cdrom').write_text('1' if cdrom else '0')
+            (LUN / 'ro').write_text('1' if readonly else '0')
+            if fd is not None:
+                (LUN / 'file').write_text(f'/proc/self/fd/{fd}')
+            # Three HID functions plus NCM exhaust the IN endpoint budget.
+            links = ['mass_storage.disk0'] if fd is not None else ['ncm.usb0']
+            for key in links:
+                (config / key).symlink_to(GADGET / 'functions' / key)
+        except Exception:
+            for key in FUNCTIONS:
+                (config / key).unlink(missing_ok=True)
+            (LUN / 'file').write_text('\n')
+            for key in ('cdrom', 'ro', 'file'):
+                (LUN / key).write_text(old[key] or '\n')
+            for key in old_links:
+                (config / key).symlink_to(GADGET / 'functions' / key)
+            raise
+        finally:
+            if controller:
+                udc.write_text(controller)
+        os.sync()
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def main(args):
+    if len(args) != 4 or args[0] != 'media' or any(arg not in ('true', 'false') for arg in args[2:]):
+        raise ValueError('usage: vim4-onekvm media IMAGE CDROM READONLY')
+    configure_media(args[1], args[2] == 'true', args[2] == 'true' or args[3] == 'true')
+
+
+if __name__ == '__main__':
+    try:
+        fd = os.open('/run/lock/vim4-media.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'r+') as lock:
+            if os.fstat(lock.fileno()).st_uid != 0:
+                raise ValueError('Invalid media lock owner')
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            main(sys.argv[1:])
+    except (OSError, ValueError) as error:
+        print(error, file=sys.stderr)
+        sys.exit(1)

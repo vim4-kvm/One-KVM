@@ -204,6 +204,8 @@ impl OtgService {
     }
 
     pub async fn gadget_path(&self) -> Option<PathBuf> {
+        #[cfg(feature = "vim4")]
+        return Some(crate::platform::vim4::GADGET.into());
         let manager = self.manager.lock().await;
         manager.as_ref().map(|m| m.gadget_path().clone())
     }
@@ -221,6 +223,8 @@ impl OtgService {
     }
 
     pub async fn configure_msd_lun(&self, lun: u8, config: &MsdLunConfig) -> Result<()> {
+        #[cfg(feature = "vim4")]
+        return crate::platform::vim4::configure_media(lun, config).await;
         // Keep the manager locked across a possible UDC rebind so an OTG
         // reconcile cannot replace the gadget halfway through the media-type
         // transition.
@@ -256,6 +260,38 @@ impl OtgService {
         network: &OtgNetworkConfig,
         uac: &UacConfig,
     ) -> Result<()> {
+        #[cfg(feature = "vim4")]
+        {
+            // Never reconcile configfs here: the board service owns all
+            // descriptors, the UDC and the endpoint budget shared by the apps.
+            if network.enabled || uac.enabled {
+                return Err(AppError::Config(
+                    "VIM4 USB networking and microphone profiles are managed by board services"
+                        .into(),
+                ));
+            }
+            let mut state = self.state.write().await;
+            state.hid_paths =
+                (hid.backend == crate::config::HidBackend::Otg).then(|| HidDevicePaths {
+                    keyboard: Some("/dev/hidg0".into()),
+                    mouse_absolute: Some("/dev/hidg1".into()),
+                    mouse_relative: Some("/dev/hidg2".into()),
+                    consumer: None,
+                    udc: std::fs::read_to_string(format!("{}/UDC", crate::platform::vim4::GADGET))
+                        .ok()
+                        .map(|s| s.trim().into()),
+                    keyboard_leds_enabled: true,
+                });
+            state.gadget_active = true;
+            state.hid_enabled = state.hid_paths.is_some();
+            state.msd_enabled = msd.enabled;
+            *self.msd_function.write().await = if msd.enabled {
+                Some(MsdFunction::vim4(MsdInquiryStrings::from(msd)))
+            } else {
+                None
+            };
+            return Ok(());
+        }
         if !self.recovery_checked.load(Ordering::SeqCst) {
             if let Err(error) = NetworkBridgeRuntime::recover_stale_transaction() {
                 let message = format!("Failed to recover stale OTG network transaction: {error}");
@@ -317,6 +353,14 @@ impl OtgService {
     }
 
     pub async fn set_msd_lun_capacity(&self, capacity: u8) -> Result<()> {
+        #[cfg(feature = "vim4")]
+        return if capacity == 1 {
+            Ok(())
+        } else {
+            Err(AppError::BadRequest(
+                "VIM4 supports one virtual media LUN".into(),
+            ))
+        };
         if capacity != 1 && capacity != 8 {
             return Err(AppError::BadRequest(format!(
                 "MSD LUN capacity must be 1 or 8, got {capacity}"
@@ -619,6 +663,8 @@ impl OtgService {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
+        #[cfg(feature = "vim4")]
+        return Ok(());
         info!("Shutting down OTG service");
 
         {
@@ -687,6 +733,29 @@ impl From<&OtgDescriptorConfig> for GadgetDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "vim4")]
+    #[tokio::test]
+    async fn vim4_uses_existing_devices_without_creating_or_destroying_a_gadget() {
+        let service = OtgService::new();
+        let mut config = crate::config::AppConfig::default();
+        crate::platform::vim4::defaults(&mut config);
+        service
+            .apply_config(&config.hid, &config.msd, &config.otg_network, &config.uac)
+            .await
+            .unwrap();
+        let paths = service.hid_device_paths().await.unwrap();
+        assert_eq!(paths.mouse_absolute, Some(PathBuf::from("/dev/hidg1")));
+        assert_eq!(paths.mouse_relative, Some(PathBuf::from("/dev/hidg2")));
+        assert!(service.manager.lock().await.is_none());
+        service.shutdown().await.unwrap();
+        assert!(service.manager.lock().await.is_none());
+        config.otg_network.enabled = true;
+        assert!(service
+            .apply_config(&config.hid, &config.msd, &config.otg_network, &config.uac)
+            .await
+            .is_err());
+    }
 
     #[test]
     fn service_new_and_availability_probe() {

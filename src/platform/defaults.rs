@@ -5,6 +5,8 @@ use crate::config::AtxDriverType;
 use crate::config::HidBackend;
 
 pub fn apply(config: &mut AppConfig) {
+    #[cfg(feature = "vim4")]
+    crate::platform::vim4::defaults(config);
     #[cfg(not(windows))]
     {
         let _ = config;

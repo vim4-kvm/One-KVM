@@ -23,6 +23,39 @@ use super::{
 use crate::error::{AppError, Result};
 use crate::video::format::{PixelFormat, Resolution};
 
+#[cfg(feature = "vim4")]
+fn vim4_device() -> VideoDeviceInfo {
+    let input_status = crate::platform::vim4::input_status();
+    VideoDeviceInfo {
+        path: crate::platform::vim4::VIDEO_DEVICE.into(),
+        name: "VIM4 HDMI Input".into(),
+        driver: "vfm_cap".into(),
+        bus_info: "platform:vdin0".into(),
+        card: "VIM4 HDMI".into(),
+        formats: vec![FormatInfo {
+            format: PixelFormat::Nv21,
+            resolutions: vec![
+                ResolutionInfo::new(3840, 2160, vec![60.0]),
+                ResolutionInfo::new(1920, 1080, vec![60.0]),
+                ResolutionInfo::new(1280, 720, vec![60.0]),
+            ],
+            description: "HDMI DMA-buf".into(),
+        }],
+        capabilities: DeviceCapabilities {
+            video_capture: true,
+            streaming: true,
+            ..Default::default()
+        },
+        is_capture_card: true,
+        priority: 1000,
+        has_signal: input_status.state == super::VideoInputState::Locked,
+        control_mode: VideoControlMode::SourceFollowing,
+        input_status,
+        subdev_path: None,
+        bridge_kind: None,
+    }
+}
+
 /// Per-node probe limit; rkcif/RK628 ioctl chains can exceed 1s under contention.
 const DEVICE_PROBE_TIMEOUT_MS: u64 = 10_000;
 
@@ -188,6 +221,10 @@ impl VideoDevice {
     }
 
     pub fn input_status(&self) -> Result<VideoInputStatus> {
+        #[cfg(feature = "vim4")]
+        if self.path == Path::new(crate::platform::vim4::VIDEO_DEVICE) {
+            return Ok(crate::platform::vim4::input_status());
+        }
         let caps: V4l2rCapability = ioctl::querycap(&self.fd)
             .map_err(|e| AppError::VideoError(format!("Failed to query capabilities: {}", e)))?;
         Ok(self.probe_live_input(&caps).input_status)
@@ -289,6 +326,10 @@ impl VideoDevice {
 
     /// Get detailed device information
     pub fn info(&self) -> Result<VideoDeviceInfo> {
+        #[cfg(feature = "vim4")]
+        if self.path == Path::new(crate::platform::vim4::VIDEO_DEVICE) {
+            return Ok(vim4_device());
+        }
         let caps: V4l2rCapability = ioctl::querycap(&self.fd)
             .map_err(|e| AppError::VideoError(format!("Failed to query capabilities: {}", e)))?;
         let flags = caps.device_caps();
@@ -938,6 +979,10 @@ impl VideoDevice {
 
 /// Enumerate all video capture devices
 pub fn enumerate_devices() -> Result<Vec<VideoDeviceInfo>> {
+    #[cfg(feature = "vim4")]
+    if Path::new(crate::platform::vim4::VIDEO_DEVICE).exists() {
+        return Ok(vec![vim4_device()]);
+    }
     debug!("Enumerating video devices...");
 
     // First pass: collect candidates that pass the sysfs-based pre-filter.

@@ -400,8 +400,9 @@ mod ffmpeg {
         // RKMPP decode only exists on ARM builds where FFmpeg is compiled with RKMPP support.
         // Avoid compiling this file on x86/x64 where `AV_HWDEVICE_TYPE_RKMPP` doesn't exist.
         let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-        let enable_rkmpp = matches!(target_arch.as_str(), "aarch64" | "arm")
-            || std::env::var_os("CARGO_FEATURE_RKMPP").is_some();
+        let enable_rkmpp = std::env::var_os("CARGO_FEATURE_VIM4").is_none()
+            && (matches!(target_arch.as_str(), "aarch64" | "arm")
+                || std::env::var_os("CARGO_FEATURE_RKMPP").is_some());
         if enable_rkmpp {
             builder.file(ffmpeg_ram_dir.join("ffmpeg_ram_decode.cpp"));
             if enable_rkmpp {
@@ -459,8 +460,9 @@ mod ffmpeg {
             .unwrap();
 
         let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-        let enable_rkmpp = matches!(target_arch.as_str(), "aarch64" | "arm")
-            || std::env::var_os("CARGO_FEATURE_RKMPP").is_some();
+        let enable_rkmpp = std::env::var_os("CARGO_FEATURE_VIM4").is_none()
+            && (matches!(target_arch.as_str(), "aarch64" | "arm")
+                || std::env::var_os("CARGO_FEATURE_RKMPP").is_some());
         if enable_rkmpp {
             // Include RGA headers for NV16->NV12 conversion (RGA im2d API)
             let rga_sys_dirs = [

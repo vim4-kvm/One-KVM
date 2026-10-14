@@ -89,6 +89,14 @@ pub struct MsdFunction {
 }
 
 impl MsdFunction {
+    #[cfg(feature = "vim4")]
+    pub fn vim4(inquiry_strings: MsdInquiryStrings) -> Self {
+        Self {
+            name: "mass_storage.disk0".into(),
+            lun_capacity: 1,
+            inquiry_strings,
+        }
+    }
     pub fn new(instance: u8, lun_capacity: u8, inquiry_strings: MsdInquiryStrings) -> Result<Self> {
         if lun_capacity != 1 && lun_capacity != 8 {
             return Err(AppError::BadRequest(format!(
@@ -143,6 +151,8 @@ impl MsdFunction {
         lun: u8,
         config: &MsdLunConfig,
     ) -> Result<()> {
+        #[cfg(feature = "vim4")]
+        return crate::platform::vim4::configure_media(lun, config).await;
         let gadget_path = gadget_path.to_path_buf();
         let config = config.clone();
         let this = self.clone();
@@ -386,6 +396,8 @@ impl MsdFunction {
     }
 
     pub async fn disconnect_lun_async(&self, gadget_path: &Path, lun: u8) -> Result<()> {
+        #[cfg(feature = "vim4")]
+        return crate::platform::vim4::configure_media(lun, &MsdLunConfig::default()).await;
         let gadget_path = gadget_path.to_path_buf();
         let this = self.clone();
 

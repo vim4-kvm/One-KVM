@@ -1079,14 +1079,15 @@ pub fn bgr24_to_nv12(src: &[u8], dst: &mut [u8], width: i32, height: i32) -> Res
         return Err(YuvError::BufferTooSmall);
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "vim4"))]
     {
         let mut i420_buffer = vec![0u8; i420_size(w, h)];
         bgr24_to_i420(src, &mut i420_buffer, width, height)?;
         return i420_to_nv12(&i420_buffer, dst, width, height);
     }
 
-    #[cfg(not(windows))]
+    // Ubuntu 24.04's libyuv predates RGB24ToNV12.
+    #[cfg(not(any(windows, feature = "vim4")))]
     {
         let y_size = w * h;
         call_yuv!(RGB24ToNV12(

@@ -11,6 +11,9 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace, warn};
 
+#[cfg(feature = "vim4")]
+mod vim4;
+
 use super::device::{
     bridge as csi_bridge, enumerate_devices, find_best_device, is_csi_hdmi_bridge,
     parse_bridge_kind, resolve_video_input_config, select_recovery_device, VideoControlMode,
@@ -796,6 +799,11 @@ impl Streamer {
     /// DeviceLost recovery path.  This handles the common CSI/HDMI-bridge case where
     /// the source switches resolution and the driver requires a new `s_fmt` call.
     fn run_direct_capture(self: Arc<Self>, device_path: PathBuf, _initial_config: StreamerConfig) {
+        #[cfg(feature = "vim4")]
+        if device_path == std::path::Path::new(crate::platform::vim4::VIDEO_DEVICE) {
+            self.run_vim4_mjpeg(_initial_config);
+            return;
+        }
         const MAX_RETRIES: u32 = 5;
         const RETRY_DELAY_MS: u64 = 200;
         const IDLE_STOP_DELAY_SECS: u64 = 5;

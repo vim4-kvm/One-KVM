@@ -199,6 +199,8 @@ impl UpdateService {
         req: UpgradeRequest,
         shutdown_tx: broadcast::Sender<ShutdownAction>,
     ) -> Result<()> {
+        #[cfg(feature = "vim4")]
+        return Err(AppError::BadRequest("VIM4 uses the vim4-onekvm Ubuntu package; upstream binaries do not contain the VIM4 hardware adapter".into()));
         if req.channel.is_none() == req.target_version.is_none() {
             return Err(AppError::BadRequest(
                 "Provide exactly one of channel or target_version".to_string(),

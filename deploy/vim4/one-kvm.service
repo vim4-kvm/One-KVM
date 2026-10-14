@@ -1,0 +1,25 @@
+[Unit]
+Description=One-KVM on VIM4
+After=network.target vim4-kvm-hdmi.service vim4-kvm-gadget.service vim4-kvm-pd.service
+Requires=vim4-kvm-hdmi.service vim4-kvm-gadget.service vim4-kvm-pd.service
+Conflicts=nanokvm.service vim4-kvm.service
+
+[Service]
+User=khadas
+Group=khadas
+SupplementaryGroups=video input audio systemd-journal
+StateDirectory=one-kvm
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/one-kvm
+Environment=GST_PLUGIN_PATH=/usr/lib/vim4-kvm/gstreamer-1.0
+ExecStart=/opt/vim4-onekvm/one-kvm --data-dir /var/lib/one-kvm
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+# The vendor encoder lock is shared with NanoKVM and JetKVM.
+PrivateTmp=false
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -11,6 +11,7 @@ categories = ["embedded", "network-programming"]
 
 [features]
 default = ["desktop"]
+vim4 = ["desktop", "hwcodec/vim4", "libyuv/vim4", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 desktop = [
     "dep:tokio",
     "dep:tokio-util",
@@ -74,6 +75,9 @@ desktop = [
     "dep:windows-sys",
 ]
 [dependencies]
+gstreamer = { version = "0.24", optional = true }
+gstreamer-app = { version = "0.24", optional = true }
+gstreamer-video = { version = "0.24", optional = true }
 # Async runtime
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"], optional = true }
 tokio-util = { version = "0.7", features = ["rt"], optional = true }
