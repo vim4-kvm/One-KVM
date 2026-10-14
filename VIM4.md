@@ -76,6 +76,7 @@ GE2D 缩放使用私有 `libgst-aml-dma-allocator.so`，仅实现 amlvconv 调�
 ## 终端、扩展与看门狗
 
 网页终端使用 Ubuntu 的 ttyd，以 khadas 运行，经现有认证代理访问专用 Unix socket。
+包内私有副本只带程序和许可证，不安装或启用 Ubuntu 的独立 ttyd 守护服务。
 systemd 创建 `/run/one-kvm`（0700），不另外监听公网终端端口。
 Gostc 2.0.9、EasyTier 2.4.5、FRP 0.71.0 使用 SHA256 固定的 ARM64 上游制品，
 安装在 `/opt/vim4-onekvm/bin`，保留许可证；不覆盖其他应用的命令。

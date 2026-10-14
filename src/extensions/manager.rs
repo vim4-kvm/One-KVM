@@ -144,11 +144,7 @@ impl ExtensionManager {
 
         let launch = self.build_launch(id, config).await?;
 
-        tracing::info!(
-            "Starting extension {}: {}",
-            id,
-            id.binary_path().display()
-        );
+        tracing::info!("Starting extension {}: {}", id, id.binary_path().display());
 
         let mut child = Command::new(id.binary_path())
             .args(&launch.args)
@@ -157,6 +153,28 @@ impl ExtensionManager {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("Failed to start {}: {}", id, e))?;
+
+        // The terminal can open immediately after the start response. A spawned
+        // process is not yet a listening socket, especially on slower boards.
+        #[cfg(unix)]
+        if id == ExtensionId::Ttyd {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+                    return Err(format!("ttyd exited before listening: {status}"));
+                }
+                if tokio::net::UnixStream::connect(TTYD_SOCKET_PATH)
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err("ttyd did not create its terminal socket".into());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
 
         let logs = Arc::new(RwLock::new(VecDeque::with_capacity(LOG_BUFFER_SIZE)));
 
