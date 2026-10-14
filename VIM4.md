@@ -21,7 +21,9 @@
 虚拟介质经限定 sudo 助手操作 configfs，镜像只允许来自
 `/var/lib/one-kvm/msd/images` 或 `ventoy`，拒绝符号链接与硬链接。
 不支持多 LUN、应用修改 USB 描述符、USB 麦克风或 OTG 网桥；ATX 未连接。
-Ventoy 创建仍需要上游的 Ventoy 资源，普通 ISO/IMG 不依赖这些资源。
+Ubuntu 包将仓库内的 Ventoy 引导资源解压到 `/usr/share/vim4-onekvm/ventoy`，
+用于创建虚拟盘；用户盘保存在 `/var/lib/one-kvm/msd/ventoy`，升级不覆盖。
+普通 ISO/IMG 不依赖这些引导资源。虚拟盘测试使用同一套资源，缺失或解压失败时必须失败。
 
 ## 视频设置
 

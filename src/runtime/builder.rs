@@ -450,7 +450,12 @@ async fn build_msd(
     }
 
     let controller = MsdController::new(otg.clone(), config.msd.msd_dir_path());
-    if let Err(error) = controller.init(&data_dir.join("ventoy")).await {
+    let resource_dir = if cfg!(feature = "vim4") {
+        PathBuf::from("/usr/share/vim4-onekvm/ventoy")
+    } else {
+        data_dir.join("ventoy")
+    };
+    if let Err(error) = controller.init(&resource_dir).await {
         tracing::warn!("Failed to initialize MSD controller: {}", error);
         return None;
     }
