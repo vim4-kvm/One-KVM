@@ -1,0 +1,2 @@
+# The board's three original HID nodes are owned by the shared NanoKVM rule.
+SUBSYSTEM=="hidg", KERNEL=="hidg3", GROUP="input", MODE="0660"
