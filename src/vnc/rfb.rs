@@ -138,7 +138,6 @@ pub struct RfbPointerEvent {
 #[derive(Default, Clone, Copy)]
 struct ClientEncodings {
     has_tight: bool,
-    has_jpeg_quality: bool,
     has_h264: bool,
     has_resize: bool,
 }
@@ -417,8 +416,9 @@ impl RfbClient {
     fn configured_encoding_enabled(&self) -> bool {
         match self.config.encoding {
             VncEncoding::TightJpeg => {
+                // Tight decoders accept the JPEG subtype even when the client
+                // omits quality levels (macOS Screen Sharing, RealVNC).
                 self.encodings.has_tight
-                    && self.encodings.has_jpeg_quality
                     && matches!(self.pixel_format.bits_per_pixel, 16 | 32)
                     && self.pixel_format.true_colour
             }
@@ -656,7 +656,6 @@ fn parse_encodings(bytes: &[u8]) -> ClientEncodings {
             ENCODING_TIGHT => encodings.has_tight = true,
             ENCODING_H264 => encodings.has_h264 = true,
             ENCODING_DESKTOP_SIZE => encodings.has_resize = true,
-            -32..=-23 => encodings.has_jpeg_quality = true,
             _ => {}
         }
     }
@@ -1277,7 +1276,7 @@ mod tests {
         ));
         server
             .input_buffer
-            .extend_from_slice(&set_encodings_message(&[ENCODING_TIGHT, -32]));
+            .extend_from_slice(&set_encodings_message(&[ENCODING_TIGHT, 16, -223, 0]));
         assert!(matches!(
             server.decode_buffered_input().unwrap(),
             Some(RfbInputEvent::SetEncodings {
@@ -1411,7 +1410,6 @@ mod tests {
         let (mut server, mut client) = tcp_pair().await;
         server.encodings = ClientEncodings {
             has_tight: true,
-            has_jpeg_quality: true,
             has_resize: true,
             ..ClientEncodings::default()
         };
