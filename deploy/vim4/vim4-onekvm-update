@@ -1,0 +1,84 @@
+#!/usr/bin/python3
+"""Install a verified One-KVM package without changing board dependencies."""
+import fcntl
+import hashlib
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+
+PACKAGE = 'vim4-onekvm'
+DOWNLOADS = Path('/var/lib/one-kvm/updates')
+STAGING = Path('/var/lib/vim4-onekvm-update')
+
+
+def run(*args):
+    return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT,
+                                   env={**os.environ, 'LC_ALL': 'C'}, timeout=600).strip()
+
+
+def open_download(path):
+    if (path.parent.parent != DOWNLOADS or not path.parent.name.startswith('download-')
+            or path.name != 'update.deb'):
+        raise ValueError('Package must be in the One-KVM updates directory')
+    directory = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.parent.parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    finally:
+        os.close(directory)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not 0 < info.st_size <= 256 << 20:
+        os.close(fd)
+        raise ValueError('Invalid package type or size')
+    return os.fdopen(fd, 'rb')
+
+
+def validate_plan(plan):
+    for line in plan.splitlines():
+        if line.startswith('Remv ') or (line.startswith('Inst ') and line.split()[1] != PACKAGE):
+            raise ValueError('Deploy platform dependencies before updating One-KVM')
+
+
+def install(source, checksum, version):
+    if not re.fullmatch(r'[0-9a-f]{64}', checksum):
+        raise ValueError('Invalid SHA256')
+    if not re.fullmatch(r'\d+\.\d+\.\d+\+vim4\.\d{8}\.\d+', version):
+        raise ValueError('Expected a VIM4 Ubuntu package version')
+    STAGING.mkdir(mode=0o700, exist_ok=True)
+    with (STAGING / 'lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        # The unprivileged caller cannot replace this snapshot after validation.
+        with tempfile.TemporaryDirectory(dir=STAGING) as directory:
+            package = Path(directory) / 'update.deb'
+            with open_download(Path(source)) as incoming, package.open('wb') as output:
+                shutil.copyfileobj(incoming, output)
+            if hashlib.sha256(package.read_bytes()).hexdigest() != checksum:
+                raise ValueError('Package SHA256 mismatch')
+            for field, expected in [('Package', PACKAGE), ('Architecture', 'arm64'), ('Version', version)]:
+                if run('dpkg-deb', '-f', str(package), field) != expected:
+                    raise ValueError('Package metadata does not match the requested update')
+            current = run('dpkg-query', '-W', '-f=${Version}', PACKAGE)
+            run('dpkg', '--compare-versions', version, 'gt', current)
+            validate_plan(run('apt-get', '--simulate', '--no-remove', 'install', str(package)))
+            run('dpkg', '--force-confdef', '--force-confold', '-i', str(package))
+            if run('dpkg', '--verify', PACKAGE):
+                raise ValueError('Installed package verification failed')
+            os.sync()
+
+
+if __name__ == '__main__':
+    try:
+        if len(sys.argv) != 4:
+            raise ValueError('usage: vim4-onekvm-update PACKAGE SHA256 VERSION')
+        install(*sys.argv[1:])
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(error, file=sys.stderr)
+        sys.exit(1)

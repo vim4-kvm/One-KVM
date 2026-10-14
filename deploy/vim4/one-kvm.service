@@ -7,7 +7,9 @@ Conflicts=nanokvm.service vim4-kvm.service
 [Service]
 User=khadas
 Group=khadas
-SupplementaryGroups=video input audio systemd-journal
+SupplementaryGroups=video input audio systemd-journal vim4-watchdog
+RuntimeDirectory=one-kvm
+RuntimeDirectoryMode=0700
 StateDirectory=one-kvm
 StateDirectoryMode=0700
 WorkingDirectory=/var/lib/one-kvm

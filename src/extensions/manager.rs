@@ -145,10 +145,9 @@ impl ExtensionManager {
         let launch = self.build_launch(id, config).await?;
 
         tracing::info!(
-            "Starting extension {}: {} {}",
+            "Starting extension {}: {}",
             id,
-            id.binary_path().display(),
-            launch.args.join(" ")
+            id.binary_path().display()
         );
 
         let mut child = Command::new(id.binary_path())

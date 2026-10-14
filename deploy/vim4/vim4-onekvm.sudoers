@@ -1,1 +1,2 @@
 khadas ALL=(root) NOPASSWD: /usr/libexec/vim4-onekvm
+khadas ALL=(root) NOPASSWD: /usr/libexec/vim4-onekvm-update

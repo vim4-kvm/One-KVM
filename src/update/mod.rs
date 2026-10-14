@@ -7,12 +7,19 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{broadcast, RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore, broadcast};
 
 use crate::error::{AppError, Result};
 use crate::state::ShutdownAction;
 
+#[cfg(feature = "vim4")]
+mod vim4;
+
+#[cfg(not(feature = "vim4"))]
 const DEFAULT_UPDATE_BASE_URL: &str = "https://update.one-kvm.cn";
+#[cfg(feature = "vim4")]
+const DEFAULT_UPDATE_BASE_URL: &str =
+    "https://github.com/vim4-kvm/vim4-kvm/releases/latest/download";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -199,8 +206,6 @@ impl UpdateService {
         req: UpgradeRequest,
         shutdown_tx: broadcast::Sender<ShutdownAction>,
     ) -> Result<()> {
-        #[cfg(feature = "vim4")]
-        return Err(AppError::BadRequest("VIM4 uses the vim4-onekvm Ubuntu package; upstream binaries do not contain the VIM4 hardware adapter".into()));
         if req.channel.is_none() == req.target_version.is_none() {
             return Err(AppError::BadRequest(
                 "Provide exactly one of channel or target_version".to_string(),
@@ -289,13 +294,21 @@ impl UpdateService {
         )
         .await;
 
+        #[cfg(feature = "vim4")]
+        let download_dir = {
+            tokio::fs::create_dir_all("/var/lib/one-kvm/updates").await?;
+            tempfile::Builder::new()
+                .prefix("download-")
+                .tempdir_in("/var/lib/one-kvm/updates")?
+        };
+        #[cfg(not(feature = "vim4"))]
         let download_dir = tempfile::Builder::new()
             .prefix("one-kvm-update-")
             .tempdir()
             .map_err(|e| {
                 AppError::Internal(format!("Failed to create update temp directory: {}", e))
             })?;
-        let staging_path = download_dir.path().join("tmpfile");
+        let staging_path = download_dir.path().join("update.deb");
 
         let artifact_url = self.resolve_url(&artifact.url);
         self.download_and_verify(&artifact_url, &staging_path, &artifact)
@@ -310,6 +323,9 @@ impl UpdateService {
         )
         .await;
 
+        #[cfg(feature = "vim4")]
+        let restart_exe = vim4::install(&staging_path, &artifact.sha256, &target_version).await?;
+        #[cfg(not(feature = "vim4"))]
         let restart_exe = self.install_binary(&staging_path).await?;
         drop(download_dir);
 
@@ -349,11 +365,20 @@ impl UpdateService {
         let mut stream = response.bytes_stream();
         let mut downloaded: u64 = 0;
 
+        #[cfg(feature = "vim4")]
+        if artifact.size == 0 || artifact.size > 256 << 20 {
+            return Err(AppError::BadRequest("Invalid VIM4 package size".into()));
+        }
+
         while let Some(chunk) = stream.next().await {
             let chunk = chunk
                 .map_err(|e| AppError::Internal(format!("Read download stream failed: {}", e)))?;
-            file.write_all(&chunk).await?;
             downloaded += chunk.len() as u64;
+            #[cfg(feature = "vim4")]
+            if downloaded > artifact.size {
+                return Err(AppError::BadRequest("Download exceeds package size".into()));
+            }
+            file.write_all(&chunk).await?;
 
             if artifact.size > 0 {
                 let ratio = (downloaded as f64 / artifact.size as f64).clamp(0.0, 1.0);
@@ -406,6 +431,7 @@ impl UpdateService {
         Ok(())
     }
 
+    #[cfg(not(feature = "vim4"))]
     async fn install_binary(&self, staging_path: &Path) -> Result<PathBuf> {
         let current_exe = std::env::current_exe()
             .map_err(|e| AppError::Internal(format!("Failed to get current exe path: {}", e)))?;
@@ -437,9 +463,19 @@ impl UpdateService {
     }
 
     async fn fetch_manifests(&self) -> Result<(ChannelsManifest, ReleasesManifest)> {
-        let channels = self.fetch_json("/v1/channels.json").await?;
-        let releases = self.fetch_json("/v1/releases.json").await?;
-        Ok((channels, releases))
+        #[cfg(feature = "vim4")]
+        {
+            return Ok((
+                self.fetch_json("/onekvm-channels.json").await?,
+                self.fetch_json("/onekvm-releases.json").await?,
+            ));
+        }
+        #[cfg(not(feature = "vim4"))]
+        {
+            let channels = self.fetch_json("/v1/channels.json").await?;
+            let releases = self.fetch_json("/v1/releases.json").await?;
+            Ok((channels, releases))
+        }
     }
 
     async fn fetch_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T> {
@@ -449,7 +485,14 @@ impl UpdateService {
             .get(&url)
             .send()
             .await
-            .map_err(|e| AppError::Internal(format!("Failed to fetch {}: {}", url, e)))?
+            .map_err(|e| AppError::Internal(format!("Failed to fetch {}: {}", url, e)))?;
+        #[cfg(feature = "vim4")]
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(AppError::NotFound(
+                "No VIM4 Ubuntu update has been published on this channel yet".into(),
+            ));
+        }
+        let response = response
             .error_for_status()
             .map_err(|e| AppError::Internal(format!("Request failed {}: {}", url, e)))?;
 
@@ -493,6 +536,11 @@ impl UpdateService {
 }
 
 fn current_version_for_update() -> String {
+    #[cfg(feature = "vim4")]
+    return std::fs::read_to_string("/opt/vim4-onekvm/version")
+        .map(|value| value.trim().to_string())
+        .unwrap_or_else(|_| "0.0.0+vim4.00000000.0".into());
+    #[cfg(not(feature = "vim4"))]
     std::env::var("ONE_KVM_UPDATE_CURRENT_VERSION")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -510,27 +558,32 @@ fn compare_versions(a: &str, b: &str) -> Result<std::cmp::Ordering> {
     Ok(compare_version_parts(&pa, &pb))
 }
 
-fn parse_version_parts(input: &str) -> Result<[u64; 3]> {
-    let parts: Vec<&str> = input.split('.').collect();
-    if parts.len() != 3 {
-        return Err(AppError::Internal(format!(
-            "Invalid version {}, expected x.x.x",
-            input
-        )));
-    }
-    let mut out = [0u64; 3];
-    for (i, p) in parts.iter().enumerate() {
-        if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
+fn parse_version_parts(input: &str) -> Result<Vec<u64>> {
+    #[cfg(feature = "vim4")]
+    return vim4::version_parts(input);
+    #[cfg(not(feature = "vim4"))]
+    {
+        let parts: Vec<&str> = input.split('.').collect();
+        if parts.len() != 3 {
             return Err(AppError::Internal(format!(
-                "Invalid version {}, expected numeric x.x.x",
+                "Invalid version {}, expected x.x.x",
                 input
             )));
         }
-        out[i] = p
-            .parse::<u64>()
-            .map_err(|e| AppError::Internal(format!("Invalid version component {}: {}", p, e)))?;
+        let mut out = [0u64; 3];
+        for (i, p) in parts.iter().enumerate() {
+            if p.is_empty() || !p.chars().all(|c| c.is_ascii_digit()) {
+                return Err(AppError::Internal(format!(
+                    "Invalid version {}, expected numeric x.x.x",
+                    input
+                )));
+            }
+            out[i] = p.parse::<u64>().map_err(|e| {
+                AppError::Internal(format!("Invalid version component {}: {}", p, e))
+            })?;
+        }
+        Ok(out.to_vec())
     }
-    Ok(out)
 }
 
 fn channel_head_version(channels: &ChannelsManifest, channel: UpdateChannel) -> String {
@@ -540,8 +593,8 @@ fn channel_head_version(channels: &ChannelsManifest, channel: UpdateChannel) -> 
     }
 }
 
-fn compare_version_parts(a: &[u64; 3], b: &[u64; 3]) -> std::cmp::Ordering {
-    a[0].cmp(&b[0]).then(a[1].cmp(&b[1])).then(a[2].cmp(&b[2]))
+fn compare_version_parts(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
+    a.cmp(b)
 }
 
 async fn compute_file_sha256(path: &Path) -> Result<String> {
@@ -574,19 +627,24 @@ fn normalize_sha256(input: &str) -> Option<String> {
 }
 
 fn current_target_triple() -> Result<String> {
-    let triple = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
-        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
-        ("linux", "arm") => "armv7-unknown-linux-gnueabihf",
-        _ => {
-            return Err(AppError::BadRequest(format!(
-                "Unsupported platform {}-{}",
-                std::env::consts::OS,
-                std::env::consts::ARCH
-            )));
-        }
-    };
-    Ok(triple.to_string())
+    #[cfg(feature = "vim4")]
+    return Ok("vim4-ubuntu-arm64".into());
+    #[cfg(not(feature = "vim4"))]
+    {
+        let triple = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+            ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+            ("linux", "arm") => "armv7-unknown-linux-gnueabihf",
+            _ => {
+                return Err(AppError::BadRequest(format!(
+                    "Unsupported platform {}-{}",
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                )));
+            }
+        };
+        Ok(triple.to_string())
+    }
 }
 
 #[cfg(test)]

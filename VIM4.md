@@ -66,7 +66,25 @@ GE2D 缩放使用私有 `libgst-aml-dma-allocator.so`，仅实现 amlvconv 调�
 工作区 `build onekvm` 输出 `build/onekvm`；`vim4-onekvm` deb 安装到
 `/opt/vim4-onekvm`，数据目录为 `/var/lib/one-kvm`。安装不创建账户，首次网页
 设置独立账户；升级保留配置与账户。禁止安装上游通用 ARM/Rockchip 在线更新包，
-应使用工作区构建的 Ubuntu deb。
+应使用工作区构建的 Ubuntu deb。网页升级仅接收 `vim4-ubuntu-arm64` 制品和
+`x.y.z+vim4.YYYYMMDD.N` 版本，校验大小与 SHA256，再由限定助手验证包名、架构、
+版本及 APT 依赖计划。需要改动平台依赖时拒绝单应用升级；安装核验后重启应用。
+默认更新源是 vim4-kvm/vim4-kvm 的 GitHub Release；构建包附带
+`onekvm-channels.json`、`onekvm-releases.json`，发布时与 deb 一起上传。
+没有发布清单时界面明确报告暂无此通道更新，不回退到上游通用二进制。
+
+## 终端、扩展与看门狗
+
+网页终端使用 Ubuntu 的 ttyd，以 khadas 运行，经现有认证代理访问专用 Unix socket。
+systemd 创建 `/run/one-kvm`（0700），不另外监听公网终端端口。
+Gostc 2.0.9、EasyTier 2.4.5、FRP 0.71.0 使用 SHA256 固定的 ARM64 上游制品，
+安装在 `/opt/vim4-onekvm/bin`，保留许可证；不覆盖其他应用的命令。
+扩展默认关闭，远程连通需要用户填写自己的服务器配置。只有 EasyTier 程序带
+`cap_net_admin`，用于其 TUN 网络；应用本身不获得该能力。扩展启停日志不记录含密钥的参数。
+
+看门狗设备通过独立 `vim4-watchdog` 组开放给服务，未把 khadas 加入全局设备组。
+网页开启后应用负责喂狗，正常关闭或切换应用时调用原有安全关闭流程。
+不修改 nowayout；禁止用“强杀应用导致复位”代替普通部署验收。
 
 ## 切换
 

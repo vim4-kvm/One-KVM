@@ -5296,7 +5296,7 @@ watch(isWindows, () => {
 
           <!-- About Section -->
           <div v-show="activeSection === 'about'" class="space-y-4">
-            <Card v-if="!isVim4">
+            <Card>
               <CardHeader class="flex flex-row items-start justify-between space-y-0">
                 <div class="space-y-1.5">
                   <CardTitle>{{ t('settings.onlineUpgrade') }}</CardTitle>

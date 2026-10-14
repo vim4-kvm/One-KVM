@@ -12,6 +12,16 @@ pub fn default_binary_path(id: ExtensionId) -> &'static str {
 }
 
 pub fn binary_path(id: ExtensionId) -> PathBuf {
+    #[cfg(feature = "vim4")]
+    if id != ExtensionId::Ttyd {
+        let name = match id {
+            ExtensionId::Gostc => "gostc",
+            ExtensionId::Easytier => "easytier-core",
+            ExtensionId::Frpc => "frpc",
+            ExtensionId::Ttyd => unreachable!(),
+        };
+        return PathBuf::from("/opt/vim4-onekvm/bin").join(name);
+    }
     PathBuf::from(default_binary_path(id))
 }
 

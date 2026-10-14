@@ -1,0 +1,2 @@
+# Only the application service receives this supplementary group.
+SUBSYSTEM=="watchdog", KERNEL=="watchdog*", GROUP="vim4-watchdog", MODE="0660"
