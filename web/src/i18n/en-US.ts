@@ -264,6 +264,7 @@ export default {
     bitrateSpeed: 'Speed',
     bitrateBalanced: 'Balanced',
     bitrateQuality: 'Quality',
+    bitrateMaximum: 'Maximum',
     browserUnsupported: 'Browser unsupported',
     backendSoftware: 'Software',
     backendAuto: 'Auto',
@@ -1283,7 +1284,7 @@ export default {
     relay: 'TURN Relay',
   },
   help: {
-    videoBitratePreset: 'Speed: lowest latency, best for slow networks. Balanced: good quality and latency. Quality: best visual, needs good bandwidth',
+    videoBitratePreset: 'Speed: 1 Mbps; Balanced: 4 Mbps; Quality: 8 Mbps; Maximum: 12 Mbps. Higher bitrates preserve more detail and require more bandwidth. Actual bitrate varies with the scene',
     absoluteMode: 'Absolute mode maps mouse coordinates directly, suitable for most scenarios',
     relativeMode: 'Relative mode sends mouse movement delta, for games or special software',
     mouseThrottle: 'Send interval controls mouse event frequency. Higher values reduce network load',

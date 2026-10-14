@@ -264,6 +264,7 @@ export default {
     bitrateSpeed: '速度优先',
     bitrateBalanced: '均衡',
     bitrateQuality: '质量优先',
+    bitrateMaximum: '最高质量',
     browserUnsupported: '浏览器不支持',
     backendSoftware: '软件编码',
     backendAuto: '自动',
@@ -1282,7 +1283,7 @@ export default {
     relay: 'TURN 中继',
   },
   help: {
-    videoBitratePreset: '速度优先：最低延迟，适合网络较差的场景；均衡：画质和延迟平衡；质量优先：最佳画质，需要较好的网络带宽',
+    videoBitratePreset: '速度优先：1 Mbps；均衡：4 Mbps；质量优先：8 Mbps；最高质量：12 Mbps。码率越高，画面细节保留越多，需要的网络带宽也越大。实际码率随画面变化',
     absoluteMode: '绝对定位模式直接映射鼠标坐标，适用于大多数场景',
     relativeMode: '相对定位模式发送鼠标移动增量，适用于游戏或特殊软件',
     mouseThrottle: '发送间隔控制鼠标事件的发送频率，较大的值可减少网络负载',

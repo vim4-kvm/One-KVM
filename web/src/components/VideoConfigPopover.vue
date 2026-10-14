@@ -176,9 +176,20 @@ const selectedDevice = ref<string>('')
 const selectedFormat = ref<string>('')
 const selectedResolution = ref<string>('')
 const selectedFps = ref<number | null>(30)
-const selectedBitratePreset = ref<'Speed' | 'Balanced' | 'Quality' | 'Custom'>('Balanced')
+type BitrateChoice = 'Speed' | 'Balanced' | 'Quality' | 'Maximum'
+const bitrateChoices = [
+  { type: 'Speed', label: 'bitrateSpeed', mbps: 1, icon: Zap },
+  { type: 'Balanced', label: 'bitrateBalanced', mbps: 4, icon: Scale },
+  { type: 'Quality', label: 'bitrateQuality', mbps: 8, icon: Image },
+  { type: 'Maximum', label: 'bitrateMaximum', mbps: 12, icon: Image },
+] as const
+const selectedBitratePreset = ref<BitrateChoice | 'Custom'>('Balanced')
 watch(() => configStore.stream?.bitrate_preset, preset => {
-  if (preset) selectedBitratePreset.value = preset.type
+  if (preset) {
+    selectedBitratePreset.value = preset.type === 'Custom' && preset.value === 12000
+      ? 'Maximum'
+      : preset.type
+  }
 }, { immediate: true })
 const isDirty = ref(false)
 
@@ -439,11 +450,14 @@ function handleFpsChange(fps: unknown) {
   isDirty.value = true
 }
 
-async function applyBitratePreset(preset: 'Speed' | 'Balanced' | 'Quality') {
+async function applyBitratePreset(preset: BitrateChoice) {
   if (applyingBitrate.value) return
   applyingBitrate.value = true
   try {
-    const bitratePreset: BitratePreset = { type: preset }
+    // Keep the highest tier compatible with the existing persisted/API schema.
+    const bitratePreset: BitratePreset = preset === 'Maximum'
+      ? { type: 'Custom', value: 12000 }
+      : { type: preset }
     await streamApi.setBitratePreset(bitratePreset)
   } catch (e) {
     console.info('[VideoConfig] Failed to apply bitrate preset:', e)
@@ -452,7 +466,7 @@ async function applyBitratePreset(preset: 'Speed' | 'Balanced' | 'Quality') {
   }
 }
 
-function handleBitratePresetChange(preset: 'Speed' | 'Balanced' | 'Quality') {
+function handleBitratePresetChange(preset: BitrateChoice) {
   selectedBitratePreset.value = preset
   if (props.videoMode !== 'mjpeg') {
     applyBitratePreset(preset)
@@ -664,45 +678,23 @@ watch(
               <Label class="text-xs text-muted-foreground">{{ t('actionbar.bitratePreset') }}</Label>
               <HelpTooltip :content="t('help.videoBitratePreset')" icon-size="sm" />
             </div>
-            <div class="grid grid-cols-3 gap-1.5">
+            <div class="grid grid-cols-4 gap-1.5">
               <Button
+                v-for="choice in bitrateChoices"
+                :key="choice.type"
                 variant="outline"
                 size="sm"
                 :class="[
                   'h-auto py-1.5 px-2 flex flex-col items-center gap-0.5',
-                  selectedBitratePreset === 'Speed' && 'border-primary bg-primary/10'
+                  selectedBitratePreset === choice.type && 'border-primary bg-primary/10'
                 ]"
                 :disabled="applyingBitrate"
-                @click="handleBitratePresetChange('Speed')"
+                :aria-pressed="selectedBitratePreset === choice.type"
+                @click="handleBitratePresetChange(choice.type)"
               >
-                <Zap class="size-3.5" />
-                <span class="text-[10px] font-medium">{{ t('actionbar.bitrateSpeed') }}</span>
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                :class="[
-                  'h-auto py-1.5 px-2 flex flex-col items-center gap-0.5',
-                  selectedBitratePreset === 'Balanced' && 'border-primary bg-primary/10'
-                ]"
-                :disabled="applyingBitrate"
-                @click="handleBitratePresetChange('Balanced')"
-              >
-                <Scale class="size-3.5" />
-                <span class="text-[10px] font-medium">{{ t('actionbar.bitrateBalanced') }}</span>
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                :class="[
-                  'h-auto py-1.5 px-2 flex flex-col items-center gap-0.5',
-                  selectedBitratePreset === 'Quality' && 'border-primary bg-primary/10'
-                ]"
-                :disabled="applyingBitrate"
-                @click="handleBitratePresetChange('Quality')"
-              >
-                <Image class="size-3.5" />
-                <span class="text-[10px] font-medium">{{ t('actionbar.bitrateQuality') }}</span>
+                <component :is="choice.icon" class="size-3.5" />
+                <span class="text-[10px] font-medium">{{ t(`actionbar.${choice.label}`) }}</span>
+                <span class="text-[10px] text-muted-foreground tabular-nums">{{ choice.mbps }} Mbps</span>
               </Button>
             </div>
           </div>
