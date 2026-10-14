@@ -286,7 +286,12 @@ impl UsbCoordinator {
             }
 
             let msd = MsdController::new(self.otg.clone(), new_config.msd_dir_path());
-            msd.init(&self.data_dir.join("ventoy"))
+            let resources = if cfg!(feature = "vim4") {
+                PathBuf::from("/usr/share/vim4-onekvm/ventoy")
+            } else {
+                self.data_dir.join("ventoy")
+            };
+            msd.init(&resources)
                 .await
                 .map_err(|error| AppError::Config(format!("MSD initialization failed: {error}")))?;
             msd.set_event_bus(self.events.clone()).await;
