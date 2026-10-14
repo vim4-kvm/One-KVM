@@ -392,7 +392,12 @@ pub fn run(config: &crate::config::AppConfig) -> OtgSelfCheckResponse {
     }
 
     let gadget_names = list_dir_names(gadget_root);
-    let one_kvm_path = gadget_root.join("one-kvm");
+    let gadget_name = if cfg!(feature = "vim4") {
+        "kvm"
+    } else {
+        "one-kvm"
+    };
+    let one_kvm_path = gadget_root.join(gadget_name);
     let one_kvm_exists = one_kvm_path.exists();
     if one_kvm_exists {
         push_otg_check(
@@ -422,7 +427,11 @@ pub fn run(config: &crate::config::AppConfig) -> OtgSelfCheckResponse {
 
     let other_gadgets = gadget_names
         .iter()
-        .filter(|name| name.as_str() != "one-kvm")
+        .filter(|name| name.as_str() != gadget_name)
+        .filter(|name| {
+            !cfg!(feature = "vim4")
+                || read_trimmed(&gadget_root.join(name).join("UDC")).is_some_and(|s| !s.is_empty())
+        })
         .cloned()
         .collect::<Vec<_>>();
     if other_gadgets.is_empty() {
@@ -475,14 +484,19 @@ pub fn run(config: &crate::config::AppConfig) -> OtgSelfCheckResponse {
             bound_udc = Some(current_udc);
         }
 
-        let functions_path = one_kvm_path.join("functions");
+        // Board services retain unlinked function instances for other KVMs.
+        let functions_path = one_kvm_path.join(if cfg!(feature = "vim4") {
+            "configs/c.1"
+        } else {
+            "functions"
+        });
         let function_names = list_dir_names(&functions_path)
             .into_iter()
-            .filter(|name| name.contains(".usb"))
+            .filter(|name| name.contains('.'))
             .collect::<Vec<_>>();
         let hid_functions = function_names
             .iter()
-            .filter(|name| name.starts_with("hid.usb"))
+            .filter(|name| name.starts_with("hid."))
             .cloned()
             .collect::<Vec<_>>();
         let network_functions = function_names
@@ -641,7 +655,7 @@ pub fn run(config: &crate::config::AppConfig) -> OtgSelfCheckResponse {
 
             let linked_functions = list_dir_names(&config_path)
                 .into_iter()
-                .filter(|name| name.contains(".usb"))
+                .filter(|name| name.contains('.'))
                 .collect::<Vec<_>>();
             let missing_links = function_names
                 .iter()
@@ -675,7 +689,13 @@ pub fn run(config: &crate::config::AppConfig) -> OtgSelfCheckResponse {
         let missing_hid_devices = hid_functions
             .iter()
             .filter_map(|name| {
-                let index = name.strip_prefix("hid.usb")?.parse::<u8>().ok()?;
+                let index = match name.as_str() {
+                    "hid.keyboard" => 0,
+                    "hid.mouse_abs" => 1,
+                    "hid.mouse_rel" => 2,
+                    "hid.consumer" => 3,
+                    _ => name.strip_prefix("hid.usb")?.parse::<u8>().ok()?,
+                };
                 let dev_path = std::path::PathBuf::from(format!("/dev/hidg{}", index));
                 if dev_path.exists() {
                     None

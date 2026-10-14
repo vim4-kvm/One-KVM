@@ -77,6 +77,13 @@ impl UsbCoordinator {
                 }
             }
 
+            #[cfg(feature = "vim4")]
+            if gadget_rebuilt {
+                // Release held input while the old profile is still bound.
+                // LED-feedback-only changes may not require a USB rebind.
+                self.hid.reload(HidBackendType::None).await?;
+            }
+
             if transitioning_away_from_otg {
                 self.apply_hid(
                     &old_config.hid,

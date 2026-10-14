@@ -1,4 +1,9 @@
 export default {
+  vim4Usb: {
+    endpoints: '端点预算：{count} / 5（启用虚拟盘时预留 1 个）。超过上限时请关闭部分功能后再保存。',
+    hint: '保存会让被控机重新识别 USB 设备，请先在被控机安全弹出虚拟盘。键鼠及多媒体键各占 1 个 IN 端点，网卡占 2 个，麦克风和已挂载虚拟盘各占 1 个；VIM4 最多同时使用 5 个。关闭 One-KVM 后恢复原有 USB 配置。键盘指示灯选项控制状态反馈。虚拟盘固定为一个驱动器，使用应用管理的存储目录。',
+    network: 'USB 网卡提供独立的共享网络（NetworkManager 分配地址并提供 DHCP/NAT）；暂不支持桥接现有以太网。USB 麦克风为 48 kHz 双声道，浏览器采集需要 HTTPS 或安全上下文。',
+  },
   vim4Video: {
     title: 'VIM4 视频设置', applied: '设置已应用',
     outputSize: '输出分辨率上限', outputFps: '输出帧率上限', source: '跟随输入',

@@ -5,6 +5,76 @@ use crate::video::format::{PixelFormat, Resolution};
 pub const VIDEO_DEVICE: &str = "/dev/video_cap";
 pub const GADGET: &str = "/sys/kernel/config/usb_gadget/kvm";
 
+pub fn hid_paths(hid: &crate::config::HidConfig) -> crate::otg::HidDevicePaths {
+    let functions = hid.constrained_otg_functions();
+    crate::otg::HidDevicePaths {
+        keyboard: functions.keyboard.then(|| "/dev/hidg0".into()),
+        mouse_absolute: functions.mouse_absolute.then(|| "/dev/hidg1".into()),
+        mouse_relative: functions.mouse_relative.then(|| "/dev/hidg2".into()),
+        consumer: functions.consumer.then(|| "/dev/hidg3".into()),
+        udc: hid.resolved_otg_udc(),
+        keyboard_leds_enabled: hid.effective_otg_keyboard_leds(),
+    }
+}
+
+pub async fn configure_usb(
+    hid: &crate::config::HidConfig,
+    msd: &crate::config::MsdConfig,
+    network: &crate::config::OtgNetworkConfig,
+    uac: &crate::config::UacConfig,
+) -> crate::error::Result<()> {
+    use crate::error::AppError;
+    if !network.bridge_interface.is_empty() {
+        return Err(AppError::BadRequest("VIM4 USB networking uses a dedicated shared connection; Ethernet bridging is unavailable".into()));
+    }
+    let mut functions = hid.constrained_otg_functions();
+    if hid.backend != HidBackend::Otg {
+        functions.keyboard = false;
+        functions.mouse_absolute = false;
+        functions.mouse_relative = false;
+        functions.consumer = false;
+    }
+    let endpoints = u8::from(functions.keyboard)
+        + u8::from(functions.mouse_absolute)
+        + u8::from(functions.mouse_relative)
+        + u8::from(functions.consumer)
+        + u8::from(network.enabled) * 2
+        + u8::from(uac.enabled)
+        + u8::from(msd.enabled);
+    if endpoints > 5 {
+        return Err(AppError::BadRequest("VIM4 supports at most 5 USB IN endpoints; disable some HID, network, microphone or virtual media functions".into()));
+    }
+    let profile = serde_json::json!({
+        "hid": functions,
+        "descriptor": {
+            "idVendor": format!("0x{:04x}", hid.otg_descriptor.vendor_id),
+            "idProduct": format!("0x{:04x}", hid.otg_descriptor.product_id),
+            "strings/0x409/manufacturer": hid.otg_descriptor.manufacturer,
+            "strings/0x409/product": hid.otg_descriptor.product,
+            "strings/0x409/serialnumber": hid.otg_descriptor.serial_number.as_deref().filter(|s| !s.is_empty()),
+        },
+        "network": if network.enabled { network.driver_mode.function_name() } else { "" },
+        "uac": uac.enabled,
+        "inquiry": { "flash": msd.flash_inquiry_string, "cdrom": msd.cdrom_inquiry_string },
+    });
+    let output = tokio::process::Command::new("sudo")
+        .args([
+            "-n",
+            "/usr/libexec/vim4-onekvm",
+            "usb",
+            &profile.to_string(),
+        ])
+        .output()
+        .await
+        .map_err(|e| AppError::Config(e.to_string()))?;
+    if !output.status.success() {
+        return Err(AppError::BadRequest(
+            String::from_utf8_lossy(&output.stderr).trim().into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_bitrate(preset: crate::config::BitratePreset) -> crate::error::Result<()> {
     if !(1000..=12000).contains(&preset.bitrate_kbps()) {
         return Err(crate::error::AppError::BadRequest(

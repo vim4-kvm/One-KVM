@@ -1,16 +1,229 @@
 #!/usr/bin/python3
-"""Restricted VIM4 media operations; board services retain gadget ownership."""
+"""Restricted USB profiles on the existing board-owned VIM4 gadget."""
 import fcntl
+import json
 import os
 from pathlib import Path
 import stat
 import sys
+import subprocess
 import time
+import uuid
 
 MEDIA = Path('/var/lib/one-kvm/msd')
 GADGET = Path('/sys/kernel/config/usb_gadget/kvm')
 LUN = GADGET / 'functions/mass_storage.disk0/lun.0'
 FUNCTIONS = ('ncm.usb0', 'mass_storage.disk0', 'uac2.usb0')
+PROFILE_DIR = Path('/run/vim4-onekvm-usb')
+HID_FUNCTIONS = {'keyboard': 'hid.keyboard', 'mouse_absolute': 'hid.mouse_abs',
+                 'mouse_relative': 'hid.mouse_rel', 'consumer': 'hid.consumer'}
+DESCRIPTORS = ('idVendor', 'idProduct', 'strings/0x409/manufacturer',
+               'strings/0x409/product', 'strings/0x409/serialnumber')
+
+
+def profile_file(name):
+    PROFILE_DIR.mkdir(mode=0o700, exist_ok=True)
+    info = PROFILE_DIR.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise ValueError('Invalid USB state directory')
+    return PROFILE_DIR / name
+
+
+def saved_profile():
+    path = profile_file('profile.json')
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def save_json(path, value):
+    temporary = path.with_suffix('.new')
+    temporary.write_text(json.dumps(value))
+    temporary.replace(path)
+
+
+def profile_links(profile, mounted):
+    links = [name for key, name in HID_FUNCTIONS.items() if profile['hid'][key]]
+    if profile['network']:
+        links.append(profile['network'] + '.usb0')
+    if profile['uac']:
+        links.append('uac2.usb0')
+    if mounted:
+        links.append('mass_storage.disk0')
+    # CRG fails CONFIG_EP with six IN endpoints. Network uses two; each
+    # HID, mass-storage and microphone function consumes one.
+    endpoints = len(links) + bool(profile['network'])
+    if endpoints > 5:
+        raise ValueError('VIM4 USB IN endpoint limit exceeded (maximum 5); disable a HID function, USB network or microphone')
+    return links
+
+
+def validate_profile(profile):
+    if not isinstance(profile, dict) or set(profile) != {'hid', 'descriptor', 'network', 'uac', 'inquiry'}:
+        raise ValueError('Invalid USB profile')
+    if not isinstance(profile['hid'], dict) or set(profile['hid']) != set(HID_FUNCTIONS):
+        raise ValueError('Invalid HID functions')
+    if any(type(value) is not bool for value in profile['hid'].values()) or type(profile['uac']) is not bool:
+        raise ValueError('USB function flags must be boolean')
+    if profile['network'] not in ('', 'ncm', 'ecm', 'rndis'):
+        raise ValueError('Unsupported USB network driver')
+    if not isinstance(profile['inquiry'], dict) or set(profile['inquiry']) != {'flash', 'cdrom'}:
+        raise ValueError('Invalid disk inquiry strings')
+    for value in profile['inquiry'].values():
+        if not isinstance(value, str) or not 1 <= len(value) <= 28 or any(not 32 <= ord(c) <= 126 for c in value):
+            raise ValueError('Disk names must contain 1–28 printable ASCII characters')
+    descriptor = profile['descriptor']
+    if not isinstance(descriptor, dict) or set(descriptor) != set(DESCRIPTORS):
+        raise ValueError('Invalid USB descriptor')
+    for key, value in descriptor.items():
+        if key == 'strings/0x409/serialnumber' and value is None:
+            continue  # use the original board serial, not a previous custom one
+        if not isinstance(value, str) or not value or len(value.encode('utf-16-le')) > 252 or any(ord(c) < 32 for c in value):
+            raise ValueError('USB descriptor strings must contain 1–126 UTF-16 code units without control characters')
+        if key in ('idVendor', 'idProduct') and (not value.startswith('0x') or not 1 <= int(value, 16) <= 65535):
+            raise ValueError('USB vendor/product ID must be 0001–ffff')
+    profile_links(profile, False)
+
+
+def snapshot_usb():
+    return {'descriptor': {key: (GADGET / key).read_text().strip() for key in DESCRIPTORS},
+            'inquiry': (LUN / 'inquiry_string').read_text().strip(),
+            'links': sorted(p.name for p in (GADGET / 'configs/c.1').iterdir() if p.is_symlink())}
+
+
+def replace_usb(target):
+    old = snapshot_usb()
+    if old == target:
+        return
+    config = GADGET / 'configs/c.1'
+    udc = GADGET / 'UDC'
+    controller = udc.read_text().strip()
+    if not controller:
+        controllers = sorted(Path('/sys/class/udc').iterdir())
+        if not controllers:
+            raise ValueError('VIM4 USB controller is unavailable')
+        controller = controllers[0].name
+
+    def write(state):
+        for path in config.iterdir():
+            if path.is_symlink():
+                path.unlink()
+        for key, value in state['descriptor'].items():
+            (GADGET / key).write_text(value)
+        (LUN / 'inquiry_string').write_text(state['inquiry'] or '\n')
+        for name in state['links']:
+            (config / name).symlink_to(GADGET / 'functions' / name)
+
+    if controller:
+        udc.write_text('\n')
+        time.sleep(0.5)
+    try:
+        write(target)
+        if controller and target['links']:
+            udc.write_text(controller)
+    except Exception:
+        udc.write_text('\n')
+        write(old)
+        if controller and old['links']:
+            udc.write_text(controller)
+        raise
+
+
+def ensure_functions(profile):
+    consumer = GADGET / 'functions/hid.consumer'
+    if profile['hid']['consumer'] and not consumer.exists():
+        consumer.mkdir()
+        for key, value in {'protocol': '0', 'subclass': '0', 'report_length': '2', 'no_out_endpoint': '1'}.items():
+            (consumer / key).write_text(value)
+        # One unsigned 16-bit Consumer usage, matching OtgBackend's report.
+        (consumer / 'report_desc').write_bytes(bytes.fromhex('050c0901a101150026ff0319002aff03751095018100c0'))
+    mode = profile['network']
+    if mode:
+        function = GADGET / ('functions/' + mode + '.usb0')
+        if not function.exists():
+            function.mkdir()
+            for key in ('host_addr', 'dev_addr'):
+                (function / key).write_text((GADGET / 'functions/ncm.usb0' / key).read_text())
+
+
+def nmcli(*args):
+    result = subprocess.run(['/usr/bin/nmcli', '--wait', '10', *args], capture_output=True, text=True, timeout=15)
+    if result.returncode:
+        raise ValueError('USB network configuration failed: ' + result.stderr.strip())
+    return result.stdout.strip()
+
+
+def configure_network(mode):
+    journal = profile_file('network.json')
+    previous = json.loads(journal.read_text()) if journal.exists() else None
+    if previous and previous['mode'] == mode:
+        # A USB rebind preserves the netdev but NetworkManager may need to
+        # reactivate its connection. Never manipulate the Ethernet uplink.
+        nmcli('connection', 'up', 'uuid', previous['uuid'])
+        return
+    if previous:
+        nmcli('connection', 'delete', 'uuid', previous['uuid'])
+        journal.unlink()
+    if not mode:
+        return
+    interface = (GADGET / ('functions/' + mode + '.usb0/ifname')).read_text().strip()
+    connection = str(uuid.uuid4())
+    save_json(journal, {'mode': mode, 'uuid': connection})
+    try:
+        nmcli('connection', 'add', 'type', 'ethernet', 'ifname', interface,
+              'con-name', 'One-KVM USB', 'connection.uuid', connection,
+              'connection.autoconnect', 'no', 'ipv4.method', 'shared',
+              'ipv4.never-default', 'yes', 'ipv6.method', 'disabled')
+        nmcli('connection', 'up', 'uuid', connection)
+    except Exception:
+        # Deleting only the UUID created above cannot affect user connections.
+        try:
+            nmcli('connection', 'delete', 'uuid', connection)
+            journal.unlink(missing_ok=True)
+        except ValueError:
+            pass  # retain the journal so service cleanup can retry
+        raise
+
+
+def configure_profile(profile):
+    validate_profile(profile)
+    baseline = profile_file('baseline.json')
+    if profile['descriptor']['strings/0x409/serialnumber'] is None:
+        original = json.loads(baseline.read_text()) if baseline.exists() else snapshot_usb()
+        profile = {**profile, 'descriptor': {**profile['descriptor'],
+                   'strings/0x409/serialnumber': original['descriptor']['strings/0x409/serialnumber']}}
+    links = sorted(profile_links(profile, bool((LUN / 'file').read_text().strip())))
+    target = {'descriptor': profile['descriptor'], 'links': links,
+              'inquiry': profile['inquiry']['cdrom' if (LUN / 'cdrom').read_text().strip() == '1' else 'flash']}
+    old = snapshot_usb()
+    previous = saved_profile()
+    if old == target and previous == profile:
+        return
+    if not baseline.exists():
+        save_json(baseline, old)
+    ensure_functions(profile)
+    replace_usb(target)
+    try:
+        configure_network(profile['network'])
+        save_json(profile_file('profile.json'), profile)
+    except Exception:
+        replace_usb(old)
+        configure_network(previous['network'] if previous else '')
+        raise
+
+
+def restore_profile():
+    baseline = profile_file('baseline.json')
+    if not baseline.exists():
+        return
+    configure_network('')
+    target = json.loads(baseline.read_text())
+    # Media is owned by its independent API; stopping the application must
+    # not discard a mounted image or re-add NCM alongside it.
+    target['links'] = [name for name in target['links'] if name not in FUNCTIONS]
+    target['links'].append('mass_storage.disk0' if (LUN / 'file').read_text().strip() else 'ncm.usb0')
+    target['links'].sort()
+    replace_usb(target)
+    profile_file('profile.json').unlink(missing_ok=True)
+    baseline.unlink()
 
 
 def open_image(name, writable):
@@ -38,40 +251,50 @@ def open_image(name, writable):
 def configure_media(name, cdrom, readonly):
     fd = open_image(name, not readonly) if name else None
     try:
-        old = {key: (LUN / key).read_text().strip() for key in ('file', 'cdrom', 'ro')}
+        old = {key: (LUN / key).read_text().strip() for key in ('file', 'cdrom', 'ro', 'inquiry_string')}
         if fd is None and not old['file']:
             return
         config = GADGET / 'configs/c.1'
         udc = GADGET / 'UDC'
         controller = udc.read_text().strip()
-        old_links = [key for key in FUNCTIONS if (config / key).is_symlink()]
+        profile = saved_profile()
+        media_links = profile_links(profile, fd is not None) if profile else (
+            ['mass_storage.disk0'] if fd is not None else ['ncm.usb0'])
+        functions = FUNCTIONS + ('ecm.usb0', 'rndis.usb0')
+        old_links = [key for key in functions if (config / key).is_symlink()]
         if controller:
             udc.write_text('\n')
             time.sleep(0.5)
         try:
-            for key in FUNCTIONS:
+            for key in functions:
                 (config / key).unlink(missing_ok=True)
             (LUN / 'file').write_text('\n')
             (LUN / 'cdrom').write_text('1' if cdrom else '0')
             (LUN / 'ro').write_text('1' if readonly else '0')
+            if profile:
+                (LUN / 'inquiry_string').write_text(profile['inquiry']['cdrom' if cdrom else 'flash'])
             if fd is not None:
                 (LUN / 'file').write_text(f'/proc/self/fd/{fd}')
             # Three HID functions plus NCM exhaust the IN endpoint budget.
-            links = ['mass_storage.disk0'] if fd is not None else ['ncm.usb0']
+            links = [key for key in media_links if key in functions]
             for key in links:
                 (config / key).symlink_to(GADGET / 'functions' / key)
+            if controller:
+                udc.write_text(controller)
+            if profile:
+                configure_network(profile['network'])
         except Exception:
-            for key in FUNCTIONS:
+            udc.write_text('\n')
+            for key in functions:
                 (config / key).unlink(missing_ok=True)
             (LUN / 'file').write_text('\n')
-            for key in ('cdrom', 'ro', 'file'):
+            for key in ('cdrom', 'ro', 'inquiry_string', 'file'):
                 (LUN / key).write_text(old[key] or '\n')
             for key in old_links:
                 (config / key).symlink_to(GADGET / 'functions' / key)
-            raise
-        finally:
             if controller:
                 udc.write_text(controller)
+            raise
         os.sync()
     finally:
         if fd is not None:
@@ -79,6 +302,12 @@ def configure_media(name, cdrom, readonly):
 
 
 def main(args):
+    if len(args) == 2 and args[0] == 'usb':
+        configure_profile(json.loads(args[1]))
+        return
+    if args == ['usb-restore']:
+        restore_profile()
+        return
     if len(args) != 4 or args[0] != 'media' or any(arg not in ('true', 'false') for arg in args[2:]):
         raise ValueError('usage: vim4-onekvm media IMAGE CDROM READONLY')
     configure_media(args[1], args[2] == 'true', args[2] == 'true' or args[3] == 'true')
@@ -92,6 +321,6 @@ if __name__ == '__main__':
                 raise ValueError('Invalid media lock owner')
             fcntl.flock(lock, fcntl.LOCK_EX)
             main(sys.argv[1:])
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(error, file=sys.stderr)
         sys.exit(1)

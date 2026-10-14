@@ -76,6 +76,7 @@ pub struct OtgBackend {
     keyboard_dev: Mutex<Option<File>>,
     mouse_rel_dev: Mutex<Option<File>>,
     mouse_abs_dev: Mutex<Option<File>>,
+    absolute_position: Mutex<(u16, u16)>,
     consumer_dev: Mutex<Option<File>>,
     keyboard_leds_enabled: bool,
     keyboard_state: Mutex<KeyboardReport>,
@@ -119,6 +120,7 @@ impl OtgBackend {
             keyboard_dev: Mutex::new(None),
             mouse_rel_dev: Mutex::new(None),
             mouse_abs_dev: Mutex::new(None),
+            absolute_position: Mutex::new((0, 0)),
             consumer_dev: Mutex::new(None),
             keyboard_leds_enabled: paths.keyboard_leds_enabled,
             keyboard_state: Mutex::new(KeyboardReport::default()),
@@ -431,7 +433,10 @@ impl OtgBackend {
 
     fn send_mouse_report_relative(&self, buttons: u8, dx: i8, dy: i8, wheel: i8) -> Result<()> {
         if self.mouse_rel_path.is_none() {
-            return Ok(());
+            // An absolute-only profile must still deliver buttons and wheel
+            // at its last position, rather than silently dropping clicks.
+            let (x, y) = *self.absolute_position.lock();
+            return self.send_mouse_report_absolute(buttons, x, y, wheel);
         }
 
         self.ensure_device(DeviceType::MouseRelative)?;
@@ -469,6 +474,7 @@ impl OtgBackend {
         }
 
         self.ensure_device(DeviceType::MouseAbsolute)?;
+        *self.absolute_position.lock() = (x, y);
 
         let mut dev = self.mouse_abs_dev.lock();
         if let Some(ref mut file) = *dev {
@@ -897,7 +903,16 @@ impl HidBackend for OtgBackend {
                 // Coordinates 0–32767; buttons are sent only on the relative endpoint.
                 let x = event.x.clamp(0, 32767) as u16;
                 let y = event.y.clamp(0, 32767) as u16;
-                self.send_mouse_report_absolute(0, x, y, 0)?;
+                self.send_mouse_report_absolute(
+                    if self.mouse_rel_path.is_some() {
+                        0
+                    } else {
+                        buttons
+                    },
+                    x,
+                    y,
+                    0,
+                )?;
             }
             MouseEventType::Down => {
                 if let Some(button) = event.button {
@@ -934,6 +949,7 @@ impl HidBackend for OtgBackend {
         self.macos_drag_state.lock().reset();
         self.send_mouse_report_relative(0, 0, 0, 0)?;
         self.send_mouse_report_absolute(0, 0, 0, 0)?;
+        self.send_consumer_report(0)?;
 
         info!("HID state reset");
         Ok(())
@@ -1067,6 +1083,34 @@ mod tests {
     #[test]
     fn compatibility_requires_both_mouse_endpoints() {
         assert!(OtgBackend::with_macos_drag(HidDevicePaths::default(), true).is_err());
+    }
+
+    #[tokio::test]
+    async fn absolute_only_mouse_keeps_position_for_buttons_and_wheel() {
+        use crate::hid::MouseButton;
+        let absolute = tempfile::NamedTempFile::new().unwrap();
+        let backend = OtgBackend::from_handles(HidDevicePaths {
+            mouse_absolute: Some(absolute.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        for event in [
+            MouseEvent::move_abs(8000, 9000),
+            MouseEvent::button_down(MouseButton::Left),
+            MouseEvent::move_abs(10000, 11000),
+            MouseEvent::button_up(MouseButton::Left),
+        ] {
+            backend.send_mouse(event).await.unwrap();
+        }
+        let reports = fs::read(absolute.path()).unwrap();
+        let reports: Vec<_> = reports.chunks_exact(6).collect();
+        assert_eq!(
+            reports.iter().map(|p| p[0]).collect::<Vec<_>>(),
+            [0, 1, 1, 0]
+        );
+        assert_eq!(&reports[0][1..5], &reports[1][1..5]);
+        assert_eq!(&reports[2][1..5], &reports[3][1..5]);
+        backend.reset().await.unwrap();
     }
 
     #[tokio::test]

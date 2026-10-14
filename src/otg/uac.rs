@@ -143,7 +143,10 @@ pub fn find_uac_pcm_device() -> Option<String> {
         }
         let card_path = entry.path().join("id");
         if let Ok(id) = std::fs::read_to_string(&card_path) {
-            if id.trim().starts_with("UAC1Gadget") || id.trim().starts_with("gadget") {
+            if id.trim().starts_with("UAC1Gadget")
+                || id.trim().starts_with("UAC2Gadget")
+                || id.trim().starts_with("gadget")
+            {
                 let card_num = name.strip_prefix("card")?;
                 return Some(format!("hw:{card_num},0"));
             }

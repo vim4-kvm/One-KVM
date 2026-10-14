@@ -1024,6 +1024,11 @@ function usbSpeedLabel(speed?: string): string {
 }
 
 const effectiveOtgFunctions = computed(() => ({ ...config.value.hid_otg_functions }))
+// Reserve the disk's endpoint when media is enabled, so a valid saved
+// profile can subsequently mount a disk without exceeding the board limit.
+const vim4UsbEndpoints = computed(() => Object.values(config.value.hid_otg_functions).filter(Boolean).length
+  + (config.value.otg_network_enabled ? 2 : 0) + Number(config.value.uac_enabled) + Number(config.value.msd_enabled))
+const vim4UsbOverLimit = computed(() => isVim4.value && vim4UsbEndpoints.value > 5)
 
 const isKeyboardLedToggleDisabled = computed(() =>
   config.value.hid_backend !== 'otg' || !effectiveOtgFunctions.value.keyboard
@@ -1182,6 +1187,7 @@ const hasMacosDragInterfaceConflict = computed(() =>
 
 const isHidSettingsValid = computed(() =>
   isHidFunctionSelectionValid.value
+  && !vim4UsbOverLimit.value
   && !hasMacosDragInterfaceConflict.value
   && isCh9329DescriptorValid.value
   && areMsdInquiryStringsValid.value
@@ -1477,7 +1483,7 @@ async function saveConfig() {
           product_id: parseInt(otgProductIdHex.value, 16) || 0x0104,
           manufacturer: otgManufacturer.value || 'One-KVM',
           product: otgProduct.value || 'One-KVM USB Device',
-          serial_number: otgSerialNumber.value || undefined,
+          serial_number: otgSerialNumber.value || '',
         }
         hidUpdate.otg_profile = 'custom' as OtgHidProfile
         hidUpdate.otg_functions = { ...config.value.hid_otg_functions }
@@ -1496,16 +1502,15 @@ async function saveConfig() {
           network: {
             enabled: otgEnabled && config.value.otg_network_enabled,
             driver_mode: config.value.otg_network_driver as any,
-            bridge_interface: config.value.otg_network_interface,
+            bridge_interface: isVim4.value ? '' : config.value.otg_network_interface,
+          },
+          uac: {
+            enabled: otgEnabled && config.value.uac_enabled,
+            sample_rate: 48000,
+            channels: 2,
           },
         })
         otgNetworkStatus.value = response.status
-
-        await uacApi.update({
-          enabled: otgEnabled && config.value.uac_enabled,
-          sample_rate: 48000,
-          channels: 2,
-        })
       } else if (configStore.hid?.backend === 'ch9329') {
         await configStore.updateHid(hidUpdate)
       }
@@ -3130,6 +3135,8 @@ watch(isWindows, () => {
             <Card v-if="configStore.hid?.backend === 'otg' || configStore.hid?.backend === 'ch9329'">
               <CardHeader><CardTitle>{{ t('hidGuide.features') }}</CardTitle></CardHeader>
               <CardContent class="space-y-4">
+                <p v-if="isVim4" class="text-sm text-muted-foreground">{{ t('vim4Usb.hint') }}</p>
+                <p v-if="isVim4" :class="vim4UsbOverLimit ? 'text-sm text-destructive' : 'text-sm text-muted-foreground'">{{ t('vim4Usb.endpoints', { count: vim4UsbEndpoints }) }}</p>
                 <template v-if="config.hid_backend === 'ch9329'">
                   <Separator class="my-4" />
                   <div class="space-y-4">
@@ -3218,7 +3225,7 @@ watch(isWindows, () => {
                 </template>
 
                 <!-- OTG Descriptor Settings -->
-                <template v-if="config.hid_backend === 'otg' && !isVim4">
+                <template v-if="config.hid_backend === 'otg'">
                   <Separator class="my-4" />
                   <div class="space-y-4">
                     <div>
@@ -3339,7 +3346,7 @@ watch(isWindows, () => {
                           <Separator />
                           <div class="space-y-2">
                             <Label for="msd-dir">{{ t('settings.msdDir') }}</Label>
-                            <Input id="msd-dir" v-model="config.msd_dir" placeholder="/etc/one-kvm/msd" />
+                            <Input id="msd-dir" v-model="config.msd_dir" :disabled="isVim4" placeholder="/etc/one-kvm/msd" />
                           </div>
                           <div class="space-y-2">
                             <Label for="msd-flash-inquiry-string">{{ t('settings.msdFlashInquiryString') }}</Label>
@@ -3382,7 +3389,7 @@ watch(isWindows, () => {
                                 </SelectContent>
                               </Select>
                             </div>
-                            <div class="space-y-2">
+                            <div v-if="!isVim4" class="space-y-2">
                               <Label for="otg-network-interface">{{ t('settings.otgNetworkInterface') }}</Label>
                               <Select
                                 :model-value="config.otg_network_interface"
@@ -3418,6 +3425,7 @@ watch(isWindows, () => {
                             </div>
                           </div>
                         </template>
+                        <p v-if="isVim4" class="text-xs text-muted-foreground">{{ t('vim4Usb.network') }}</p>
                         <p v-if="otgNetworkStatus?.health === 'degraded'" class="text-xs text-destructive">
                           {{ t('settings.otgRuntimeDegraded') }}: {{ otgNetworkStatus.error || t('common.error') }}
                         </p>

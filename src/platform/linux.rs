@@ -28,9 +28,7 @@ pub fn capabilities() -> PlatformCapabilities {
         capabilities.encoder = FeatureCapability::available(["auto"]);
         capabilities.hid = FeatureCapability::available(["otg", "none"]);
         capabilities.atx = FeatureCapability::unsupported("No ATX hardware is connected");
-        capabilities.otg = FeatureCapability::unsupported(
-            "USB descriptors and networking are managed by VIM4 board services",
-        );
+        capabilities.otg = FeatureCapability::available(["vim4-board-gadget"]);
         capabilities.service_installation =
             FeatureCapability::unsupported("Installed as the vim4-onekvm Ubuntu package");
     }

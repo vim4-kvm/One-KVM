@@ -13,17 +13,39 @@
 | MJPEG | GStreamer 软件 JPEG，限制为 10 fps；4K60 使用 WebRTC |
 | 声音 | ALSA `hw:AMLAUGESOUND,0` → 上游 Opus/WebRTC；板级服务设置 HDMI 音频路由 |
 | 键盘 / 绝对鼠标 / 相对鼠标 | `/dev/hidg0` / `/dev/hidg1` / `/dev/hidg2` |
-| ISO/IMG | 板级 `mass_storage.disk0/lun.0`，单 LUN；挂载时临时替换 USB NCM |
+| 多媒体键 | 独立 `/dev/hidg3`，16-bit Consumer usage |
+| ISO/IMG | 板级 `mass_storage.disk0/lun.0`，单 LUN；共享 USB 端点预算 |
+| USB 麦克风 | 板级 UAC2，48 kHz 双声道；浏览器经认证 WebSocket 发送 Opus/PCM |
+| USB 网卡 | NCM / ECM / RNDIS，独立 NetworkManager DHCP/NAT 连接 |
 | HDR / EDID | 原生视频菜单和设置页调用共享板级助手，与 vim4-manager 共用 HDR 曲线 |
 
 应用以 khadas 运行，不创建、删除 USB gadget，不重启 HDMI 服务。
 仅用户明确应用 EDID 时调用共享助手重新协商显示器；普通观看、调码率与缩放不触发 HPD。
 虚拟介质经限定 sudo 助手操作 configfs，镜像只允许来自
 `/var/lib/one-kvm/msd/images` 或 `ventoy`，拒绝符号链接与硬链接。
-不支持多 LUN、应用修改 USB 描述符、USB 麦克风或 OTG 网桥；ATX 未连接。
+不支持多 LUN、以太网桥接；ATX 未连接。
 Ubuntu 包将仓库内的 Ventoy 引导资源解压到 `/usr/share/vim4-onekvm/ventoy`，
 用于创建虚拟盘；用户盘保存在 `/var/lib/one-kvm/msd/ventoy`，升级不覆盖。
 普通 ISO/IMG 不依赖这些引导资源。虚拟盘测试使用同一套资源，缺失或解压失败时必须失败。
+
+## HID 功能配置
+
+设置页支持键盘、绝对/相对鼠标、多媒体键、键盘 LED 状态反馈、USB VID/PID、
+厂商/产品名/序列号、虚拟盘及磁盘名称、USB 网卡和麦克风。`PATCH /api/config/otg`
+可同时提交 `hid`、`msd`、`network`、`uac`，应用失败后回滚，避免麦克风单独保存
+导致中间组合超过端点上限。绝对鼠标单独启用时，按钮和滚轮使用绝对接口。
+
+VIM4 CRG 限制同时使用最多 5 个 IN 端点：每个 HID、麦克风、已挂载磁盘各一个，
+网卡两个。设置页和 API 在启用虚拟盘时预留一个；助手在实际挂载时再次校验。
+只读的存储目录是 `/var/lib/one-kvm/msd`，不能用网页配置绕过助手的路径限制。
+USB 网卡不改变已有以太网配置；地址、DHCP 与 NAT 由 NetworkManager shared 连接
+管理。RNDIS 的 Windows 驱动兼容性仍需在 Windows 主机验收。
+
+应用在重新枚举前关闭 HID 文件，助手仅修改公共 gadget 的功能链接与描述符，
+不销毁现有 HID 实例；设备编号保持稳定。首次应用前在 root 专用的
+`/run/vim4-onekvm-usb` 保存原始状态，systemd `ExecStopPost` 恢复配置并删除本应用
+创建的网络连接，因此切换到其他 KVM 不继承 One-KVM 的键鼠禁用设置。
+保存会重新枚举 USB，用户应先在被控机安全弹出挂载磁盘。网页关闭不等于停止服务。
 
 ## 视频设置
 

@@ -262,29 +262,19 @@ impl OtgService {
     ) -> Result<()> {
         #[cfg(feature = "vim4")]
         {
-            // Never reconcile configfs here: the board service owns all
-            // descriptors, the UDC and the endpoint budget shared by the apps.
-            if network.enabled || uac.enabled {
-                return Err(AppError::Config(
-                    "VIM4 USB networking and microphone profiles are managed by board services"
-                        .into(),
-                ));
-            }
+            // The restricted helper changes links on the existing board gadget;
+            // it never destroys HID instances or renumbers their device nodes.
+            crate::platform::vim4::configure_usb(hid, msd, network, uac).await?;
             let mut state = self.state.write().await;
-            state.hid_paths =
-                (hid.backend == crate::config::HidBackend::Otg).then(|| HidDevicePaths {
-                    keyboard: Some("/dev/hidg0".into()),
-                    mouse_absolute: Some("/dev/hidg1".into()),
-                    mouse_relative: Some("/dev/hidg2".into()),
-                    consumer: None,
-                    udc: std::fs::read_to_string(format!("{}/UDC", crate::platform::vim4::GADGET))
-                        .ok()
-                        .map(|s| s.trim().into()),
-                    keyboard_leds_enabled: true,
-                });
+            state.hid_paths = (hid.backend == crate::config::HidBackend::Otg)
+                .then(|| crate::platform::vim4::hid_paths(hid));
             state.gadget_active = true;
             state.hid_enabled = state.hid_paths.is_some();
             state.msd_enabled = msd.enabled;
+            state.network = network.clone();
+            state.uac = uac.clone();
+            state.health = OtgRuntimeHealth::Healthy;
+            state.error = None;
             *self.msd_function.write().await = if msd.enabled {
                 Some(MsdFunction::vim4(MsdInquiryStrings::from(msd)))
             } else {
@@ -735,26 +725,19 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "vim4")]
-    #[tokio::test]
-    async fn vim4_uses_existing_devices_without_creating_or_destroying_a_gadget() {
-        let service = OtgService::new();
+    #[test]
+    fn vim4_preserves_device_numbers_when_interfaces_are_disabled() {
         let mut config = crate::config::AppConfig::default();
         crate::platform::vim4::defaults(&mut config);
-        service
-            .apply_config(&config.hid, &config.msd, &config.otg_network, &config.uac)
-            .await
-            .unwrap();
-        let paths = service.hid_device_paths().await.unwrap();
+        config.hid.otg_profile = crate::config::OtgHidProfile::Custom;
+        config.hid.otg_functions.keyboard = false;
+        config.hid.otg_functions.consumer = false;
+        let paths = crate::platform::vim4::hid_paths(&config.hid);
         assert_eq!(paths.mouse_absolute, Some(PathBuf::from("/dev/hidg1")));
         assert_eq!(paths.mouse_relative, Some(PathBuf::from("/dev/hidg2")));
-        assert!(service.manager.lock().await.is_none());
-        service.shutdown().await.unwrap();
-        assert!(service.manager.lock().await.is_none());
-        config.otg_network.enabled = true;
-        assert!(service
-            .apply_config(&config.hid, &config.msd, &config.otg_network, &config.uac)
-            .await
-            .is_err());
+        assert!(paths.keyboard.is_none());
+        assert!(paths.consumer.is_none());
+        assert!(!paths.keyboard_leds_enabled);
     }
 
     #[test]

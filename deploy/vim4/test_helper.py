@@ -1,6 +1,7 @@
 import importlib.machinery
 import importlib.util
 import os
+import copy
 from pathlib import Path
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ class MediaTest(unittest.TestCase):
         self.media = self.root / 'msd'
         (self.media / 'images').mkdir(parents=True)
         self.enterContext(patch.object(helper, 'MEDIA', self.media))
+        self.enterContext(patch.object(helper, 'PROFILE_DIR', self.root / 'profile'))
         self.image = self.media / 'images' / 'test.iso'
         self.image.write_bytes(b'0' * 512)
 
@@ -54,7 +56,7 @@ class MediaTest(unittest.TestCase):
         config.mkdir(parents=True)
         lun = gadget / 'functions/mass_storage.disk0/lun.0'
         lun.mkdir(parents=True)
-        for key in ('file', 'cdrom', 'ro'):
+        for key in ('file', 'cdrom', 'ro', 'inquiry_string'):
             (lun / key).write_text('' if key == 'file' else '0')
         (gadget / 'UDC').write_text('controller')
         for name in ('hid.keyboard', 'hid.absolute', 'hid.relative', 'ncm.usb0'):
@@ -76,3 +78,116 @@ class MediaTest(unittest.TestCase):
         for args in (['reboot'], ['media', '', 'true', 'yes'], ['media']):
             with self.assertRaises(ValueError):
                 helper.main(args)
+
+
+class UsbProfileTest(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.gadget = self.root / 'gadget'
+        self.config = self.gadget / 'configs/c.1'
+        self.config.mkdir(parents=True)
+        self.lun = self.gadget / 'functions/mass_storage.disk0/lun.0'
+        self.lun.mkdir(parents=True)
+        for key in ('file', 'ro', 'cdrom', 'inquiry_string'):
+            (self.lun / key).write_text('')
+        (self.gadget / 'UDC').write_text('controller')
+        self.enterContext(patch.object(helper, 'GADGET', self.gadget))
+        self.enterContext(patch.object(helper, 'LUN', self.lun))
+        self.enterContext(patch.object(helper, 'PROFILE_DIR', self.root / 'profile'))
+        self.enterContext(patch.object(helper.time, 'sleep'))
+        self.network = self.enterContext(patch.object(helper, 'configure_network'))
+        descriptors = dict(zip(helper.DESCRIPTORS, ['0x1d6b', '0x0104', 'Board', 'KVM', 'serial']))
+        for key, value in descriptors.items():
+            path = self.gadget / key
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(value)
+        for name in ('hid.keyboard', 'hid.mouse_abs', 'hid.mouse_rel', 'ncm.usb0', 'uac2.usb0'):
+            (self.gadget / 'functions' / name).mkdir()
+            if name != 'uac2.usb0':
+                (self.config / name).symlink_to(self.gadget / 'functions' / name)
+        self.baseline = helper.snapshot_usb()
+        self.profile = {'hid': {'keyboard': True, 'mouse_absolute': True, 'mouse_relative': True, 'consumer': True},
+                        'descriptor': descriptors, 'network': '', 'uac': False,
+                        'inquiry': {'flash': 'One-KVM Disk', 'cdrom': 'One-KVM CD-ROM'}}
+
+    def test_switch_profiles_preserves_instances_and_restores_board(self):
+        self.profile['descriptor']['strings/0x409/product'] = 'Custom KVM'
+        helper.configure_profile(self.profile)
+        self.assertTrue((self.config / 'hid.consumer').is_symlink())
+        self.assertFalse((self.config / 'ncm.usb0').exists())
+        self.profile['hid']['keyboard'] = False
+        self.profile['uac'] = True
+        helper.configure_profile(self.profile)
+        self.assertFalse((self.config / 'hid.keyboard').exists())
+        self.assertTrue((self.gadget / 'functions/hid.keyboard').is_dir())
+        self.assertTrue((self.config / 'uac2.usb0').is_symlink())
+        helper.restore_profile()
+        self.assertEqual(helper.snapshot_usb(), self.baseline)
+
+    def test_endpoint_limit_checks_media_before_disconnect(self):
+        self.profile['network'] = 'ncm'
+        with self.assertRaisesRegex(ValueError, 'endpoint limit'):
+            helper.configure_profile(self.profile)
+        self.assertEqual(helper.snapshot_usb(), self.baseline)
+        self.profile['hid']['consumer'] = False
+        (self.lun / 'file').write_text('/mounted.img')
+        with self.assertRaisesRegex(ValueError, 'endpoint limit'):
+            helper.configure_profile(self.profile)
+        self.assertEqual((self.gadget / 'UDC').read_text(), 'controller')
+
+    def test_clearing_custom_serial_restores_board_identity(self):
+        self.profile['descriptor']['strings/0x409/serialnumber'] = 'custom-serial'
+        helper.configure_profile(self.profile)
+        self.profile['descriptor']['strings/0x409/serialnumber'] = None
+        helper.configure_profile(self.profile)
+        self.assertEqual((self.gadget / 'strings/0x409/serialnumber').read_text(), 'serial')
+
+    def test_bind_failure_rolls_back_descriptors_and_links(self):
+        self.profile['descriptor']['strings/0x409/product'] = 'New name'
+        original = Path.write_text
+        failed = False
+        def fail_bind(path, text, *args, **kwargs):
+            nonlocal failed
+            if path == self.gadget / 'UDC' and text == 'controller' and not failed:
+                failed = True
+                raise OSError('CONFIG_EP failed')
+            return original(path, text, *args, **kwargs)
+        with patch.object(Path, 'write_text', fail_bind):
+            with self.assertRaises(OSError):
+                helper.configure_profile(self.profile)
+        self.assertEqual(helper.snapshot_usb(), self.baseline)
+        self.assertEqual((self.gadget / 'UDC').read_text(), 'controller')
+        self.assertIsNone(helper.saved_profile())
+
+    def test_invalid_profile_cannot_write_arbitrary_configfs_paths(self):
+        for key, value in [('descriptor', {'../../etc/passwd': 'bad'}),
+                           ('network', '../foo'), ('uac', 'true'),
+                           ('hid', {'keyboard': True})]:
+            profile = copy.deepcopy(self.profile)
+            profile[key] = value
+            with self.assertRaises(ValueError):
+                helper.configure_profile(profile)
+        self.assertEqual(helper.snapshot_usb(), self.baseline)
+
+    def test_network_failure_restores_usb_before_returning_error(self):
+        self.network.side_effect = [ValueError('NetworkManager unavailable'), None]
+        with self.assertRaisesRegex(ValueError, 'NetworkManager'):
+            helper.configure_profile(self.profile)
+        self.assertEqual(helper.snapshot_usb(), self.baseline)
+
+    def test_media_mount_retains_microphone_and_selected_hid(self):
+        self.profile['hid']['consumer'] = False
+        self.profile['uac'] = True
+        helper.configure_profile(self.profile)
+        media = self.root / 'msd'
+        (media / 'images').mkdir(parents=True)
+        image = media / 'images/disk.img'
+        image.write_bytes(b'0' * 512)
+        with patch.object(helper, 'MEDIA', media), patch.object(helper.os, 'sync'):
+            helper.configure_media(str(image), False, True)
+            self.assertTrue((self.config / 'uac2.usb0').is_symlink())
+            self.assertTrue((self.config / 'mass_storage.disk0').is_symlink())
+            self.assertFalse((self.config / 'ncm.usb0').exists())
+            helper.configure_media('', False, True)
+            self.assertTrue((self.config / 'uac2.usb0').is_symlink())
+            self.assertFalse((self.config / 'mass_storage.disk0').exists())

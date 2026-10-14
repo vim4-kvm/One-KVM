@@ -1,4 +1,9 @@
 export default {
+  vim4Usb: {
+    endpoints: 'Endpoint budget: {count} / 5 (reserving one when virtual media is enabled). Disable some functions before saving if over the limit.',
+    hint: 'Saving re-enumerates USB devices. Safely eject virtual media on the target first. Each HID, microphone and mounted disk uses one IN endpoint; networking uses two. VIM4 supports up to five. Stopping One-KVM restores the previous USB configuration. Keyboard LEDs controls feedback. One virtual drive is supported, using application-managed storage.',
+    network: 'USB networking uses a dedicated NetworkManager shared connection with DHCP/NAT; Ethernet bridging is unavailable. The USB microphone uses 48 kHz stereo; browser capture requires HTTPS or a secure context.',
+  },
   vim4Video: {
     title: 'VIM4 video settings', applied: 'Settings applied',
     outputSize: 'Maximum output resolution', outputFps: 'Maximum output frame rate', source: 'Follow input',

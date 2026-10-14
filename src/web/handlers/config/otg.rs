@@ -48,6 +48,10 @@ pub(super) async fn update_otg_config_inner(
         if let Some(ref update) = request.network {
             update.apply_to(&mut staged.otg_network);
         }
+        if let Some(ref update) = request.uac {
+            update.validate()?;
+            staged.uac = update.clone();
+        }
 
         Ok(requested_ch9329_descriptor)
     })

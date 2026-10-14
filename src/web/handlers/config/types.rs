@@ -336,7 +336,7 @@ impl OtgDescriptorConfigUpdate {
             config.product = v.clone();
         }
         if let Some(ref v) = self.serial_number {
-            config.serial_number = Some(v.clone());
+            config.serial_number = (!v.is_empty()).then(|| v.clone());
         }
     }
 }
@@ -444,6 +444,7 @@ pub struct OtgConfigUpdate {
     pub hid: Option<HidConfigUpdate>,
     pub msd: Option<MsdConfigUpdate>,
     pub network: Option<OtgNetworkConfigUpdate>,
+    pub uac: Option<UacConfig>,
 }
 
 impl HidConfigUpdate {
@@ -1410,6 +1411,19 @@ impl RedfishConfigUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_usb_serial_restores_automatic_identity() {
+        let mut config = OtgDescriptorConfig::default();
+        config.serial_number = Some("custom-serial".into());
+        let omitted: OtgDescriptorConfigUpdate = serde_json::from_str("{}").unwrap();
+        omitted.apply_to(&mut config);
+        assert_eq!(config.serial_number.as_deref(), Some("custom-serial"));
+        let cleared: OtgDescriptorConfigUpdate =
+            serde_json::from_str(r#"{"serial_number":""}"#).unwrap();
+        cleared.apply_to(&mut config);
+        assert!(config.serial_number.is_none());
+    }
 
     fn empty_atx_update() -> AtxConfigUpdate {
         AtxConfigUpdate {

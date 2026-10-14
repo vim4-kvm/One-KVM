@@ -630,6 +630,7 @@ export interface OtgConfigUpdate {
 	hid?: HidConfigUpdate;
 	msd?: MsdConfigUpdate;
 	network?: OtgNetworkConfigUpdate;
+	uac?: UacConfig;
 }
 
 export interface RtspConfigResponse {
