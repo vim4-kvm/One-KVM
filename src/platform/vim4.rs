@@ -14,6 +14,7 @@ pub fn defaults(config: &mut AppConfig) {
         config.video.fps = 60;
         config.stream.mode = StreamMode::WebRTC;
         config.hid.backend = HidBackend::Otg;
+        config.msd.enabled = true;
         config.audio.enabled = true;
         config.audio.device = "hw:AMLAUGESOUND,0".into();
     }
@@ -87,6 +88,19 @@ pub async fn configure_media(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn initial_defaults_restore_media_after_generic_config_normalization() {
+        let mut config = AppConfig::default();
+        config.enforce_invariants();
+        assert!(!config.msd.enabled);
+        defaults(&mut config);
+        config.enforce_invariants();
+        assert!(config.msd.enabled);
+        config.initialized = true;
+        config.msd.enabled = false;
+        defaults(&mut config);
+        assert!(!config.msd.enabled);
+    }
     #[test]
     fn hdmi_signal_handles_420_fractional_rate_and_missing_signal() {
         let info = "Hactive: 1920\nVactive: 2160\nFrame Rate: 5999\nColor Space: 3-YUV420\n";
