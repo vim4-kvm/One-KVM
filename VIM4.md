@@ -10,7 +10,7 @@
 |---|---|
 | HDMI 输入 | vdin0 → `/dev/video_cap` → `vfmcapsrc`，跟随输入分辨率 |
 | WebRTC 视频 | DMA-buf → `amlvenc` → H.264/H.265 Annex B；使用现有会话及关键帧恢复 |
-| MJPEG | GStreamer 软件 JPEG，限制为 10 fps；4K60 使用 WebRTC |
+| MJPEG | vim4jpegenc DMA 硬件 JPEG，遵循输出帧率上限；缺少插件时软件回退最高 10 fps |
 | 声音 | ALSA `hw:AMLAUGESOUND,0` → 上游 Opus/WebRTC；板级服务设置 HDMI 音频路由 |
 | 键盘 / 绝对鼠标 / 相对鼠标 | `/dev/hidg0` / `/dev/hidg1` / `/dev/hidg2` |
 | 多媒体键 | 独立 `/dev/hidg3`，16-bit Consumer usage |
@@ -56,7 +56,9 @@ USB 网卡不改变已有以太网配置；地址、DHCP 与 NAT 由 NetworkMana
 `PATCH /api/config/video` 的 `output: {height, fps}` 独立于跟随源信号的采集参数。
 height 为 0（原尺寸）、720、1080、2160；fps 为 0（跟随输入）、10、15、30、60。
 尺寸和帧率均为上限，保持宽高比、不放大；缩放通过 gstreamer-aml 的 GE2D
-`amlvconv` 完成。MJPEG 软件编码最高 10 fps，`quality` 1–100 在重启与调整时应用。
+`amlvconv` 完成。MJPEG 使用 `vim4jpegenc` 硬件编码，`quality` 1–100 在重启与调整时应用；
+缺少插件时保留最高 10 fps 的软件回退。实际帧率受 JPEG 编码、缩放、网络和浏览器
+限制，状态显示实际编码输出帧率，不将设定的上限当作实测值。
 H.264/H.265 支持 1/4/8/12 Mbps 四个快捷档和 1000–60000 kbps 自定义码率，
 越界请求返回错误。部署时须同时升级支持 60000 kbps 的 vim4-amlvenc 插件；
 旧插件上限为 12000 kbps。高码率需要更多网络带宽，实际输出随画面变化。

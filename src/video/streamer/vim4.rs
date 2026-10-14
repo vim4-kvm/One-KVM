@@ -33,13 +33,22 @@ impl Streamer {
     fn capture_vim4_mjpeg(&self, config: &StreamerConfig) -> anyhow::Result<bool> {
         gst::init()?;
         let source = crate::platform::vim4::signal().unwrap_or((config.resolution, config.fps));
-        let fps = config.output.frame_rate(source.1, 10);
+        let hardware_jpeg = gst::ElementFactory::find("vim4jpegenc").is_some();
+        let fps = config
+            .output
+            .frame_rate(source.1, if hardware_jpeg { 60 } else { 10 });
         let filter = config.output.filter(source.0, fps);
-        // Software JPEG is intentionally bounded; hardware 4K60 is WebRTC.
+        let encoder = if hardware_jpeg {
+            "vim4jpegenc"
+        } else {
+            "videoconvert ! jpegenc"
+        };
         let element = gst::parse::launch(&format!(
             "vfmcapsrc ! {filter}\
-             videoconvert ! jpegenc quality={} ! appsink name=frames sync=false max-buffers=1 drop=true",
-            config.jpeg_quality.clamp(1, 100)))?;
+             queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! \
+             {encoder} quality={} ! appsink name=frames sync=false max-buffers=1 drop=true",
+            config.jpeg_quality.clamp(1, 100)
+        ))?;
         let pipeline = element
             .downcast::<gst::Pipeline>()
             .map_err(|_| anyhow::anyhow!("Invalid pipeline"))?;
@@ -54,6 +63,8 @@ impl Streamer {
             let mut idle_since = None;
             let mut check = std::time::Instant::now();
             let mut source_changes = 0;
+            let mut fps_since = std::time::Instant::now();
+            let mut fps_frames = 0u32;
             while !self.direct_stop.load(Ordering::SeqCst) {
                 if check.elapsed() >= Duration::from_millis(250) {
                     check = std::time::Instant::now();
@@ -109,7 +120,16 @@ impl Streamer {
                 );
                 sequence += 1;
                 *self.state.blocking_write() = StreamerState::Streaming;
-                self.current_fps.store(fps, Ordering::Relaxed);
+                fps_frames += 1;
+                let elapsed = fps_since.elapsed().as_secs_f64();
+                if elapsed >= 1.0 {
+                    self.current_fps.store(
+                        (f64::from(fps_frames) / elapsed).round() as u32,
+                        Ordering::Relaxed,
+                    );
+                    fps_since = std::time::Instant::now();
+                    fps_frames = 0;
+                }
                 self.mjpeg_handler.set_online();
                 self.mjpeg_handler.update_frame(frame);
             }
