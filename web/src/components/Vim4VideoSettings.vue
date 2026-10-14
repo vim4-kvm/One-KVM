@@ -100,7 +100,7 @@ onMounted(load)
       </form>
       <form class="space-y-2" @submit.prevent="apply('bitrate')">
         <Label for="vim4-bitrate">{{ t('vim4Video.bitrate') }}</Label>
-        <Input id="vim4-bitrate" v-model="bitrate" type="number" min="1000" max="12000" required />
+        <Input id="vim4-bitrate" v-model="bitrate" type="number" min="1000" max="60000" required />
         <Button type="submit" size="sm" variant="outline" class="w-full">{{ t('common.apply') }}</Button>
       </form>
       <form class="space-y-2" @submit.prevent="apply('edid')">

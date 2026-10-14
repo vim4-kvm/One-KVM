@@ -7,7 +7,7 @@ export default {
   vim4Video: {
     title: 'VIM4 视频设置', applied: '设置已应用',
     outputSize: '输出分辨率上限', outputFps: '输出帧率上限', source: '跟随输入',
-    jpegQuality: 'MJPEG 质量（1–100）', bitrate: '自定义码率（1000–12000 kbps）',
+    jpegQuality: 'MJPEG 质量（1–100）', bitrate: '自定义码率（1000–60000 kbps，高码率需要更多网络带宽）',
     outputHint: '保持输入比例，不放大画面。MJPEG 最高 10 fps；更高帧率请用 H.264 / H.265。',
     edidHint: '修改显示能力后，被控机会重新识别显示器，画面可能短暂中断。',
     white: 'SDR 白点（nits）', peak: 'HDR 峰值（nits）',

@@ -76,9 +76,9 @@ pub async fn configure_usb(
 }
 
 pub fn validate_bitrate(preset: crate::config::BitratePreset) -> crate::error::Result<()> {
-    if !(1000..=12000).contains(&preset.bitrate_kbps()) {
+    if !(1000..=60000).contains(&preset.bitrate_kbps()) {
         return Err(crate::error::AppError::BadRequest(
-            "VIM4 bitrate must be 1000–12000 kbps".into(),
+            "VIM4 bitrate must be 1000–60000 kbps".into(),
         ));
     }
     Ok(())
@@ -243,7 +243,8 @@ mod tests {
         }
         .validate()
         .is_err());
-        assert!(validate_bitrate(crate::config::BitratePreset::Custom(12001)).is_err());
+        assert!(validate_bitrate(crate::config::BitratePreset::Custom(60000)).is_ok());
+        assert!(validate_bitrate(crate::config::BitratePreset::Custom(60001)).is_err());
     }
     #[test]
     fn initial_defaults_restore_media_after_generic_config_normalization() {

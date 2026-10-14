@@ -25,7 +25,7 @@ fn description(config: &SharedVideoPipelineConfig, source: Resolution, fps: u32)
         amlvenc name=encoder bitrate={} gop={} framerate={} min-force-key-unit-interval=250000000 ! \
         video/x-{codec} ! {codec}parse config-interval=-1 ! \
         video/x-{codec},stream-format=byte-stream,alignment=au ! appsink name=frames sync=false max-buffers=2",
-        config.bitrate_kbps().clamp(1000, 12000), config.bitrate_preset.gop_size(fps), fps))
+        config.bitrate_kbps().clamp(1000, 60000), config.bitrate_preset.gop_size(fps), fps))
 }
 
 impl SharedVideoPipeline {
