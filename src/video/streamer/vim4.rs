@@ -124,7 +124,7 @@ impl Streamer {
                 let elapsed = fps_since.elapsed().as_secs_f64();
                 if elapsed >= 1.0 {
                     self.current_fps.store(
-                        (f64::from(fps_frames) / elapsed).round() as u32,
+                        (f64::from(fps_frames) / elapsed * 100.0).round() as u32,
                         Ordering::Relaxed,
                     );
                     fps_since = std::time::Instant::now();
