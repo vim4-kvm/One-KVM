@@ -1,0 +1,5 @@
+# RustCrypto 0.8/0.6 requires these opt-ins for ARM crypto instructions.
+# Both backends detect CPU support at runtime and retain a software fallback.
+# Without them, large SRTP keyframes can block sending beyond a frame interval.
+[target.'cfg(target_arch = "aarch64")']
+rustflags = ["--cfg", "aes_armv8", "--cfg", "polyval_armv8"]

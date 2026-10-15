@@ -84,6 +84,9 @@ python3 -m unittest discover -s deploy/vim4 -p 'test_*.py'
 Rust 版本由 rust-toolchain.toml 固定；系统依赖在公共工作区的
 packaging/ubuntu/Dockerfile 固定。Ubuntu libyuv 使用兼容的两步 BGR 转换；
 静态 turbojpeg 符号隐藏，防止与系统 libyuv 的 JPEG ABI 冲突。
+从仓库根目录运行 Cargo，使 `.cargo/config.toml` 的 ARMv8 AES/PMULL 配置生效；
+依赖运行时检测 CPU 能力，不支持时回退软件实现。不要用外部 `RUSTFLAGS` 覆盖
+这些配置，否则大关键帧的 SRTP 加密可能阻塞发送，出现每秒一次的停顿。
 GE2D 缩放使用私有 `libgst-aml-dma-allocator.so`，仅实现 amlvconv 调用的
 分配器入口，将 DMA fd 的关闭权交给标准 GstDmaBufMemory。厂商版本同时在
 附属 qdata 中关闭 fd，反复缩放/切编码会误关复用的 fd。服务的 LD_LIBRARY_PATH
