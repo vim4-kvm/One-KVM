@@ -299,6 +299,7 @@ export interface UuRemoteConfig {
 	enabled: boolean;
 	system: 'windows' | 'macos';
 	device_name: string;
+	reverse_scroll?: boolean;
 }
 
 export enum RtspCodec {

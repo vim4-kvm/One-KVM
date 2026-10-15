@@ -370,6 +370,7 @@ pub enum HidAction {
 #[derive(Default)]
 pub struct InputState {
     system: UuRemoteSystem,
+    reverse_scroll: bool,
     modifiers: u8,
     keys: BTreeSet<u8>,
     buttons: BTreeSet<u8>,
@@ -377,9 +378,10 @@ pub struct InputState {
 }
 
 impl InputState {
-    pub fn new(system: UuRemoteSystem) -> Self {
+    pub fn new(system: UuRemoteSystem, reverse_scroll: bool) -> Self {
         Self {
             system,
+            reverse_scroll,
             ..Self::default()
         }
     }
@@ -475,6 +477,9 @@ impl InputState {
                 }
             }
             ControlInput::MouseScroll { dy, .. } => {
+                // Reverse before accumulation so precise trackpad remainders keep their direction.
+                let dy = dy.clamp(-12_000, 12_000);
+                let dy = if self.reverse_scroll { -dy } else { dy };
                 // One wheel notch is 120; precise trackpads send smaller deltas. Positive is up.
                 self.scroll_remainder =
                     (self.scroll_remainder + dy.clamp(-12_000, 12_000)).clamp(-12_000, 12_000);
@@ -611,7 +616,7 @@ mod tests {
             (UuRemoteSystem::Macos, CanonicalKey::Backspace, 0x2a),
             (UuRemoteSystem::Windows, CanonicalKey::Digit3, 0x20),
         ] {
-            let mut state = InputState::new(system);
+            let mut state = InputState::new(system, false);
             assert_eq!(
                 keyboard(&state.translate(&press)),
                 vec![(KeyEventType::Down, key, 0)]
@@ -632,7 +637,7 @@ mod tests {
 
     #[test]
     fn macos_copy_and_disconnect_preserve_then_release_command() {
-        let mut state = InputState::new(UuRemoteSystem::Macos);
+        let mut state = InputState::new(UuRemoteSystem::Macos, true);
         let command = decode(br#"{"action":"kbd_press","key":55}"#).unwrap();
         let copy = decode(br#"{"action":"kbd_press","key":8}"#).unwrap();
         assert_eq!(
@@ -756,6 +761,42 @@ mod tests {
                 pressed: true
             })
             .is_empty());
+    }
+
+    #[test]
+    fn scroll_override_preserves_precise_deltas_and_disconnect_clears_remainder() {
+        for reverse in [false, true] {
+            let mut state = InputState::new(UuRemoteSystem::Macos, reverse);
+            let scroll = |dy| ControlInput::MouseScroll { dx: 0, dy };
+            assert!(state.translate(&scroll(60)).is_empty());
+            let events = state.translate(&scroll(180));
+            assert_eq!(events.len(), 2);
+            assert!(events.iter().all(|event| matches!(event, HidAction::Mouse(m) if m.scroll == if reverse { -1 } else { 1 })));
+            let events = state.translate(&scroll(-120));
+            assert!(
+                matches!(&events[..], [HidAction::Mouse(m)] if m.scroll == if reverse { 1 } else { -1 })
+            );
+            assert!(state.translate(&scroll(60)).is_empty());
+            state.release_all();
+            assert!(state.translate(&scroll(60)).is_empty());
+            // Clamp before reversal, including the minimum signed input.
+            assert!(state.translate(&scroll(i32::MIN)).len() <= 100);
+        }
+    }
+
+    #[test]
+    fn saved_scroll_override_survives_reload_but_system_switch_resets_default() {
+        use crate::config::UuRemoteConfig;
+        let mut config: UuRemoteConfig = serde_json::from_str(r#"{"system":"macos"}"#).unwrap();
+        assert!(config.reverse_scroll_enabled());
+        config.reverse_scroll = Some(false);
+        config = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        config.set_system(UuRemoteSystem::Macos);
+        assert!(!config.reverse_scroll_enabled());
+        config.set_system(UuRemoteSystem::Windows);
+        assert!(!config.reverse_scroll_enabled());
+        config.set_system(UuRemoteSystem::Macos);
+        assert!(config.reverse_scroll_enabled());
     }
 
     #[test]

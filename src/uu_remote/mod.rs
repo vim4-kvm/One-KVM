@@ -179,6 +179,11 @@ impl UuRemoteService {
                 register_device(&self.inner, &credentials, profile).await?;
             }
         }
+        if old.system == profile.system
+            && old.reverse_scroll_enabled() != profile.reverse_scroll_enabled()
+        {
+            self.stop().await;
+        }
         *self.inner.profile.lock() = profile.clone();
         Ok(())
     }
@@ -633,8 +638,10 @@ async fn room_loop(
     // be-controlled announces the capture type and ICE servers before the offer arrives.
     let mut pending: HashMap<String, (u64, ice::SessionIce)> = HashMap::new();
     let mut next_pending: Option<(u64, ice::SessionIce)> = None;
+    let profile = inner.profile.lock().clone();
     let deps = PeerDeps {
-        system: inner.profile.lock().system,
+        system: profile.system,
+        reverse_scroll: profile.reverse_scroll_enabled(),
         video: inner.video.clone(),
         hid: inner.hid.clone(),
         audio: inner.audio.clone(),

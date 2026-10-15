@@ -22,6 +22,7 @@ pub struct UuRemoteConfigUpdate {
     pub enabled: Option<bool>,
     pub system: Option<UuRemoteSystem>,
     pub device_name: Option<String>,
+    pub reverse_scroll: Option<bool>,
 }
 
 async fn status_response(state: &RemoteAccessApiState) -> UuRemoteStatusResponse {
@@ -48,7 +49,10 @@ pub async fn update_uu_remote_config(
         new_config.enabled = enabled;
     }
     if let Some(system) = req.system {
-        new_config.system = system;
+        new_config.set_system(system);
+    }
+    if let Some(reverse) = req.reverse_scroll {
+        new_config.reverse_scroll = Some(reverse);
     }
     if let Some(name) = req.device_name {
         let name = name.trim();

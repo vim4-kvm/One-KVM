@@ -69,6 +69,8 @@ pub struct UuRemoteConfig {
     pub system: UuRemoteSystem,
     #[serde(default = "uu_device_name")]
     pub device_name: String,
+    /// None uses the system default, including configurations saved before this setting existed.
+    pub reverse_scroll: Option<bool>,
 }
 
 fn uu_device_name() -> String {
@@ -81,6 +83,21 @@ impl Default for UuRemoteConfig {
             enabled: false,
             system: UuRemoteSystem::Windows,
             device_name: uu_device_name(),
+            reverse_scroll: None,
+        }
+    }
+}
+
+impl UuRemoteConfig {
+    pub fn reverse_scroll_enabled(&self) -> bool {
+        self.reverse_scroll
+            .unwrap_or(self.system == UuRemoteSystem::Macos)
+    }
+
+    pub fn set_system(&mut self, system: UuRemoteSystem) {
+        if self.system != system {
+            self.system = system;
+            self.reverse_scroll = None;
         }
     }
 }

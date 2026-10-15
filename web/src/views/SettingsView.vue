@@ -571,6 +571,14 @@ const uuLogin = ref<UuLoginState>({ stage: 'idle' })
 const uuLoading = ref(false)
 const uuDeviceName = ref('vim4-kvm')
 const uuSystem = ref<'windows' | 'macos'>('windows')
+const uuReverseScroll = ref(false)
+
+function changeUuSystem(system: unknown) {
+  if (system === 'windows' || system === 'macos') {
+    uuSystem.value = system
+    uuReverseScroll.value = system === 'macos'
+  }
+}
 let uuLoginTimer: ReturnType<typeof setInterval> | null = null
 const uuLoginActive = computed(() => uuLogin.value.stage === 'waiting' || uuLogin.value.stage === 'scanned')
 
@@ -2704,6 +2712,7 @@ async function loadUuRemote() {
     uuStatus.value = status
     uuDeviceName.value = status.config.device_name
     uuSystem.value = status.config.system
+    uuReverseScroll.value = status.config.reverse_scroll ?? status.config.system === 'macos'
     uuLogin.value = login
     if (uuLoginActive.value && !uuLoginTimer) uuLoginTimer = setInterval(pollUuLogin, 2000)
   } catch {
@@ -2725,9 +2734,10 @@ async function setUuRemoteEnabled(enabled: boolean) {
 async function saveUuIdentity() {
   uuLoading.value = true
   try {
-    uuStatus.value = await uuRemoteApi.update({ device_name: uuDeviceName.value, system: uuSystem.value })
+    uuStatus.value = await uuRemoteApi.update({ device_name: uuDeviceName.value, system: uuSystem.value, reverse_scroll: uuReverseScroll.value })
     uuDeviceName.value = uuStatus.value.config.device_name
     uuSystem.value = uuStatus.value.config.system
+    uuReverseScroll.value = uuStatus.value.config.reverse_scroll ?? uuSystem.value === 'macos'
     uuLogin.value = await uuRemoteApi.getLogin()
     toast.success(t('vim4Video.applied'))
   } catch {
@@ -5234,7 +5244,7 @@ watch(isWindows, () => {
                   <Label for="uu-device-name">{{ t('extensions.uuRemote.deviceName') }}</Label>
                   <Input id="uu-device-name" v-model="uuDeviceName" maxlength="64" required :disabled="uuLoading || !uuStatus" />
                   <Label>{{ t('extensions.uuRemote.system') }}</Label>
-                  <Select v-model="uuSystem" :disabled="uuLoading || !uuStatus">
+                  <Select :model-value="uuSystem" @update:model-value="changeUuSystem" :disabled="uuLoading || !uuStatus">
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="windows">Windows</SelectItem>
@@ -5242,6 +5252,11 @@ watch(isWindows, () => {
                     </SelectContent>
                   </Select>
                   <p class="text-xs text-muted-foreground">{{ t('extensions.uuRemote.identityHint') }}</p>
+                  <div class="flex items-center justify-between gap-3">
+                    <Label for="uu-reverse-scroll">{{ t('extensions.uuRemote.reverseScroll') }}</Label>
+                    <Switch id="uu-reverse-scroll" v-model="uuReverseScroll" :disabled="uuLoading || !uuStatus" />
+                  </div>
+                  <p class="text-xs text-muted-foreground">{{ t('extensions.uuRemote.reverseScrollHint') }}</p>
                   <Button type="submit" size="sm" :disabled="uuLoading || !uuStatus">{{ t('common.apply') }}</Button>
                 </form>
                 <Vim4VideoSettings v-if="isVim4 && activeSection === 'third-party-access'" output-only class="border-t pt-4" />

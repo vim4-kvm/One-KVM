@@ -1264,6 +1264,8 @@ export default {
       urlPreview: 'VNC Address Preview',
     },
     uuRemote: {
+      reverseScroll: 'Reverse scroll direction',
+      reverseScrollHint: 'Switching to Mac enables this by default; Windows disables it. You can override it. Apply saves the setting; a direction change disconnects the current UU session and takes effect on reconnect.',
       deviceName: 'Device name',
       system: 'Controlled device system',
       identityHint: 'Windows and Mac keep separate logins. Switching system disconnects the viewer and requires QR login the first time; switching back restores the previous login. Name and video settings apply when saved.',

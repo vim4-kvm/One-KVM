@@ -377,7 +377,7 @@ export const vncConfigApi = {
 export type UuRemoteServiceState = 'stopped' | 'waiting_login' | 'connecting' | 'online' | 'error'
 
 export interface UuRemoteStatusResponse {
-  config: { enabled: boolean; system: 'windows' | 'macos'; device_name: string }
+  config: { enabled: boolean; system: 'windows' | 'macos'; device_name: string; reverse_scroll: boolean | null }
   video?: { height: number; fps: number; bitrate_kbps: number } | null
   status: {
     state: UuRemoteServiceState

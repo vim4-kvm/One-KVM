@@ -219,6 +219,7 @@ struct Context {
 #[derive(Clone)]
 pub struct PeerDeps {
     pub system: crate::config::UuRemoteSystem,
+    pub reverse_scroll: bool,
     pub video: Arc<VideoStreamManager>,
     pub hid: Arc<HidController>,
     pub audio: Arc<AudioController>,
@@ -369,7 +370,7 @@ impl Peer {
             sequence: AtomicU64::new(1),
             screen: watch::channel(initial).0,
             quality: AtomicU64::new(wire::quality::AUTO),
-            input: Mutex::new(InputState::new(deps.system)),
+            input: Mutex::new(InputState::new(deps.system, deps.reverse_scroll)),
         });
 
         let (ice_context, ice_signal) = (context.clone(), deps.signaling.clone());

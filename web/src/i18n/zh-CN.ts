@@ -1263,6 +1263,8 @@ export default {
       urlPreview: 'VNC 地址预览',
     },
     uuRemote: {
+      reverseScroll: '反转滚动方向',
+      reverseScrollHint: '切到 Mac 默认开启，Windows 默认关闭，可手动修改。点击应用后保存；方向变化会断开当前 UU 连接，重连后生效。',
       deviceName: '设备名称',
       system: '被控设备系统',
       identityHint: 'Windows 和 Mac 分别保存登录。首次切换系统后需要重新扫码，当前远程连接会断开；切回可恢复原有登录。名称与视频设置保存后生效。',
