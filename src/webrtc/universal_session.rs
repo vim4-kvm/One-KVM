@@ -145,9 +145,17 @@ impl UniversalSession {
         let video_track = Arc::new(UniversalVideoTrack::new(track_config));
 
         let audio_track = if config.audio_enabled {
+            // KVM video must not wait for the audio jitter buffer, including
+            // when the element is muted. Browsers use SDP stream IDs as A/V
+            // sync groups; independent groups keep interactive video current.
+            let audio_stream_id = if cfg!(feature = "vim4") {
+                "one-kvm-audio"
+            } else {
+                "one-kvm-stream"
+            };
             Some(Arc::new(OpusAudioTrack::new(
                 &format!("audio-{}", &session_id[..8.min(session_id.len())]),
-                "one-kvm-stream",
+                audio_stream_id,
             )))
         } else {
             None
@@ -571,6 +579,10 @@ impl UniversalSession {
                 session_id
             );
 
+            // A cached bootstrap frame can predate ICE by hundreds of ms.
+            // Sending it next to a fresh frame looks like extreme network
+            // jitter to the receiver. Start with a newly requested keyframe.
+            while frame_rx.try_recv().is_ok() {}
             request_keyframe();
             let mut waiting_for_keyframe = true;
             let mut last_sequence: Option<u64> = None;
@@ -753,6 +765,10 @@ impl UniversalSession {
             );
 
             let mut packets_sent: u64 = 0;
+            let mut previous_sequence = None;
+            // ICE negotiation may take longer than the bounded audio queue.
+            // Begin with live audio instead of draining an obsolete burst.
+            while opus_rx.try_recv().is_ok() {}
 
             loop {
                 tokio::select! {
@@ -778,8 +794,10 @@ impl UniversalSession {
                             }
                         };
 
-                        let samples = 960u32;
-                        if let Err(e) = audio_track.write_packet(&opus_frame.data, samples).await {
+                        let result = audio_track.write_frame(&opus_frame, previous_sequence).await;
+                        // Packetization advances RTP time even when the transport write fails.
+                        previous_sequence = Some(opus_frame.sequence);
+                        if let Err(e) = result {
                             if packets_sent.is_multiple_of(100) {
                                 debug!("Failed to write audio packet: {}", e);
                             }
@@ -936,6 +954,29 @@ pub struct UniversalSessionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn negotiated_audio_does_not_put_vim4_video_in_its_playout_group() {
+        let session = UniversalSession::new(
+            UniversalSessionConfig {
+                audio_enabled: true,
+                ..Default::default()
+            },
+            "playout-test".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let offer = session.pc.create_offer(None).await.unwrap();
+        let groups: std::collections::HashSet<_> = offer
+            .sdp
+            .lines()
+            .filter_map(|line| line.strip_prefix("a=msid:"))
+            .filter_map(|value| value.split_whitespace().next())
+            .collect();
+        session.close().await.unwrap();
+        assert_eq!(groups.len(), if cfg!(feature = "vim4") { 2 } else { 1 });
+    }
 
     #[test]
     fn test_universal_session_config_default() {
