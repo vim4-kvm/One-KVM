@@ -88,9 +88,10 @@ packaging/ubuntu/Dockerfile 固定。Ubuntu libyuv 使用兼容的两步 BGR 转
 依赖运行时检测 CPU 能力，不支持时回退软件实现。不要用外部 `RUSTFLAGS` 覆盖
 这些配置。它们加速 RustCrypto 后端；当前 OpenSSL AES-CM 路径已有硬件 AES，
 因此这些开关本身不能消除 UU 会话的大关键帧发送峰值。
-VIM4 H.265 设置 `i-qp-min=28`，避免硬件码控在静态桌面持续降低 I 帧 QP，
-使周期关键帧膨胀到约 0.9 MB、占用数个帧间隔发送。GOP 和 P 帧码控保持原设置；
-该限制可能降低 I 帧细节，不能用静态桌面测试替代运动场景和文字画质验收。
+VIM4 H.265 使用 `gop=0 intra-refresh-rows=1`，每帧刷新一行 CTU，避免周期
+整幅 I 帧造成编码和发送突发。保留厂商 QP 范围；静态画面也可能接近目标码率。
+编码启动、新订阅和 PLI/FIR 仍触发完整关键帧，必须验证重新连接及丢包恢复；
+行刷新本身不等于接收端已经恢复参考链。H.264 保留原 GOP 策略。
 GE2D 缩放使用私有 `libgst-aml-dma-allocator.so`，仅实现 amlvconv 调用的
 分配器入口，将 DMA fd 的关闭权交给标准 GstDmaBufMemory。厂商版本同时在
 附属 qdata 中关闭 fd，反复缩放/切编码会误关复用的 fd。服务的 LD_LIBRARY_PATH

@@ -21,21 +21,21 @@ fn description(config: &SharedVideoPipelineConfig, source: Resolution, fps: u32)
             ))
         }
     };
-    // Wave521 rate control keeps lowering HEVC I-frame QP on idle desktops.
-    // At 4K60 this produced ~0.9 MB periodic frames and ~40 ms RTP bursts.
-    // Bound that quality escalation without changing GOP or P-frame control;
-    // QP 28 yielded ~275 KB I-frames on the same desktop (initial QP is 30).
-    let keyframe_options = if config.output_codec == VideoEncoderType::H265 {
-        "i-qp-min=28"
+    // A full HEVC I-frame stalls both encoding and delivery at 4K60. Refresh
+    // one CTU row per frame instead of producing periodic I-frame bursts.
+    // GOP 0 still emits the initial I-frame and honors force-key-unit events:
+    // UU/WebRTC/RTSP request one on subscription; PLI/FIR recover lost references.
+    let (gop, keyframe_options) = if config.output_codec == VideoEncoderType::H265 {
+        (0, "intra-refresh-rows=1")
     } else {
-        ""
+        (config.bitrate_preset.gop_size(fps), "")
     };
     let filter = config.output.filter(source, fps);
     Ok(format!("vfmcapsrc ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! {filter}\
-        amlvenc name=encoder bitrate={} gop={} framerate={} {keyframe_options} min-force-key-unit-interval=250000000 ! \
+        amlvenc name=encoder bitrate={} gop={gop} framerate={} {keyframe_options} min-force-key-unit-interval=250000000 ! \
         video/x-{codec} ! {codec}parse config-interval=-1 ! \
         video/x-{codec},stream-format=byte-stream,alignment=au ! appsink name=frames sync=false max-buffers=2",
-        config.bitrate_kbps().clamp(1000, 60000), config.bitrate_preset.gop_size(fps), fps))
+        config.bitrate_kbps().clamp(1000, 60000), fps))
 }
 
 impl SharedVideoPipeline {
