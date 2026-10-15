@@ -96,7 +96,8 @@ pub struct OutputSettings {
 
 impl OutputSettings {
     pub fn validate(self) -> crate::error::Result<()> {
-        if ![0, 720, 1080, 2160].contains(&self.height) || ![0, 10, 15, 30, 60].contains(&self.fps)
+        if (self.height != 0 && (!(180..=2160).contains(&self.height) || self.height % 2 != 0))
+            || (self.fps != 0 && !(5..=60).contains(&self.fps))
         {
             return Err(crate::error::AppError::BadRequest(
                 "Unsupported output size or frame rate".into(),

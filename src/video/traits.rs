@@ -40,6 +40,17 @@ pub trait VideoOutput: Send + Sync {
     async fn get_pipeline_config(&self) -> Option<SharedVideoPipelineConfig>;
     async fn set_video_codec(&self, codec: VideoCodecType) -> Result<()>;
     async fn set_bitrate_preset(&self, preset: BitratePreset) -> Result<()>;
+    #[cfg(feature = "vim4")]
+    async fn set_vim4_encoding(
+        &self,
+        output: crate::platform::vim4::OutputSettings,
+        preset: BitratePreset,
+    ) -> Result<()> {
+        let _ = (output, preset);
+        Err(crate::error::AppError::VideoError(
+            "Output controls unavailable".into(),
+        ))
+    }
     async fn request_keyframe(&self) -> Result<()>;
     async fn current_video_geometry(&self) -> (Resolution, PixelFormat, u32);
     async fn pipeline_stats(&self) -> Option<SharedVideoPipelineStats>;

@@ -781,6 +781,16 @@ impl VideoStreamManager {
         self.webrtc_streamer.set_bitrate_preset(preset).await
     }
 
+    /// Apply output limits and bitrate together, preserving external subscribers.
+    #[cfg(feature = "vim4")]
+    pub async fn set_vim4_encoding(
+        &self,
+        output: crate::platform::vim4::OutputSettings,
+        preset: crate::video::codec::BitratePreset,
+    ) -> crate::error::Result<()> {
+        self.webrtc_streamer.set_vim4_encoding(output, preset).await
+    }
+
     /// Request a keyframe from the shared video pipeline
     pub async fn request_keyframe(&self) -> crate::error::Result<()> {
         self.webrtc_streamer.request_keyframe().await

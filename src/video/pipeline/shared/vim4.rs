@@ -1,5 +1,6 @@
 //! VIM4 keeps capture buffers in DMA memory until the hardware encoder consumes them.
 use super::*;
+use crate::video::codec::BitratePreset;
 use gst::prelude::*;
 use gstreamer as gst;
 
@@ -29,6 +30,45 @@ fn description(config: &SharedVideoPipelineConfig, source: Resolution, fps: u32)
 }
 
 impl SharedVideoPipeline {
+    /// Reconfigure the DMA pipeline without dropping its subscribers or peer connections.
+    pub async fn set_vim4_encoding(
+        &self,
+        output: crate::platform::vim4::OutputSettings,
+        preset: BitratePreset,
+    ) -> Result<()> {
+        let mut applied = self.vim4_applied.subscribe();
+        let previous = {
+            let mut config = self.config.write().await;
+            let previous = (config.output, config.bitrate_preset);
+            config.output = output;
+            config.bitrate_preset = preset;
+            previous
+        };
+        // A requested configuration is not evidence that GStreamer produced a frame.
+        let ready = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if *applied.borrow_and_update() == Some((output, preset)) {
+                    return Ok(());
+                }
+                applied
+                    .changed()
+                    .await
+                    .map_err(|_| AppError::VideoError("Video pipeline closed".into()))?;
+            }
+        })
+        .await;
+        if let Ok(result) = ready {
+            return result;
+        }
+        let mut config = self.config.write().await;
+        if (config.output, config.bitrate_preset) == (output, preset) {
+            (config.output, config.bitrate_preset) = previous;
+        }
+        Err(AppError::VideoError(
+            "Timed out waiting for the requested video output".into(),
+        ))
+    }
+
     pub(super) async fn start_vim4(self: &Arc<Self>) -> Result<()> {
         if self.lifecycle() != PipelineLifecycle::Stopped {
             return Ok(());
@@ -68,7 +108,11 @@ impl SharedVideoPipeline {
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             };
-            config.bitrate_preset = self.config.blocking_read().bitrate_preset;
+            {
+                let current = self.config.blocking_read();
+                config.bitrate_preset = current.bitrate_preset;
+                config.output = current.output;
+            }
             match self.capture_vim4(&config, source) {
                 Ok(()) => {}
                 Err(e) => {
@@ -131,9 +175,13 @@ impl SharedVideoPipeline {
             }
             if check.elapsed() >= Duration::from_millis(250) {
                 check = Instant::now();
-                if self.config.blocking_read().bitrate_preset != config.bitrate_preset {
+                let current = self.config.blocking_read();
+                if current.bitrate_preset != config.bitrate_preset
+                    || current.output != config.output
+                {
                     break;
                 }
+                drop(current);
                 let signal = crate::platform::vim4::signal();
                 rate_changes = if signal != Some(source) {
                     rate_changes + 1
@@ -182,6 +230,15 @@ impl SharedVideoPipeline {
                     current.fps = fps;
                 }
             }
+            self.vim4_applied.send_if_modified(|applied| {
+                let next = Some((config.output, config.bitrate_preset));
+                if *applied == next {
+                    false
+                } else {
+                    *applied = next;
+                    true
+                }
+            });
             let frame = Arc::new(EncodedVideoFrame {
                 data,
                 is_keyframe,

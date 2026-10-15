@@ -547,6 +547,13 @@ struct CachedH26xParameterSets {
 /// Universal shared video pipeline
 pub struct SharedVideoPipeline {
     config: RwLock<SharedVideoPipelineConfig>,
+    #[cfg(feature = "vim4")]
+    vim4_applied: watch::Sender<
+        Option<(
+            crate::platform::vim4::OutputSettings,
+            crate::video::codec::BitratePreset,
+        )>,
+    >,
     subscribers: ParkingRwLock<Vec<Arc<VideoSubscriber>>>,
     stats: ParkingMutex<SharedVideoPipelineStats>,
     frame_mailbox: FrameMailboxHandle,
@@ -611,6 +618,8 @@ impl SharedVideoPipeline {
 
         let pipeline = Arc::new(Self {
             config: RwLock::new(config),
+            #[cfg(feature = "vim4")]
+            vim4_applied: watch::channel(None).0,
             subscribers: ParkingRwLock::new(Vec::new()),
             stats: ParkingMutex::new(SharedVideoPipelineStats::default()),
             frame_mailbox: Arc::new(ParkingMutex::new(None)),
@@ -2774,7 +2783,12 @@ mod tests {
         for sequence in 1..=6 {
             assert_eq!(receiver.try_recv().unwrap().sequence, sequence);
         }
-        assert_eq!(pipeline.stats_snapshot().encoded_frames_skipped_for_slow_subscribers, 0);
+        assert_eq!(
+            pipeline
+                .stats_snapshot()
+                .encoded_frames_skipped_for_slow_subscribers,
+            0
+        );
     }
 
     #[test]

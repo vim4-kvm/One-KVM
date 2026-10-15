@@ -1363,6 +1363,33 @@ impl WebRtcStreamer {
 
 #[async_trait::async_trait]
 impl crate::video::traits::VideoOutput for WebRtcStreamer {
+    #[cfg(feature = "vim4")]
+    async fn set_vim4_encoding(
+        &self,
+        output: crate::platform::vim4::OutputSettings,
+        preset: BitratePreset,
+    ) -> Result<()> {
+        output.validate()?;
+        let previous = {
+            let mut config = self.config.write().await;
+            let previous = (config.output, config.bitrate_preset);
+            config.output = output;
+            config.bitrate_preset = preset;
+            previous
+        };
+        let result = match self.ensure_video_pipeline().await {
+            Ok(pipeline) => pipeline.set_vim4_encoding(output, preset).await,
+            Err(error) => Err(error),
+        };
+        if result.is_err() {
+            let mut config = self.config.write().await;
+            if (config.output, config.bitrate_preset) == (output, preset) {
+                (config.output, config.bitrate_preset) = previous;
+            }
+        }
+        result
+    }
+
     async fn set_event_bus(&self, events: Arc<EventBus>) {
         self.set_event_bus(events).await;
     }
