@@ -406,6 +406,7 @@ pub struct Peer {
     pub pc: Arc<RTCPeerConnection>,
     context: Arc<Mutex<Context>>,
     video: Arc<VideoStreamManager>,
+    codec: VideoCodecType,
 }
 
 fn select_video_codec(
@@ -602,7 +603,6 @@ impl Peer {
             .add_track(video_track.local())
             .await
             .map_err(|e| format!("Add video track failed: {e}"))?;
-        restrict_video_codec(&pc, &video_sender, codec).await?;
         tokio::spawn(read_video_feedback(video_sender, deps.video.clone()));
         // The viewer always offers an Opus m-line.
         let audio_track = Arc::new(TrackLocalStaticSample::new(
@@ -722,6 +722,7 @@ impl Peer {
             pc,
             context,
             video: deps.video.clone(),
+            codec,
         })
     }
 
@@ -739,6 +740,7 @@ impl Peer {
             .set_remote_description(offer)
             .await
             .map_err(|e| format!("Set remote description failed: {e}"))?;
+        restrict_video_codec(&self.pc, self.codec).await?;
         let answer = self
             .pc
             .create_answer(None)
@@ -813,30 +815,38 @@ impl Peer {
     }
 }
 
-async fn restrict_video_codec(
-    pc: &RTCPeerConnection,
-    sender: &RTCRtpSender,
-    codec: VideoCodecType,
-) -> Result<(), String> {
+async fn restrict_video_codec(pc: &RTCPeerConnection, codec: VideoCodecType) -> Result<(), String> {
     if codec == VideoCodecType::H265 {
-        let codecs: Vec<_> = sender
-            .get_parameters()
-            .await
-            .rtp_parameters
-            .codecs
-            .into_iter()
-            .filter(|c| c.capability.mime_type.eq_ignore_ascii_case("video/H265"))
-            .collect();
-        if codecs.is_empty() {
-            return Err("H.265 is not registered in the WebRTC engine".into());
-        }
+        // Apply after set_remote_description: webrtc-rs preserves nonzero
+        // preference payload types instead of remapping them to the offer.
+        // Reading parameters before negotiation would pin our default 126.
         for transceiver in pc.get_transceivers().await {
-            if transceiver.kind() == RTPCodecType::Video {
-                transceiver
-                    .set_codec_preferences(codecs.clone())
-                    .await
-                    .map_err(|e| format!("Select H.265 transceiver failed: {e}"))?;
+            if transceiver.kind() != RTPCodecType::Video {
+                continue;
             }
+            let codecs: Vec<_> = transceiver
+                .sender()
+                .await
+                .get_parameters()
+                .await
+                .rtp_parameters
+                .codecs
+                .into_iter()
+                .filter(|c| c.capability.mime_type.eq_ignore_ascii_case("video/H265"))
+                .collect();
+            if codecs.is_empty() {
+                return Err("H.265 is not registered in the WebRTC engine".into());
+            }
+            for codec in &codecs {
+                info!(
+                    payload_type = codec.payload_type,
+                    "UU negotiated H.265 RTP payload"
+                );
+            }
+            transceiver
+                .set_codec_preferences(codecs)
+                .await
+                .map_err(|e| format!("Select H.265 transceiver failed: {e}"))?;
         }
     }
     Ok(())
@@ -1439,18 +1449,26 @@ mod tests {
             .add_transceiver_from_kind(RTPCodecType::Video, None)
             .await
             .unwrap();
-        let offer = viewer.create_offer(None).await.unwrap();
+        let mut offer = viewer.create_offer(None).await.unwrap();
+        // A real viewer allocates its own dynamic payload types, independently
+        // of the host MediaEngine's default HEVC payload type (126).
+        offer.sdp = offer.sdp.replace(" 126", " 104").replace(":126", ":104");
         assert!(offer.sdp.contains("H264/90000"));
         assert!(offer.sdp.contains("H265/90000"));
         let track = VideoTrack::new(VideoCodecType::H265);
         let sender = host.add_track(track.local()).await.unwrap();
-        restrict_video_codec(&host, &sender, VideoCodecType::H265)
+        host.set_remote_description(offer).await.unwrap();
+        restrict_video_codec(&host, VideoCodecType::H265)
             .await
             .unwrap();
-        host.set_remote_description(offer).await.unwrap();
         let answer = host.create_answer(None).await.unwrap();
         assert!(answer.sdp.contains("H265/90000"));
+        assert!(answer.sdp.contains("a=rtpmap:104 H265/90000"));
         assert!(!answer.sdp.contains("H264/90000"));
+        host.set_local_description(answer).await.unwrap();
+        let parameters = sender.get_parameters().await;
+        assert_eq!(parameters.rtp_parameters.codecs.len(), 1);
+        assert_eq!(parameters.rtp_parameters.codecs[0].payload_type, 104);
         host.close().await.unwrap();
         viewer.close().await.unwrap();
     }
