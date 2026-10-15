@@ -480,19 +480,19 @@ impl InputState {
                 // Reverse before accumulation so precise trackpad remainders keep their direction.
                 let dy = dy.clamp(-12_000, 12_000);
                 let dy = if self.reverse_scroll { -dy } else { dy };
-                // One wheel notch is 120; precise trackpads send smaller deltas. Positive is up.
+                // Keep the existing 120-unit HID scale and accumulate smaller
+                // deltas. Mac UU injects pixels instead: this scale is an
+                // approximation, not equivalent to native pixel scrolling.
                 self.scroll_remainder =
                     (self.scroll_remainder + dy.clamp(-12_000, 12_000)).clamp(-12_000, 12_000);
                 let notches = self.scroll_remainder / 120;
                 self.scroll_remainder %= 120;
-                for _ in 0..notches.unsigned_abs().min(100) {
-                    out.push(HidAction::Mouse(MouseEvent {
-                        event_type: MouseEventType::Scroll,
-                        x: 0,
-                        y: 0,
-                        button: None,
-                        scroll: if notches > 0 { 1 } else { -1 },
-                    }));
+                if notches != 0 {
+                    // Preserve one CONTROL event as one HID report. Replaying its
+                    // count as back-to-back one-notch reports invents a faster
+                    // input cadence and can amplify host scroll acceleration.
+                    // The accumulator bound limits the count to ±100, within i8.
+                    out.push(HidAction::Mouse(MouseEvent::scroll(notches as i8)));
                 }
             }
         }
@@ -754,7 +754,7 @@ mod tests {
         let scroll = state.translate(&ControlInput::MouseScroll { dx: 0, dy: 60 });
         assert!(matches!(&scroll[..], [HidAction::Mouse(m)] if m.scroll == 1));
         let down = state.translate(&ControlInput::MouseScroll { dx: 0, dy: -240 });
-        assert_eq!(down.len(), 2);
+        assert!(matches!(&down[..], [HidAction::Mouse(m)] if m.scroll == -2));
         assert!(state
             .translate(&ControlInput::MouseButton {
                 button: 3,
@@ -770,8 +770,9 @@ mod tests {
             let scroll = |dy| ControlInput::MouseScroll { dx: 0, dy };
             assert!(state.translate(&scroll(60)).is_empty());
             let events = state.translate(&scroll(180));
-            assert_eq!(events.len(), 2);
-            assert!(events.iter().all(|event| matches!(event, HidAction::Mouse(m) if m.scroll == if reverse { -1 } else { 1 })));
+            assert!(
+                matches!(&events[..], [HidAction::Mouse(m)] if m.scroll == if reverse { -2 } else { 2 })
+            );
             let events = state.translate(&scroll(-120));
             assert!(
                 matches!(&events[..], [HidAction::Mouse(m)] if m.scroll == if reverse { 1 } else { -1 })
@@ -779,8 +780,12 @@ mod tests {
             assert!(state.translate(&scroll(60)).is_empty());
             state.release_all();
             assert!(state.translate(&scroll(60)).is_empty());
-            // Clamp before reversal, including the minimum signed input.
-            assert!(state.translate(&scroll(i32::MIN)).len() <= 100);
+            // Clamp before reversal, including the minimum signed input. The
+            // pending opposite half-notch cancels part of the bounded input.
+            let events = state.translate(&scroll(i32::MIN));
+            assert!(
+                matches!(&events[..], [HidAction::Mouse(m)] if m.scroll == if reverse { 99 } else { -99 })
+            );
         }
     }
 

@@ -111,6 +111,10 @@ GE2D 缩放使用私有 `libgst-aml-dma-allocator.so`，仅实现 amlvconv 调�
 
 ## UU 远程
 
+UU 滚轮保留小增量余数；一条控制消息换算出多格时，使用单份 HID 报告承载总格数，
+避免拆成连续的单格报告而改变输入节奏。当前仍按 120 单位转换一格；官方 Mac UU
+使用精确像素滚动，普通 USB 滚轮还会经过被控系统加速，因此两者并非像素等价。
+
 设置页“第三方访问”的 UU 远程卡片让网易UU远程官方 Windows/Mac/手机客户端经网易云端
 控制被控机，非网易官方功能。协议行为来自 uu-remote-linux（GPL-3.0-or-later，见
 `src/uu_remote/NOTICE`），网页可选择 Windows 或 Mac 身份，默认 Windows，设备名称默认
