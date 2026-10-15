@@ -803,6 +803,36 @@ impl Peer {
         self.pc.connection_state() == PcState::Connected
     }
 
+    pub async fn status(&self, id: String) -> super::UuSessionStatus {
+        let client_id = self.context.lock().await.client_id.clone();
+        let state = self.pc.connection_state();
+        // A disconnected transport may retain its old selected pair. Do not
+        // present that pair as a currently working media path.
+        let link = if state == PcState::Connected {
+            self.pc
+                .dtls_transport()
+                .ice_transport()
+                .get_selected_candidate_pair()
+                .await
+                .map(Into::into)
+        } else {
+            None
+        };
+        super::UuSessionStatus {
+            id,
+            client_id,
+            state: state.to_string(),
+            ice_state: self.pc.ice_connection_state().to_string(),
+            video_codec: if self.codec == VideoCodecType::H265 {
+                "h265"
+            } else {
+                "h264"
+            }
+            .into(),
+            link,
+        }
+    }
+
     pub fn ended(&self) -> bool {
         closed(self.pc.connection_state())
     }

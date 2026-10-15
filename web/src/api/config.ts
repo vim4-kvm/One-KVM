@@ -376,6 +376,23 @@ export const vncConfigApi = {
 
 export type UuRemoteServiceState = 'stopped' | 'waiting_login' | 'connecting' | 'online' | 'error'
 
+export interface UuIceEndpoint {
+  address: string
+  port: number
+  protocol: string
+  candidate_type: string
+  address_family: string | null
+}
+
+export interface UuSessionStatus {
+  id: string
+  client_id: string | null
+  state: string
+  ice_state: string
+  video_codec: string
+  link: { relayed: boolean; local: UuIceEndpoint; remote: UuIceEndpoint } | null
+}
+
 export interface UuRemoteStatusResponse {
   config: { enabled: boolean; system: 'windows' | 'macos'; device_name: string; reverse_scroll: boolean | null; video_codec: 'auto' | 'h264' | 'h265' }
   video?: { height: number; fps: number; bitrate_kbps: number } | null
@@ -387,6 +404,7 @@ export interface UuRemoteStatusResponse {
     device_id?: string | null
     connection_count: number
     video_codec?: 'h264' | 'h265' | null
+    sessions?: UuSessionStatus[]
   }
 }
 

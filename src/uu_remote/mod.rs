@@ -8,7 +8,10 @@ mod input;
 mod metrics;
 mod peer;
 mod signaling;
+mod status;
 mod wire;
+
+pub use status::UuSessionStatus;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -62,6 +65,7 @@ pub struct UuRemoteStatus {
     pub device_id: Option<String>,
     pub connection_count: u32,
     pub video_codec: Option<crate::config::UuVideoCodec>,
+    pub sessions: Vec<UuSessionStatus>,
 }
 
 #[typeshare]
@@ -202,14 +206,23 @@ impl UuRemoteService {
             (UuRemoteServiceState::Stopped, None)
         };
         let credentials = self.inner.credentials.lock().clone();
-        let connection_count = self
+        let peers: Vec<_> = self
             .inner
             .peers
             .lock()
             .await
-            .values()
-            .filter(|p| p.connected())
-            .count() as u32;
+            .iter()
+            .map(|(id, peer)| (id.clone(), peer.clone()))
+            .collect();
+        // Do not hold the signaling peer-map lock while querying ICE transports.
+        let mut sessions = Vec::new();
+        for (id, peer) in peers {
+            if !peer.ended() {
+                sessions.push(peer.status(id).await);
+            }
+        }
+        sessions.sort_by(|a, b| a.id.cmp(&b.id));
+        let connection_count = sessions.iter().filter(|s| s.state == "connected").count() as u32;
         UuRemoteStatus {
             state,
             error,
@@ -217,6 +230,7 @@ impl UuRemoteService {
             nickname: Some(credentials.nickname).filter(|n| !n.is_empty()),
             device_id: Some(credentials.device_id).filter(|d| !d.is_empty()),
             connection_count,
+            sessions,
             video_codec: self.inner.video.uu_negotiated_codec().await.map(|codec| {
                 if codec == crate::video::codec::VideoCodecType::H265 {
                     crate::config::UuVideoCodec::H265

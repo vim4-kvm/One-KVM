@@ -573,6 +573,33 @@ const uuDeviceName = ref('vim4-kvm')
 const uuSystem = ref<'windows' | 'macos'>('windows')
 const uuReverseScroll = ref(false)
 const uuVideoCodec = ref<'auto' | 'h264' | 'h265'>('auto')
+const uuStatusStale = ref(false)
+let uuStatusTimer: ReturnType<typeof setInterval> | null = null
+let uuStatusPolling = false
+
+async function pollUuStatus() {
+  if (uuLoading.value || uuStatusPolling || document.hidden) return
+  uuStatusPolling = true
+  try {
+    const response = await uuRemoteApi.getStatus()
+    // Refresh diagnostics without overwriting unsaved identity/codec edits.
+    if (!uuLoading.value && uuStatus.value) uuStatus.value.status = response.status
+    uuStatusStale.value = false
+  } catch {
+    uuStatusStale.value = true
+  } finally {
+    uuStatusPolling = false
+  }
+}
+
+watch(activeSection, (section) => {
+  if (uuStatusTimer) clearInterval(uuStatusTimer)
+  uuStatusTimer = section === 'third-party-access' ? setInterval(pollUuStatus, 5000) : null
+}, { immediate: true })
+
+onBeforeUnmount(() => {
+  if (uuStatusTimer) clearInterval(uuStatusTimer)
+})
 
 function changeUuSystem(system: unknown) {
   if (system === 'windows' || system === 'macos') {
@@ -2711,6 +2738,7 @@ async function loadUuRemote() {
   try {
     const [status, login] = await Promise.all([uuRemoteApi.getStatus(), uuRemoteApi.getLogin()])
     uuStatus.value = status
+    uuStatusStale.value = false
     uuDeviceName.value = status.config.device_name
     uuSystem.value = status.config.system
     uuReverseScroll.value = status.config.reverse_scroll ?? status.config.system === 'macos'
@@ -5206,6 +5234,31 @@ watch(isWindows, () => {
                   </div>
                 </div>
                 <p v-if="uuStatus?.status.error" class="text-sm text-destructive">{{ uuStatus.status.error }}</p>
+                <div class="space-y-3 border-t pt-4">
+                  <Label>{{ t('extensions.uuRemote.sessions') }}</Label>
+                  <p v-if="uuStatusStale" class="text-sm text-destructive">{{ t('extensions.uuRemote.statusStale') }}</p>
+                  <p v-if="!uuStatus?.status.sessions?.length" class="text-sm text-muted-foreground">{{ t('extensions.uuRemote.noSessions') }}</p>
+                  <div v-for="session in uuStatus?.status.sessions ?? []" :key="session.id" class="space-y-2 rounded-md border p-3 text-sm">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <Badge variant="secondary">{{ session.state }}</Badge>
+                      <span>WebRTC · {{ session.video_codec.toUpperCase() }} · ICE: {{ session.ice_state }}</span>
+                    </div>
+                    <p class="break-all">Session: <span class="font-mono">{{ session.id }}</span></p>
+                    <p v-if="session.client_id" class="break-all">{{ t('extensions.uuRemote.clientId') }}: <span class="font-mono">{{ session.client_id }}</span></p>
+                    <template v-if="session.link">
+                      <p>{{ t(session.link.relayed ? 'extensions.uuRemote.relayed' : 'extensions.uuRemote.direct') }}</p>
+                      <div v-for="side in (['local', 'remote'] as const)" :key="side" class="break-all font-mono text-xs">
+                        {{ t(`extensions.uuRemote.${side}`) }}:
+                        {{ formatHostForUrl(session.link[side].address) }}:{{ session.link[side].port }}
+                        · {{ session.link[side].protocol.toUpperCase() }}
+                        · {{ session.link[side].address_family ?? '?' }}
+                        · {{ session.link[side].candidate_type }}
+                      </div>
+                    </template>
+                    <p v-else class="text-muted-foreground">{{ t('extensions.uuRemote.noLink') }}</p>
+                  </div>
+                  <p class="text-xs text-muted-foreground">{{ t('extensions.uuRemote.linkHint') }}</p>
+                </div>
                 <Separator />
 
                 <div class="flex items-center justify-between gap-3">
