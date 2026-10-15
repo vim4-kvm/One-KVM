@@ -19,7 +19,7 @@ mod vim4;
 const DEFAULT_UPDATE_BASE_URL: &str = "https://update.one-kvm.cn";
 #[cfg(feature = "vim4")]
 const DEFAULT_UPDATE_BASE_URL: &str =
-    "https://github.com/vim4-kvm/vim4-kvm/releases/latest/download";
+    "https://github.com/vim4-kvm/One-KVM/releases/latest/download";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
