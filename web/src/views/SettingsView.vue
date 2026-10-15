@@ -574,6 +574,10 @@ const uuSystem = ref<'windows' | 'macos'>('windows')
 const uuReverseScroll = ref(false)
 const uuVideoCodec = ref<'auto' | 'h264' | 'h265'>('auto')
 const uuStatusStale = ref(false)
+function uuConnectionStateLabel(state: string) {
+  const key = `extensions.uuRemote.connectionStates.${state}`
+  return te(key) ? t(key) : state
+}
 let uuStatusTimer: ReturnType<typeof setInterval> | null = null
 let uuStatusPolling = false
 
@@ -5235,29 +5239,55 @@ watch(isWindows, () => {
                 </div>
                 <p v-if="uuStatus?.status.error" class="text-sm text-destructive">{{ uuStatus.status.error }}</p>
                 <div class="space-y-3 border-t pt-4">
-                  <Label>{{ t('extensions.uuRemote.sessions') }}</Label>
+                  <div class="flex items-center justify-between gap-3">
+                    <Label>{{ t('extensions.uuRemote.sessions') }}</Label>
+                    <span class="text-xs text-muted-foreground">{{ t('extensions.uuRemote.autoRefresh') }}</span>
+                  </div>
                   <p v-if="uuStatusStale" class="text-sm text-destructive">{{ t('extensions.uuRemote.statusStale') }}</p>
                   <p v-if="!uuStatus?.status.sessions?.length" class="text-sm text-muted-foreground">{{ t('extensions.uuRemote.noSessions') }}</p>
-                  <div v-for="session in uuStatus?.status.sessions ?? []" :key="session.id" class="space-y-2 rounded-md border p-3 text-sm">
-                    <div class="flex flex-wrap items-center gap-2">
-                      <Badge variant="secondary">{{ session.state }}</Badge>
-                      <span>WebRTC · {{ session.video_codec.toUpperCase() }} · ICE: {{ session.ice_state }}</span>
-                    </div>
-                    <p class="break-all">Session: <span class="font-mono">{{ session.id }}</span></p>
-                    <p v-if="session.client_id" class="break-all">{{ t('extensions.uuRemote.clientId') }}: <span class="font-mono">{{ session.client_id }}</span></p>
-                    <template v-if="session.link">
-                      <p>{{ t(session.link.relayed ? 'extensions.uuRemote.relayed' : 'extensions.uuRemote.direct') }}</p>
-                      <div v-for="side in (['local', 'remote'] as const)" :key="side" class="break-all font-mono text-xs">
-                        {{ t(`extensions.uuRemote.${side}`) }}:
-                        {{ formatHostForUrl(session.link[side].address) }}:{{ session.link[side].port }}
-                        · {{ session.link[side].protocol.toUpperCase() }}
-                        · {{ session.link[side].address_family ?? '?' }}
-                        · {{ session.link[side].candidate_type }}
+                  <div v-for="session in uuStatus?.status.sessions ?? []" :key="session.id" class="overflow-hidden rounded-lg border text-sm">
+                    <div class="flex flex-wrap items-center justify-between gap-3 bg-muted/30 px-4 py-3">
+                      <div class="flex items-center gap-2 font-medium">
+                        <span :class="['size-2 rounded-full', uuStatusStale ? 'bg-muted-foreground' : session.state === 'connected' ? 'bg-emerald-500' : 'bg-amber-500']" />
+                        {{ uuStatusStale ? t('extensions.uuRemote.stale') : uuConnectionStateLabel(session.state) }}
                       </div>
-                    </template>
-                    <p v-else class="text-muted-foreground">{{ t('extensions.uuRemote.noLink') }}</p>
+                      <div class="flex flex-wrap items-center gap-1.5">
+                        <Badge v-if="session.link" variant="outline" class="bg-background">{{ t(session.link.relayed ? 'extensions.uuRemote.relayed' : 'extensions.uuRemote.direct') }}</Badge>
+                        <Badge variant="secondary">{{ session.video_codec === 'h265' ? 'H.265' : session.video_codec === 'h264' ? 'H.264' : session.video_codec.toUpperCase() }}</Badge>
+                        <span v-if="session.link" class="ml-1 text-xs text-muted-foreground">{{ session.link.local.protocol.toUpperCase() }} · {{ session.link.local.address_family ?? 'IP' }}</span>
+                      </div>
+                    </div>
+                    <p v-if="!session.link" class="px-4 pt-3 text-xs text-muted-foreground">{{ t('extensions.uuRemote.noLink') }}</p>
+                    <details class="group px-4">
+                      <summary class="flex cursor-pointer list-none items-center gap-1.5 py-3 text-xs text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
+                        <ChevronRight class="size-3.5 transition-transform group-open:rotate-90" />
+                        {{ t('extensions.uuRemote.connectionDetails') }}
+                      </summary>
+                      <div class="space-y-4 border-t pb-4 pt-3">
+                        <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
+                          <dt class="text-muted-foreground">{{ t('extensions.uuRemote.sessionId') }}</dt>
+                          <dd class="break-all font-mono select-text">{{ session.id }}</dd>
+                          <template v-if="session.client_id">
+                            <dt class="text-muted-foreground">{{ t('extensions.uuRemote.clientId') }}</dt>
+                            <dd class="break-all font-mono select-text">{{ session.client_id }}</dd>
+                          </template>
+                          <dt class="text-muted-foreground">ICE</dt>
+                          <dd>{{ uuConnectionStateLabel(session.ice_state) }}</dd>
+                        </dl>
+                        <div v-if="session.link" class="grid gap-2 sm:grid-cols-2">
+                          <div v-for="side in (['local', 'remote'] as const)" :key="side" class="min-w-0 space-y-2 rounded-md bg-muted/40 p-3">
+                            <div class="flex items-center justify-between gap-2 text-xs">
+                              <span class="font-medium">{{ t(`extensions.uuRemote.${side}`) }}</span>
+                              <span class="text-muted-foreground">{{ session.link[side].candidate_type }}</span>
+                            </div>
+                            <p class="break-all font-mono text-xs select-text">{{ formatHostForUrl(session.link[side].address) }}:{{ session.link[side].port }}</p>
+                            <p class="text-xs text-muted-foreground">{{ session.link[side].protocol.toUpperCase() }} · {{ session.link[side].address_family ?? 'IP' }}</p>
+                          </div>
+                        </div>
+                        <p class="text-xs leading-relaxed text-muted-foreground">{{ t('extensions.uuRemote.linkHint') }}</p>
+                      </div>
+                    </details>
                   </div>
-                  <p class="text-xs text-muted-foreground">{{ t('extensions.uuRemote.linkHint') }}</p>
                 </div>
                 <Separator />
 
