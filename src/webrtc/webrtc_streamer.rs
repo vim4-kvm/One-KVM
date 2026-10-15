@@ -843,9 +843,13 @@ impl WebRtcStreamer {
         output: crate::platform::vim4::OutputSettings,
     ) -> Result<()> {
         if self.config.read().await.output != output {
-            self.close_all_sessions().await;
-            self.stop_video_pipeline_and_release().await?;
-            self.config.write().await.output = output;
+            let pipeline = self.video_pipeline.read().await.clone();
+            if pipeline.as_ref().is_some_and(|p| p.is_running()) {
+                let preset = self.config.read().await.bitrate_preset;
+                crate::video::traits::VideoOutput::set_vim4_encoding(self, output, preset).await?;
+            } else {
+                self.config.write().await.output = output;
+            }
         }
         Ok(())
     }
@@ -1312,6 +1316,15 @@ impl WebRtcStreamer {
     /// Note: Hardware encoders (VAAPI, NVENC, etc.) don't support dynamic bitrate changes.
     /// This method restarts the pipeline to apply the new bitrate only if the preset actually changed.
     pub async fn set_bitrate_preset(&self, preset: BitratePreset) -> Result<()> {
+        #[cfg(feature = "vim4")]
+        {
+            let pipeline = self.video_pipeline.read().await.clone();
+            if pipeline.as_ref().is_some_and(|p| p.is_running()) {
+                let output = self.config.read().await.output;
+                return crate::video::traits::VideoOutput::set_vim4_encoding(self, output, preset)
+                    .await;
+            }
+        }
         // Check if preset actually changed
         let current_preset = self.config.read().await.bitrate_preset;
         if current_preset == preset {
