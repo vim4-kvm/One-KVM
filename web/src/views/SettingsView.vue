@@ -572,6 +572,7 @@ const uuLoading = ref(false)
 const uuDeviceName = ref('vim4-kvm')
 const uuSystem = ref<'windows' | 'macos'>('windows')
 const uuReverseScroll = ref(false)
+const uuVideoCodec = ref<'auto' | 'h264' | 'h265'>('auto')
 
 function changeUuSystem(system: unknown) {
   if (system === 'windows' || system === 'macos') {
@@ -2713,6 +2714,7 @@ async function loadUuRemote() {
     uuDeviceName.value = status.config.device_name
     uuSystem.value = status.config.system
     uuReverseScroll.value = status.config.reverse_scroll ?? status.config.system === 'macos'
+    uuVideoCodec.value = status.config.video_codec
     uuLogin.value = login
     if (uuLoginActive.value && !uuLoginTimer) uuLoginTimer = setInterval(pollUuLogin, 2000)
   } catch {
@@ -2734,10 +2736,11 @@ async function setUuRemoteEnabled(enabled: boolean) {
 async function saveUuIdentity() {
   uuLoading.value = true
   try {
-    uuStatus.value = await uuRemoteApi.update({ device_name: uuDeviceName.value, system: uuSystem.value, reverse_scroll: uuReverseScroll.value })
+    uuStatus.value = await uuRemoteApi.update({ device_name: uuDeviceName.value, system: uuSystem.value, reverse_scroll: uuReverseScroll.value, video_codec: uuVideoCodec.value })
     uuDeviceName.value = uuStatus.value.config.device_name
     uuSystem.value = uuStatus.value.config.system
     uuReverseScroll.value = uuStatus.value.config.reverse_scroll ?? uuSystem.value === 'macos'
+    uuVideoCodec.value = uuStatus.value.config.video_codec
     uuLogin.value = await uuRemoteApi.getLogin()
     toast.success(t('vim4Video.applied'))
   } catch {
@@ -5257,6 +5260,17 @@ watch(isWindows, () => {
                     <Switch id="uu-reverse-scroll" v-model="uuReverseScroll" :disabled="uuLoading || !uuStatus" />
                   </div>
                   <p class="text-xs text-muted-foreground">{{ t('extensions.uuRemote.reverseScrollHint') }}</p>
+                  <Label>{{ t('extensions.uuRemote.videoCodec') }}</Label>
+                  <Select v-model="uuVideoCodec" :disabled="uuLoading || !uuStatus">
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">{{ t('extensions.uuRemote.codecAuto') }}</SelectItem>
+                      <SelectItem value="h264">H.264</SelectItem>
+                      <SelectItem value="h265">H.265 / HEVC</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p class="text-xs text-muted-foreground">{{ t('extensions.uuRemote.codecHint') }}</p>
+                  <p v-if="uuStatus?.status.video_codec" class="text-xs text-muted-foreground">{{ t('extensions.uuRemote.activeCodec', { codec: uuStatus.status.video_codec.toUpperCase() }) }}</p>
                   <Button type="submit" size="sm" :disabled="uuLoading || !uuStatus">{{ t('common.apply') }}</Button>
                 </form>
                 <Vim4VideoSettings v-if="isVim4 && activeSection === 'third-party-access'" output-only class="border-t pt-4" />

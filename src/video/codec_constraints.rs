@@ -105,6 +105,13 @@ impl StreamCodecConstraints {
             };
         }
 
+        if config.uu_remote.enabled {
+            let mut constraints = Self::unrestricted();
+            constraints.allowed_webrtc_codecs = vec![VideoCodecType::H264, VideoCodecType::H265];
+            constraints.allow_mjpeg = false;
+            constraints.reason = "UU Remote negotiates H.264 or H.265".into();
+            return constraints;
+        }
         Self::unrestricted()
     }
 
@@ -194,9 +201,17 @@ fn vnc_lock(config: &AppConfig) -> Option<ThirdPartySourceLock> {
 }
 
 fn uu_remote_lock(config: &AppConfig) -> Option<ThirdPartySourceLock> {
-    config.uu_remote.enabled.then_some(ThirdPartySourceLock {
+    if !config.uu_remote.enabled {
+        return None;
+    }
+    let codec = match config.uu_remote.video_codec {
+        crate::config::UuVideoCodec::Auto => return None,
+        crate::config::UuVideoCodec::H264 => VideoCodecType::H264,
+        crate::config::UuVideoCodec::H265 => VideoCodecType::H265,
+    };
+    Some(ThirdPartySourceLock {
         source: "UU Remote",
-        lock: ThirdPartyCodecLock::H26x(VideoCodecType::H264),
+        lock: ThirdPartyCodecLock::H26x(codec),
     })
 }
 
@@ -214,6 +229,15 @@ fn third_party_locks(config: &AppConfig) -> Vec<ThirdPartySourceLock> {
 
 pub fn validate_third_party_codec_compatibility(config: &AppConfig) -> Result<()> {
     let locks = third_party_locks(config);
+    if config.uu_remote.enabled
+        && locks
+            .iter()
+            .any(|item| item.lock == ThirdPartyCodecLock::Mjpeg)
+    {
+        return Err(AppError::BadRequest(
+            "UU Remote requires H.264 or H.265; MJPEG-only services conflict".into(),
+        ));
+    }
     if let Some(first) = locks.first() {
         for item in locks.iter().skip(1) {
             if !first.lock.compatible_with(item.lock) {
@@ -328,6 +352,7 @@ mod tests {
     fn uu_remote_locks_h264_and_rejects_conflicting_services() {
         let mut config = AppConfig::default();
         config.uu_remote.enabled = true;
+        config.uu_remote.video_codec = crate::config::UuVideoCodec::H264;
         let constraints = StreamCodecConstraints::from_config(&config);
         assert_eq!(constraints.locked_codec, Some(VideoCodecType::H264));
         assert!(!constraints.allow_mjpeg);
@@ -338,5 +363,29 @@ mod tests {
         assert!(validate_third_party_codec_compatibility(&config).is_err());
         config.vnc.encoding = VncEncoding::H264;
         assert!(validate_third_party_codec_compatibility(&config).is_ok());
+    }
+
+    #[test]
+    fn uu_auto_shares_either_h26x_but_rejects_mjpeg_services() {
+        let mut config = AppConfig::default();
+        config.uu_remote.enabled = true;
+        let limits = StreamCodecConstraints::from_config(&config);
+        assert!(limits.is_webrtc_codec_allowed(VideoCodecType::H265));
+        assert!(limits.is_webrtc_codec_allowed(VideoCodecType::H264));
+        assert!(!limits.allow_mjpeg);
+        config.rtsp.enabled = true;
+        config.rtsp.codec = RtspCodec::H265;
+        assert!(validate_third_party_codec_compatibility(&config).is_ok());
+        assert_eq!(
+            StreamCodecConstraints::from_config(&config).locked_codec,
+            Some(VideoCodecType::H265)
+        );
+        config.uu_remote.video_codec = crate::config::UuVideoCodec::H264;
+        assert!(validate_third_party_codec_compatibility(&config).is_err());
+        config.uu_remote.video_codec = crate::config::UuVideoCodec::Auto;
+        config.rtsp.enabled = false;
+        config.vnc.enabled = true;
+        config.vnc.encoding = VncEncoding::TightJpeg;
+        assert!(validate_third_party_codec_compatibility(&config).is_err());
     }
 }

@@ -220,6 +220,7 @@ struct Context {
 pub struct PeerDeps {
     pub system: crate::config::UuRemoteSystem,
     pub reverse_scroll: bool,
+    pub video_codec: crate::config::UuVideoCodec,
     pub video: Arc<VideoStreamManager>,
     pub hid: Arc<HidController>,
     pub audio: Arc<AudioController>,
@@ -298,10 +299,100 @@ impl Shared {
 pub struct Peer {
     pub pc: Arc<RTCPeerConnection>,
     context: Arc<Mutex<Context>>,
+    video: Arc<VideoStreamManager>,
+}
+
+fn select_video_codec(
+    sdp: &str,
+    preference: crate::config::UuVideoCodec,
+    allowed: &[VideoCodecType],
+) -> Result<VideoCodecType, String> {
+    use crate::config::UuVideoCodec;
+    let session = webrtc::sdp::description::session::SessionDescription::unmarshal(
+        &mut std::io::Cursor::new(sdp),
+    )
+    .map_err(|_| "Invalid viewer SDP")?;
+    let media = session
+        .media_descriptions
+        .iter()
+        .find(|m| {
+            m.media_name.media == "video"
+                && m.media_name.port.value != 0
+                && !m
+                    .attributes
+                    .iter()
+                    .any(|a| matches!(a.key.as_str(), "inactive" | "sendonly"))
+        })
+        .ok_or("Viewer has no receiving video section")?;
+    let supports = |codec: VideoCodecType| {
+        let name = if codec == VideoCodecType::H265 {
+            "H265/90000"
+        } else {
+            "H264/90000"
+        };
+        media
+            .attributes
+            .iter()
+            .filter(|a| a.key == "rtpmap")
+            .any(|a| {
+                let Some((pt, format)) = a.value.as_deref().and_then(|v| v.split_once(' ')) else {
+                    return false;
+                };
+                if !format.eq_ignore_ascii_case(name)
+                    || !media.media_name.formats.iter().any(|f| f == pt)
+                {
+                    return false;
+                }
+                if codec == VideoCodecType::H264 {
+                    return true;
+                }
+                // The board produces Main 8-bit, single-stream HEVC, not Main10 or multistream.
+                media
+                    .attributes
+                    .iter()
+                    .filter(|a| a.key == "fmtp")
+                    .all(|a| {
+                        let Some((payload, params)) =
+                            a.value.as_deref().and_then(|v| v.split_once(' '))
+                        else {
+                            return true;
+                        };
+                        payload != pt
+                            || params.split(';').all(|param| {
+                                let Some((key, value)) = param.trim().split_once('=') else {
+                                    return true;
+                                };
+                                match key {
+                                    "profile-id" => value == "1",
+                                    "tx-mode" => value.eq_ignore_ascii_case("SRST"),
+                                    _ => true,
+                                }
+                            })
+                    })
+            })
+    };
+    let candidates: &[VideoCodecType] = match preference {
+        UuVideoCodec::Auto => &[VideoCodecType::H265, VideoCodecType::H264],
+        UuVideoCodec::H264 => &[VideoCodecType::H264],
+        UuVideoCodec::H265 => &[VideoCodecType::H265],
+    };
+    candidates
+        .iter()
+        .copied()
+        .find(|c| allowed.contains(c) && supports(*c))
+        .ok_or_else(|| "No compatible video codec; select Auto or H.264 and reconnect".into())
 }
 
 impl Peer {
-    pub async fn new(deps: PeerDeps, transport: SessionIce) -> Result<Self, String> {
+    pub async fn new(
+        deps: PeerDeps,
+        transport: SessionIce,
+        offer: &SoacMessage,
+    ) -> Result<Self, String> {
+        let sdp = offer_sdp(offer).ok_or("Offer SDP is empty")?;
+        let constraints = deps.video.codec_constraints().await;
+        let codec = select_video_codec(&sdp, deps.video_codec, &constraints.allowed_webrtc_codecs)?;
+        info!(?codec, preference = ?deps.video_codec, "UU negotiated video codec");
         let mut media = MediaEngine::default();
         media
             .register_default_codecs()
@@ -402,7 +493,13 @@ impl Peer {
 
         let video_track = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
-                mime_type: "video/H264".to_owned(),
+                mime_type: if codec == VideoCodecType::H265 {
+                    "video/H265"
+                } else {
+                    "video/H264"
+                }
+                .to_owned(),
+                clock_rate: 90_000,
                 ..Default::default()
             },
             "video_0".to_owned(),
@@ -412,6 +509,7 @@ impl Peer {
             .add_track(video_track.clone())
             .await
             .map_err(|e| format!("Add video track failed: {e}"))?;
+        restrict_video_codec(&pc, &video_sender, codec).await?;
         tokio::spawn(read_video_feedback(video_sender, deps.video.clone()));
         // The viewer always offers an Opus m-line.
         let audio_track = Arc::new(TrackLocalStaticSample::new(
@@ -456,7 +554,7 @@ impl Peer {
                     return;
                 }
                 let Some(pc) = pc.upgrade() else { return };
-                tokio::spawn(stream_video(pc.clone(), video_track, shared.clone()));
+                tokio::spawn(stream_video(pc.clone(), video_track, shared.clone(), codec));
                 tokio::spawn(stream_audio(pc, audio_track, shared.deps.audio.clone()));
                 let context = context.lock().await.clone();
                 let signal = &shared.deps.signaling;
@@ -466,7 +564,10 @@ impl Peer {
                 ) {
                     let fps = shared.screen.borrow().1;
                     if let Err(e) = signal
-                        .emit_event(FORWARD_SETTING_EVENT, device_capability(client, ice, fps))
+                        .emit_event(
+                            FORWARD_SETTING_EVENT,
+                            device_capability(client, ice, fps, codec),
+                        )
                         .await
                     {
                         warn!("UU device capability notification failed: {e}");
@@ -523,7 +624,12 @@ impl Peer {
             })
         }));
 
-        Ok(Self { pc, context })
+        deps.video.set_uu_negotiated_codec(Some(codec)).await;
+        Ok(Self {
+            pc,
+            context,
+            video: deps.video.clone(),
+        })
     }
 
     /// Apply the viewer's offer and return the answer SDP.
@@ -610,18 +716,53 @@ impl Peer {
         if let Err(e) = self.pc.close().await {
             debug!("UU peer close: {e}");
         }
+        self.video.set_uu_negotiated_codec(None).await;
     }
 }
 
-/// forward_setting device_capability: the displayable source and the H.264 encoder.
+async fn restrict_video_codec(
+    pc: &RTCPeerConnection,
+    sender: &RTCRtpSender,
+    codec: VideoCodecType,
+) -> Result<(), String> {
+    if codec == VideoCodecType::H265 {
+        let codecs: Vec<_> = sender
+            .get_parameters()
+            .await
+            .rtp_parameters
+            .codecs
+            .into_iter()
+            .filter(|c| c.capability.mime_type.eq_ignore_ascii_case("video/H265"))
+            .collect();
+        if codecs.is_empty() {
+            return Err("H.265 is not registered in the WebRTC engine".into());
+        }
+        for transceiver in pc.get_transceivers().await {
+            if transceiver.kind() == RTPCodecType::Video {
+                transceiver
+                    .set_codec_preferences(codecs.clone())
+                    .await
+                    .map_err(|e| format!("Select H.265 transceiver failed: {e}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// forward_setting device_capability: the displayable source and negotiated encoder.
 /// codec_impl values below 5 name specific GPU encoders; 5 is the generic implementation.
-fn device_capability(client_id: &str, ice_id: &str, fps: u32) -> serde_json::Value {
+fn device_capability(
+    client_id: &str,
+    ice_id: &str,
+    fps: u32,
+    codec: VideoCodecType,
+) -> serde_json::Value {
     serde_json::json!({
         "client_id": client_id,
         "type": "device_capability",
         "data": {
             "display_info": [{"id": 0, "fps": fps, "type": 0, "hdr": 0}],
-            "video_codec_capability": [{"video_codec": 1, "chroma_sampling": 1, "codec_impl": 5, "bit_depth": 8}],
+            "video_codec_capability": [{"video_codec": if codec == VideoCodecType::H265 { 2 } else { 1 }, "chroma_sampling": 1, "codec_impl": 5, "bit_depth": 8}],
             "ice_id": ice_id
         }
     })
@@ -661,13 +802,15 @@ async fn stream_video(
     pc: Arc<RTCPeerConnection>,
     track: Arc<TrackLocalStaticSample>,
     shared: Arc<Shared>,
+    codec: VideoCodecType,
 ) {
     if !wait_connected(&pc).await {
         return;
     }
     let video = shared.deps.video.clone();
-    if let Err(e) = video.set_video_codec(VideoCodecType::H264).await {
-        warn!("UU could not select H.264 on the shared pipeline: {e}");
+    if let Err(e) = video.set_video_codec(codec).await {
+        warn!("UU could not select {codec:?} on the shared pipeline: {e}");
+        return;
     }
     let mut health = tokio::time::interval(Duration::from_millis(500));
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -720,7 +863,12 @@ async fn stream_video(
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue 'subscribe;
             };
-            if frame.codec != VideoEncoderType::H264 {
+            let expected = if codec == VideoCodecType::H265 {
+                VideoEncoderType::H265
+            } else {
+                VideoEncoderType::H264
+            };
+            if frame.codec != expected {
                 continue;
             }
             let gap = last_sequence.is_some_and(|prev| frame.sequence > prev.saturating_add(1));
@@ -1145,6 +1293,87 @@ async fn apply_capture_setting(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn hevc_answer_uses_h265_when_viewer_also_offers_h264() {
+        let mut media = MediaEngine::default();
+        media.register_default_codecs().unwrap();
+        let api = APIBuilder::new().with_media_engine(media).build();
+        let viewer = api.new_peer_connection(Default::default()).await.unwrap();
+        let host = api.new_peer_connection(Default::default()).await.unwrap();
+        viewer
+            .add_transceiver_from_kind(RTPCodecType::Video, None)
+            .await
+            .unwrap();
+        let offer = viewer.create_offer(None).await.unwrap();
+        assert!(offer.sdp.contains("H264/90000"));
+        assert!(offer.sdp.contains("H265/90000"));
+        let track = Arc::new(TrackLocalStaticSample::new(
+            RTCRtpCodecCapability {
+                mime_type: "video/H265".into(),
+                clock_rate: 90_000,
+                ..Default::default()
+            },
+            "video_0".into(),
+            "video_0".into(),
+        ));
+        let sender = host.add_track(track).await.unwrap();
+        restrict_video_codec(&host, &sender, VideoCodecType::H265)
+            .await
+            .unwrap();
+        host.set_remote_description(offer).await.unwrap();
+        let answer = host.create_answer(None).await.unwrap();
+        assert!(answer.sdp.contains("H265/90000"));
+        assert!(!answer.sdp.contains("H264/90000"));
+        host.close().await.unwrap();
+        viewer.close().await.unwrap();
+    }
+
+    #[test]
+    fn codec_negotiation_falls_back_without_claiming_unsupported_profiles() {
+        use crate::config::UuVideoCodec as Preference;
+        let offer = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 98 99\r\na=recvonly\r\na=rtpmap:98 H264/90000\r\na=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1;tx-mode=SRST\r\n";
+        let both = [VideoCodecType::H264, VideoCodecType::H265];
+        assert_eq!(
+            select_video_codec(offer, Preference::Auto, &both).unwrap(),
+            VideoCodecType::H265
+        );
+        assert_eq!(
+            select_video_codec(offer, Preference::Auto, &both[..1]).unwrap(),
+            VideoCodecType::H264
+        );
+        assert_eq!(
+            select_video_codec(
+                &offer.replace("profile-id=1", "profile-id=2"),
+                Preference::Auto,
+                &both
+            )
+            .unwrap(),
+            VideoCodecType::H264
+        );
+        assert!(select_video_codec(
+            &offer.replace("profile-id=1", "profile-id=2"),
+            Preference::H265,
+            &both
+        )
+        .is_err());
+        assert_eq!(
+            select_video_codec(&offer.replace(" 98 99", " 98"), Preference::Auto, &both).unwrap(),
+            VideoCodecType::H264
+        );
+        assert!(select_video_codec(
+            &offer.replace("m=video 9", "m=video 0"),
+            Preference::Auto,
+            &both
+        )
+        .is_err());
+        assert!(select_video_codec(
+            &offer.replace("recvonly", "sendonly"),
+            Preference::Auto,
+            &both
+        )
+        .is_err());
+    }
 
     #[cfg(feature = "vim4")]
     #[test]

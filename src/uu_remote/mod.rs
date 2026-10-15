@@ -61,6 +61,7 @@ pub struct UuRemoteStatus {
     pub nickname: Option<String>,
     pub device_id: Option<String>,
     pub connection_count: u32,
+    pub video_codec: Option<crate::config::UuVideoCodec>,
 }
 
 #[typeshare]
@@ -181,12 +182,17 @@ impl UuRemoteService {
             }
         }
         if old.system == profile.system
-            && old.reverse_scroll_enabled() != profile.reverse_scroll_enabled()
+            && (old.reverse_scroll_enabled() != profile.reverse_scroll_enabled()
+                || old.video_codec != profile.video_codec)
         {
             self.stop().await;
         }
         *self.inner.profile.lock() = profile.clone();
         Ok(())
+    }
+
+    pub fn video_codec_preference(&self) -> crate::config::UuVideoCodec {
+        self.inner.profile.lock().video_codec
     }
 
     pub async fn status(&self) -> UuRemoteStatus {
@@ -211,6 +217,13 @@ impl UuRemoteService {
             nickname: Some(credentials.nickname).filter(|n| !n.is_empty()),
             device_id: Some(credentials.device_id).filter(|d| !d.is_empty()),
             connection_count,
+            video_codec: self.inner.video.uu_negotiated_codec().await.map(|codec| {
+                if codec == crate::video::codec::VideoCodecType::H265 {
+                    crate::config::UuVideoCodec::H265
+                } else {
+                    crate::config::UuVideoCodec::H264
+                }
+            }),
         }
     }
 
@@ -643,6 +656,7 @@ async fn room_loop(
     let deps = PeerDeps {
         system: profile.system,
         reverse_scroll: profile.reverse_scroll_enabled(),
+        video_codec: profile.video_codec,
         video: inner.video.clone(),
         hid: inner.hid.clone(),
         audio: inner.audio.clone(),
@@ -752,7 +766,7 @@ async fn handle_soac(
             for (_, peer) in peers.drain() {
                 peer.close().await;
             }
-            let peer = match Peer::new(deps.clone(), transport).await {
+            let peer = match Peer::new(deps.clone(), transport, &soac).await {
                 Ok(peer) => Arc::new(peer),
                 Err(e) => {
                     error!("UU peer creation failed: {e}");

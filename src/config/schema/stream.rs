@@ -71,6 +71,7 @@ pub struct UuRemoteConfig {
     pub device_name: String,
     /// None uses the system default, including configurations saved before this setting existed.
     pub reverse_scroll: Option<bool>,
+    pub video_codec: UuVideoCodec,
 }
 
 fn uu_device_name() -> String {
@@ -84,6 +85,7 @@ impl Default for UuRemoteConfig {
             system: UuRemoteSystem::Windows,
             device_name: uu_device_name(),
             reverse_scroll: None,
+            video_codec: UuVideoCodec::Auto,
         }
     }
 }
@@ -109,6 +111,16 @@ pub enum UuRemoteSystem {
     #[default]
     Windows,
     Macos,
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UuVideoCodec {
+    #[default]
+    Auto,
+    H264,
+    H265,
 }
 
 #[typeshare]

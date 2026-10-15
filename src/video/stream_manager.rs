@@ -102,6 +102,8 @@ pub struct VideoStreamManager {
     config_store: RwLock<Option<ConfigStore>>,
     /// Codec constraints derived from services that are actually running.
     runtime_codec_constraints: RwLock<Option<StreamCodecConstraints>>,
+    /// The single UU viewer pins the shared encoder for the lifetime of its negotiated session.
+    uu_negotiated_codec: RwLock<Option<crate::video::codec::VideoCodecType>>,
     /// Mode switching lock to prevent concurrent switch requests
     switching: AtomicBool,
     /// Current mode switch transaction ID (set while switching=true)
@@ -121,6 +123,7 @@ impl VideoStreamManager {
             events: RwLock::new(None),
             config_store: RwLock::new(None),
             runtime_codec_constraints: RwLock::new(None),
+            uu_negotiated_codec: RwLock::new(None),
             switching: AtomicBool::new(false),
             transition_id: RwLock::new(None),
         })
@@ -153,6 +156,28 @@ impl VideoStreamManager {
 
     /// Get current stream codec constraints derived from running services.
     pub async fn codec_constraints(&self) -> StreamCodecConstraints {
+        let mut constraints = self.base_codec_constraints().await;
+        if let Some(codec) = *self.uu_negotiated_codec.read().await {
+            constraints.allowed_webrtc_codecs = vec![codec];
+            constraints.locked_codec = Some(codec);
+            constraints.allow_mjpeg = false;
+            constraints.reason = format!("UU Remote active session ({codec:?})");
+        }
+        constraints
+    }
+
+    pub async fn uu_negotiated_codec(&self) -> Option<crate::video::codec::VideoCodecType> {
+        *self.uu_negotiated_codec.read().await
+    }
+
+    pub async fn set_uu_negotiated_codec(
+        &self,
+        codec: Option<crate::video::codec::VideoCodecType>,
+    ) {
+        *self.uu_negotiated_codec.write().await = codec;
+    }
+
+    async fn base_codec_constraints(&self) -> StreamCodecConstraints {
         if let Some(constraints) = self.runtime_codec_constraints.read().await.as_ref() {
             return constraints.clone();
         }

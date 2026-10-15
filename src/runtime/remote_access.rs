@@ -157,6 +157,12 @@ impl RemoteAccessCoordinator {
             None => false,
         };
         config.uu_remote.enabled = self.uu_remote.is_running();
+        if let Some(codec) = self.stream_manager.uu_negotiated_codec().await {
+            config.uu_remote.video_codec = match codec {
+                crate::video::codec::VideoCodecType::H265 => crate::config::UuVideoCodec::H265,
+                _ => crate::config::UuVideoCodec::H264,
+            };
+        }
         config
     }
 
@@ -204,7 +210,7 @@ impl RemoteAccessCoordinator {
         self.uu_remote.status().await
     }
 
-    /// Start or stop the UU host for `new_config`; it shares the H.264 encoder.
+    /// Start or stop the UU host for `new_config`; it shares the hardware encoder.
     pub async fn apply_uu_remote(&self, new_config: &UuRemoteConfig) -> Result<()> {
         let mut candidate = self.runtime_config().await;
         candidate.uu_remote = new_config.clone();
@@ -218,11 +224,19 @@ impl RemoteAccessCoordinator {
         } else {
             self.uu_remote.stop().await;
         }
-        self.log_enforced_constraints().await
+        let constraints = StreamCodecConstraints::from_config(&candidate);
+        self.stream_manager
+            .set_runtime_codec_constraints(constraints.clone())
+            .await;
+        enforce_constraints_with_stream_manager(&self.stream_manager, &constraints).await?;
+        Ok(())
     }
 
     pub async fn enforce_codec_constraints(&self) -> Result<Option<String>> {
-        let config = self.runtime_config().await;
+        let mut config = self.runtime_config().await;
+        // The session pin is layered by VideoStreamManager; keep the base policy reusable
+        // after that viewer disconnects.
+        config.uu_remote.video_codec = self.uu_remote.video_codec_preference();
         let constraints = StreamCodecConstraints::from_config(&config);
         self.stream_manager
             .set_runtime_codec_constraints(constraints.clone())

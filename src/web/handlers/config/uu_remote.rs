@@ -23,6 +23,7 @@ pub struct UuRemoteConfigUpdate {
     pub system: Option<UuRemoteSystem>,
     pub device_name: Option<String>,
     pub reverse_scroll: Option<bool>,
+    pub video_codec: Option<crate::config::UuVideoCodec>,
 }
 
 async fn status_response(state: &RemoteAccessApiState) -> UuRemoteStatusResponse {
@@ -53,6 +54,9 @@ pub async fn update_uu_remote_config(
     }
     if let Some(reverse) = req.reverse_scroll {
         new_config.reverse_scroll = Some(reverse);
+    }
+    if let Some(codec) = req.video_codec {
+        new_config.video_codec = codec;
     }
     if let Some(name) = req.device_name {
         let name = name.trim();

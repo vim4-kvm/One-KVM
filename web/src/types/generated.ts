@@ -300,6 +300,7 @@ export interface UuRemoteConfig {
 	system: 'windows' | 'macos';
 	device_name: string;
 	reverse_scroll?: boolean;
+	video_codec: 'auto' | 'h264' | 'h265';
 }
 
 export enum RtspCodec {
