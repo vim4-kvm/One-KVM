@@ -193,11 +193,23 @@ fn vnc_lock(config: &AppConfig) -> Option<ThirdPartySourceLock> {
     None
 }
 
+fn uu_remote_lock(config: &AppConfig) -> Option<ThirdPartySourceLock> {
+    config.uu_remote.enabled.then_some(ThirdPartySourceLock {
+        source: "UU Remote",
+        lock: ThirdPartyCodecLock::H26x(VideoCodecType::H264),
+    })
+}
+
 fn third_party_locks(config: &AppConfig) -> Vec<ThirdPartySourceLock> {
-    [rustdesk_lock(config), rtsp_lock(config), vnc_lock(config)]
-        .into_iter()
-        .flatten()
-        .collect()
+    [
+        rustdesk_lock(config),
+        rtsp_lock(config),
+        vnc_lock(config),
+        uu_remote_lock(config),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 pub fn validate_third_party_codec_compatibility(config: &AppConfig) -> Result<()> {
@@ -305,5 +317,26 @@ pub fn encoder_codec_to_video_codec(codec: VideoEncoderType) -> VideoCodecType {
         VideoEncoderType::H265 => VideoCodecType::H265,
         VideoEncoderType::VP8 => VideoCodecType::VP8,
         VideoEncoderType::VP9 => VideoCodecType::VP9,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uu_remote_locks_h264_and_rejects_conflicting_services() {
+        let mut config = AppConfig::default();
+        config.uu_remote.enabled = true;
+        let constraints = StreamCodecConstraints::from_config(&config);
+        assert_eq!(constraints.locked_codec, Some(VideoCodecType::H264));
+        assert!(!constraints.allow_mjpeg);
+        assert!(validate_third_party_codec_compatibility(&config).is_ok());
+
+        config.vnc.enabled = true;
+        config.vnc.encoding = VncEncoding::TightJpeg;
+        assert!(validate_third_party_codec_compatibility(&config).is_err());
+        config.vnc.encoding = VncEncoding::H264;
+        assert!(validate_third_party_codec_compatibility(&config).is_ok());
     }
 }

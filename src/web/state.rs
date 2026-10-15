@@ -17,6 +17,7 @@ pub(crate) struct RemoteAccessApiState {
     pub rustdesk_apply_lock: Arc<Mutex<()>>,
     pub vnc_apply_lock: Arc<Mutex<()>>,
     pub rtsp_apply_lock: Arc<Mutex<()>>,
+    pub uu_remote_apply_lock: Arc<Mutex<()>>,
 }
 
 impl FromRef<Arc<AppState>> for RemoteAccessApiState {
@@ -27,6 +28,7 @@ impl FromRef<Arc<AppState>> for RemoteAccessApiState {
             rustdesk_apply_lock: state.config_apply_locks.rustdesk.clone(),
             vnc_apply_lock: state.config_apply_locks.vnc.clone(),
             rtsp_apply_lock: state.config_apply_locks.rtsp.clone(),
+            uu_remote_apply_lock: state.config_apply_locks.uu_remote.clone(),
         }
     }
 }

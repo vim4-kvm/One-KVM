@@ -43,6 +43,7 @@ pub struct AppConfig {
     pub extensions: ExtensionsConfig,
     pub rustdesk: RustDeskConfig,
     pub vnc: VncConfig,
+    pub uu_remote: UuRemoteConfig,
     pub rtsp: RtspConfig,
     pub redfish: RedfishConfig,
     pub watchdog: WatchdogConfig,

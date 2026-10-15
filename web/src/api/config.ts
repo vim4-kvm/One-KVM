@@ -374,6 +374,48 @@ export const vncConfigApi = {
   stop: () => request<VncStatusResponse>('/config/vnc/stop', { method: 'POST' }),
 }
 
+export type UuRemoteServiceState = 'stopped' | 'waiting_login' | 'connecting' | 'online' | 'error'
+
+export interface UuRemoteStatusResponse {
+  config: { enabled: boolean; system: 'windows' | 'macos'; device_name: string }
+  video?: { height: number; fps: number; bitrate_kbps: number } | null
+  status: {
+    state: UuRemoteServiceState
+    error?: string | null
+    logged_in: boolean
+    nickname?: string | null
+    device_id?: string | null
+    connection_count: number
+  }
+}
+
+export type UuLoginStage = 'idle' | 'waiting' | 'scanned' | 'success' | 'failed'
+
+export interface UuLoginState {
+  stage: UuLoginStage
+  /** Login credential: render as a QR code only, never log or persist it. */
+  qr_url?: string | null
+  message?: string | null
+}
+
+export const uuRemoteApi = {
+  getStatus: () => request<UuRemoteStatusResponse>('/config/uu-remote'),
+
+  update: (config: Partial<UuRemoteStatusResponse['config']>) =>
+    request<UuRemoteStatusResponse>('/config/uu-remote', {
+      method: 'PATCH',
+      body: JSON.stringify(config),
+    }),
+
+  getLogin: () => request<UuLoginState>('/config/uu-remote/login'),
+
+  startLogin: () => request<UuLoginState>('/config/uu-remote/login', { method: 'POST' }),
+
+  cancelLogin: () => request<UuLoginState>('/config/uu-remote/login', { method: 'DELETE' }),
+
+  logout: () => request<UuRemoteStatusResponse>('/config/uu-remote/logout', { method: 'POST' }),
+}
+
 export type WebConfig = WebConfigResponse
 
 export type { WebConfigUpdate }

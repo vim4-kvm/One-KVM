@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import HidDeviceSettings from '@/components/HidDeviceSettings.vue'
 import ConsoleLayoutPreview from '@/components/ConsoleLayoutPreview.vue'
-import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
+import QrcodeVue from 'qrcode.vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
@@ -25,6 +26,7 @@ import {
   updateApi,
   usbApi,
   vncConfigApi,
+  uuRemoteApi,
   watchdogConfigApi,
   type EncoderBackendInfo,
   type AuthConfig,
@@ -35,6 +37,8 @@ import {
   type RtspConfigUpdate,
   type VncConfigUpdate,
   type VncStatusResponse,
+  type UuRemoteStatusResponse,
+  type UuLoginState,
   type WebConfig,
   type UpdateOverviewResponse,
   type UpdateStatusResponse,
@@ -151,6 +155,8 @@ import {
   PanelTop,
   PanelLeft,
   GalleryHorizontalEnd,
+  QrCode,
+  LogOut,
 } from 'lucide-vue-next'
 
 const { t, te } = useI18n()
@@ -325,6 +331,7 @@ async function loadSectionData(section: SettingsSectionId) {
         loadRustdeskPassword(),
         loadRtspConfig(),
         loadVncConfig(),
+        loadUuRemote(),
       ])
       return
     case 'about':
@@ -558,6 +565,14 @@ const vncLocalConfig = ref<VncConfigUpdate & { password?: string }>({
   allow_one_client: true,
   password: '',
 })
+
+const uuStatus = ref<UuRemoteStatusResponse | null>(null)
+const uuLogin = ref<UuLoginState>({ stage: 'idle' })
+const uuLoading = ref(false)
+const uuDeviceName = ref('vim4-kvm')
+const uuSystem = ref<'windows' | 'macos'>('windows')
+let uuLoginTimer: ReturnType<typeof setInterval> | null = null
+const uuLoginActive = computed(() => uuLogin.value.stage === 'waiting' || uuLogin.value.stage === 'scanned')
 
 function formatHostForUrl(hostname: string): string {
   if (!hostname) return '127.0.0.1'
@@ -2665,6 +2680,108 @@ async function stopVnc() {
   }
 }
 
+function stopUuLoginPolling() {
+  if (uuLoginTimer) clearInterval(uuLoginTimer)
+  uuLoginTimer = null
+}
+
+async function pollUuLogin() {
+  try {
+    uuLogin.value = await uuRemoteApi.getLogin()
+  } catch {
+    return
+  }
+  if (!uuLoginActive.value) {
+    stopUuLoginPolling()
+    if (uuLogin.value.stage === 'success') await loadUuRemote()
+  }
+}
+
+async function loadUuRemote() {
+  uuLoading.value = true
+  try {
+    const [status, login] = await Promise.all([uuRemoteApi.getStatus(), uuRemoteApi.getLogin()])
+    uuStatus.value = status
+    uuDeviceName.value = status.config.device_name
+    uuSystem.value = status.config.system
+    uuLogin.value = login
+    if (uuLoginActive.value && !uuLoginTimer) uuLoginTimer = setInterval(pollUuLogin, 2000)
+  } catch {
+  } finally {
+    uuLoading.value = false
+  }
+}
+
+async function setUuRemoteEnabled(enabled: boolean) {
+  uuLoading.value = true
+  try {
+    uuStatus.value = await uuRemoteApi.update({ enabled })
+  } catch {
+  } finally {
+    uuLoading.value = false
+  }
+}
+
+async function saveUuIdentity() {
+  uuLoading.value = true
+  try {
+    uuStatus.value = await uuRemoteApi.update({ device_name: uuDeviceName.value, system: uuSystem.value })
+    uuDeviceName.value = uuStatus.value.config.device_name
+    uuSystem.value = uuStatus.value.config.system
+    uuLogin.value = await uuRemoteApi.getLogin()
+    toast.success(t('vim4Video.applied'))
+  } catch {
+  } finally {
+    uuLoading.value = false
+  }
+}
+
+async function startUuLogin() {
+  try {
+    uuLogin.value = await uuRemoteApi.startLogin()
+    stopUuLoginPolling()
+    uuLoginTimer = setInterval(pollUuLogin, 2000)
+  } catch {}
+}
+
+async function cancelUuLogin() {
+  stopUuLoginPolling()
+  try {
+    uuLogin.value = await uuRemoteApi.cancelLogin()
+  } catch {}
+}
+
+async function logoutUuRemote() {
+  uuLoading.value = true
+  try {
+    uuStatus.value = await uuRemoteApi.logout()
+    uuLogin.value = { stage: 'idle' }
+  } catch {
+  } finally {
+    uuLoading.value = false
+  }
+}
+
+function getUuStateText(state: string | undefined): string {
+  switch (state) {
+    case 'online': return t('extensions.uuRemote.online')
+    case 'connecting': return t('extensions.starting')
+    case 'waiting_login': return t('extensions.uuRemote.waitingLogin')
+    case 'error': return t('extensions.failed')
+    default: return t('extensions.stopped')
+  }
+}
+
+function getUuStateClass(state: string | undefined): string {
+  switch (state) {
+    case 'online': return 'bg-status-active'
+    case 'connecting':
+    case 'waiting_login': return 'bg-warning'
+    case 'error': return 'bg-destructive'
+    default: return 'bg-muted-foreground'
+  }
+}
+
 function getVncServiceStatusText(status: string | undefined): string {
   if (!status) return t('extensions.stopped')
   switch (status) {
@@ -2710,6 +2827,8 @@ function getRtspStatusClass(status: string | undefined): string {
       return 'bg-muted-foreground'
   }
 }
+
+onBeforeUnmount(stopUuLoginPolling)
 
 onMounted(async () => {
   const initialSection = normalizeSettingsSection(route.query.tab)
@@ -5019,6 +5138,115 @@ watch(isWindows, () => {
                   <Loader2 v-if="loading" class="size-4 mr-2 animate-spin" /><Check v-else-if="saved" class="size-4 mr-2" /><Save v-else class="size-4 mr-2" />{{ loading ? t('actionbar.applying') : saved ? t('common.success') : t('common.save') }}
                 </Button>
               </CardFooter>
+            </Card>
+          </div>
+
+          <!-- UU Remote Section -->
+          <div v-show="activeSection === 'third-party-access'" class="space-y-4">
+            <Card>
+              <CardHeader>
+                <div class="flex items-center justify-between">
+                  <div class="space-y-1.5">
+                    <CardTitle>{{ t('extensions.uuRemote.title') }}</CardTitle>
+                    <CardDescription>{{ t('extensions.uuRemote.desc') }}</CardDescription>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <Badge :variant="uuStatus?.status.state === 'online' ? 'default' : 'secondary'">
+                      {{ getUuStateText(uuStatus?.status.state) }}
+                    </Badge>
+                    <Button variant="ghost" size="icon-sm" :aria-label="t('common.refresh')" @click="loadUuRemote" :disabled="uuLoading">
+                      <RefreshCw :class="['size-4', uuLoading ? 'animate-spin' : '']" />
+                    </Button>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent class="space-y-4">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <div :class="['size-2 rounded-full', getUuStateClass(uuStatus?.status.state)]" />
+                    <span class="text-sm">{{ getUuStateText(uuStatus?.status.state) }}</span>
+                    <template v-if="uuStatus?.status.connection_count">
+                      <span class="text-muted-foreground">|</span>
+                      <span class="text-sm text-muted-foreground">{{ t('extensions.uuRemote.clients', { count: uuStatus.status.connection_count }) }}</span>
+                    </template>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <Button
+                      v-if="!uuStatus?.config.enabled"
+                      size="sm"
+                      @click="setUuRemoteEnabled(true)"
+                      :disabled="uuLoading"
+                    >
+                      <Play class="size-4 mr-1" />
+                      {{ t('extensions.start') }}
+                    </Button>
+                    <Button
+                      v-else
+                      size="sm"
+                      variant="outline"
+                      @click="setUuRemoteEnabled(false)"
+                      :disabled="uuLoading"
+                    >
+                      <Square class="size-4 mr-1" />
+                      {{ t('extensions.stop') }}
+                    </Button>
+                  </div>
+                </div>
+                <p v-if="uuStatus?.status.error" class="text-sm text-destructive">{{ uuStatus.status.error }}</p>
+                <Separator />
+
+                <div class="flex items-center justify-between gap-3">
+                  <div class="min-w-0 space-y-1">
+                    <Label>{{ t('extensions.uuRemote.account') }}</Label>
+                    <p class="truncate text-sm text-muted-foreground">
+                      {{ uuStatus?.status.logged_in
+                        ? t('extensions.uuRemote.boundTo', { name: uuStatus.status.nickname || uuStatus.status.device_id || '' })
+                        : t('extensions.uuRemote.notBound') }}
+                    </p>
+                  </div>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <Button v-if="!uuLoginActive" size="sm" variant="outline" @click="startUuLogin">
+                      <QrCode class="size-4 mr-1" />
+                      {{ uuStatus?.status.logged_in ? t('extensions.uuRemote.relogin') : t('extensions.uuRemote.login') }}
+                    </Button>
+                    <Button v-if="uuStatus?.status.logged_in && !uuLoginActive" size="sm" variant="ghost" @click="logoutUuRemote" :disabled="uuLoading">
+                      <LogOut class="size-4 mr-1" />
+                      {{ t('extensions.uuRemote.logout') }}
+                    </Button>
+                  </div>
+                </div>
+
+                <div v-if="uuLoginActive" class="flex flex-col items-center gap-3 rounded-md border p-4">
+                  <div v-if="uuLogin.qr_url" class="rounded bg-white p-2">
+                    <QrcodeVue :value="uuLogin.qr_url" :size="200" level="M" />
+                  </div>
+                  <Loader2 v-else class="size-6 animate-spin text-muted-foreground" />
+                  <p class="text-center text-sm text-muted-foreground">
+                    {{ uuLogin.stage === 'scanned' ? t('extensions.uuRemote.scanned') : t('extensions.uuRemote.scanHint') }}
+                  </p>
+                  <Button size="sm" variant="ghost" @click="cancelUuLogin">{{ t('common.cancel') }}</Button>
+                </div>
+                <p v-else-if="uuLogin.stage === 'failed'" class="text-sm text-destructive">
+                  {{ t('extensions.uuRemote.loginFailed') }}{{ uuLogin.message ? `: ${uuLogin.message}` : '' }}
+                </p>
+
+                <form class="space-y-3 border-t pt-4" @submit.prevent="saveUuIdentity">
+                  <Label for="uu-device-name">{{ t('extensions.uuRemote.deviceName') }}</Label>
+                  <Input id="uu-device-name" v-model="uuDeviceName" maxlength="64" required :disabled="uuLoading || !uuStatus" />
+                  <Label>{{ t('extensions.uuRemote.system') }}</Label>
+                  <Select v-model="uuSystem" :disabled="uuLoading || !uuStatus">
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="windows">Windows</SelectItem>
+                      <SelectItem value="macos">Mac / macOS</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p class="text-xs text-muted-foreground">{{ t('extensions.uuRemote.identityHint') }}</p>
+                  <Button type="submit" size="sm" :disabled="uuLoading || !uuStatus">{{ t('common.apply') }}</Button>
+                </form>
+                <Vim4VideoSettings v-if="isVim4 && activeSection === 'third-party-access'" output-only class="border-t pt-4" />
+                <p class="text-xs text-muted-foreground">{{ t('extensions.uuRemote.scope') }}</p>
+              </CardContent>
             </Card>
           </div>
 

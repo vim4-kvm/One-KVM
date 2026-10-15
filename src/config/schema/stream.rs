@@ -59,6 +59,41 @@ impl Default for VncConfig {
     }
 }
 
+/// UU Remote (网易UU远程) host. Account credentials live in a private file in the data
+/// directory, never in this configuration.
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct UuRemoteConfig {
+    pub enabled: bool,
+    pub system: UuRemoteSystem,
+    #[serde(default = "uu_device_name")]
+    pub device_name: String,
+}
+
+fn uu_device_name() -> String {
+    "vim4-kvm".into()
+}
+
+impl Default for UuRemoteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            system: UuRemoteSystem::Windows,
+            device_name: uu_device_name(),
+        }
+    }
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UuRemoteSystem {
+    #[default]
+    Windows,
+    Macos,
+}
+
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

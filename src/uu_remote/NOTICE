@@ -1,0 +1,23 @@
+Third-Party Code Attribution
+=============================
+
+The source files in this directory contain code derived from uu-remote-linux
+(https://github.com/VallierDev/uu-remote-linux), an unofficial Linux host for
+NetEase UU Remote. They implement its cloud login and room signaling, the
+CONTROL data-channel protocol and the WebRTC session behavior expected by the
+official UU Remote viewers.
+
+Upstream work:
+  uu-remote-linux - https://github.com/VallierDev/uu-remote-linux
+  Copyright (C) uu-remote-linux contributors
+  Licensed under the GNU General Public License v3.0 or later
+  (GPL-3.0-or-later)
+
+Modifications:
+  These files were restructured and modified for One-KVM (2026-10-15): the
+  desktop is the KVM HDMI input from the shared encoder, input is delivered
+  through One-KVM HID, and credentials are stored in the One-KVM data
+  directory. Section 13 of GPL-3.0 and of AGPL-3.0 permits combining them with
+  One-KVM; the combined work is distributed under AGPL-3.0.
+
+Not affiliated with NetEase. No NetEase binaries or assets are included.

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import { request } from '@/api/request'
-import { streamApi } from '@/api'
+import { streamApi, uuRemoteApi } from '@/api'
 import { useConfigStore } from '@/stores/config'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 
 interface OutputSettings { height: number; fps: number }
 interface BoardStatus { edid: string; hdr_eotf: string; white: number; peak: number }
+const props = defineProps<{ outputOnly?: boolean }>()
 const { t } = useI18n()
 const store = useConfigStore()
 const height = ref('0')
@@ -24,6 +25,8 @@ const white = ref(203)
 const peak = ref(1000)
 const ready = ref(false)
 const busy = ref(false)
+const heights = computed(() => [...new Set([720, 900, 1080, 1440, 2160, Number(height.value)])].filter(v => v > 0).sort((a, b) => a - b))
+const frameRates = computed(() => [...new Set([5, 10, 15, 24, 30, 60, Number(fps.value)])].filter(v => v > 0).sort((a, b) => a - b))
 
 async function load() {
   ready.value = false
@@ -42,6 +45,12 @@ async function load() {
     peak.value = status.peak
     const preset = store.stream?.bitrate_preset
     bitrate.value = preset?.type === 'Custom' ? preset.value : ({ Speed: 1000, Balanced: 4000, Quality: 8000 }[preset?.type ?? 'Balanced'])
+    const runtime = (await uuRemoteApi.getStatus()).video
+    if (runtime) {
+      height.value = String(runtime.height)
+      fps.value = String(runtime.fps)
+      bitrate.value = runtime.bitrate_kbps
+    }
     ready.value = true
   } catch { /* request displays the error and leaves controls disabled */ }
 }
@@ -82,7 +91,7 @@ onMounted(load)
           <SelectTrigger class="w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="0">{{ t('vim4Video.source') }}</SelectItem>
-            <SelectItem v-for="value in [720, 1080, 2160]" :key="value" :value="String(value)">{{ value }}p</SelectItem>
+            <SelectItem v-for="value in heights" :key="value" :value="String(value)">{{ value }}p</SelectItem>
           </SelectContent>
         </Select>
         <Label>{{ t('vim4Video.outputFps') }}</Label>
@@ -90,11 +99,13 @@ onMounted(load)
           <SelectTrigger class="w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="0">{{ t('vim4Video.source') }}</SelectItem>
-            <SelectItem v-for="value in [10, 15, 30, 60]" :key="value" :value="String(value)">{{ value }} fps</SelectItem>
+            <SelectItem v-for="value in frameRates" :key="value" :value="String(value)">{{ value }} fps</SelectItem>
           </SelectContent>
         </Select>
-        <Label for="vim4-quality">{{ t('vim4Video.jpegQuality') }}</Label>
-        <Input id="vim4-quality" v-model="quality" type="number" min="1" max="100" required />
+        <template v-if="!props.outputOnly">
+          <Label for="vim4-quality">{{ t('vim4Video.jpegQuality') }}</Label>
+          <Input id="vim4-quality" v-model="quality" type="number" min="1" max="100" required />
+        </template>
         <p class="text-muted-foreground">{{ t('vim4Video.outputHint') }}</p>
         <Button type="submit" size="sm" class="w-full">{{ t('common.apply') }}</Button>
       </form>
@@ -103,7 +114,7 @@ onMounted(load)
         <Input id="vim4-bitrate" v-model="bitrate" type="number" min="1000" max="60000" required />
         <Button type="submit" size="sm" variant="outline" class="w-full">{{ t('common.apply') }}</Button>
       </form>
-      <form class="space-y-2" @submit.prevent="apply('edid')">
+      <form v-if="!props.outputOnly" class="space-y-2" @submit.prevent="apply('edid')">
         <Label>EDID</Label>
         <Select v-model="edid" :disabled="!ready || busy">
           <SelectTrigger class="w-full"><SelectValue /></SelectTrigger>
@@ -116,7 +127,7 @@ onMounted(load)
         <p class="text-muted-foreground">{{ t('vim4Video.edidHint') }}</p>
         <Button type="submit" size="sm" variant="outline" class="w-full">{{ t('common.apply') }}</Button>
       </form>
-      <form class="space-y-2" @submit.prevent="apply('hdr')">
+      <form v-if="!props.outputOnly" class="space-y-2" @submit.prevent="apply('hdr')">
         <h5 class="font-medium">HDR → SDR · {{ board?.hdr_eotf }}</h5>
         <Label for="vim4-white">{{ t('vim4Video.white') }}</Label>
         <Input id="vim4-white" v-model="white" type="number" min="160" max="1000" required />

@@ -844,6 +844,7 @@ export {
   rustdeskConfigApi,
   rtspConfigApi,
   vncConfigApi,
+  uuRemoteApi,
   webConfigApi,
   watchdogConfigApi,
   type RustDeskConfigResponse,
@@ -859,6 +860,8 @@ export {
   type VncConfigUpdate,
   type VncEncoding,
   type VncStatusResponse,
+  type UuRemoteStatusResponse,
+  type UuLoginState,
   type WebConfig,
   type WebConfigUpdate,
 } from './config'

@@ -3,12 +3,13 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::audio::AudioController;
-use crate::config::{AppConfig, ConfigStore, RtspConfig, VncConfig};
+use crate::config::{AppConfig, ConfigStore, RtspConfig, UuRemoteConfig, VncConfig};
 use crate::error::{AppError, Result};
 use crate::hid::HidController;
 use crate::rtsp::{RtspService, RtspServiceStatus};
 use crate::rustdesk::config::RustDeskConfig;
 use crate::rustdesk::RustDeskService;
+use crate::uu_remote::{UuRemoteService, UuRemoteStatus};
 use crate::video::codec_constraints::{
     enforce_constraints_with_stream_manager, validate_third_party_codec_compatibility,
     StreamCodecConstraints,
@@ -35,6 +36,8 @@ pub struct RemoteAccessCoordinator {
     rustdesk: RwLock<Option<Arc<RustDeskService>>>,
     vnc: RwLock<Option<Arc<VncService>>>,
     rtsp: RwLock<Option<Arc<RtspService>>>,
+    /// Always present so the account can be bound before the host is enabled.
+    uu_remote: Arc<UuRemoteService>,
 }
 
 impl RemoteAccessCoordinator {
@@ -43,7 +46,14 @@ impl RemoteAccessCoordinator {
         stream_manager: Arc<VideoStreamManager>,
         hid: Arc<HidController>,
         audio: Arc<AudioController>,
+        data_dir: std::path::PathBuf,
     ) -> Arc<Self> {
+        let uu_remote = Arc::new(UuRemoteService::new(
+            data_dir,
+            stream_manager.clone(),
+            hid.clone(),
+            audio.clone(),
+        ));
         Arc::new(Self {
             config,
             stream_manager,
@@ -52,6 +62,7 @@ impl RemoteAccessCoordinator {
             rustdesk: RwLock::new(None),
             vnc: RwLock::new(None),
             rtsp: RwLock::new(None),
+            uu_remote,
         })
     }
 
@@ -113,6 +124,12 @@ impl RemoteAccessCoordinator {
             tracing::info!("RTSP disabled in configuration");
         }
 
+        if config.uu_remote.enabled {
+            if let Err(error) = self.apply_uu_remote(&config.uu_remote).await {
+                tracing::error!("Failed to start UU Remote host: {}", error);
+            }
+        }
+
         if let Err(error) = self.enforce_codec_constraints().await {
             tracing::warn!("Failed to enforce startup codec constraints: {}", error);
         }
@@ -139,6 +156,7 @@ impl RemoteAccessCoordinator {
             ),
             None => false,
         };
+        config.uu_remote.enabled = self.uu_remote.is_running();
         config
     }
 
@@ -176,6 +194,31 @@ impl RemoteAccessCoordinator {
             Some(service) => service.status().await,
             None => RtspServiceStatus::Stopped,
         }
+    }
+
+    pub fn uu_remote(&self) -> &Arc<UuRemoteService> {
+        &self.uu_remote
+    }
+
+    pub async fn uu_remote_status(&self) -> UuRemoteStatus {
+        self.uu_remote.status().await
+    }
+
+    /// Start or stop the UU host for `new_config`; it shares the H.264 encoder.
+    pub async fn apply_uu_remote(&self, new_config: &UuRemoteConfig) -> Result<()> {
+        let mut candidate = self.runtime_config().await;
+        candidate.uu_remote = new_config.clone();
+        validate_third_party_codec_compatibility(&candidate)?;
+        self.uu_remote
+            .configure(new_config)
+            .await
+            .map_err(crate::error::AppError::Internal)?;
+        if new_config.enabled {
+            self.uu_remote.start();
+        } else {
+            self.uu_remote.stop().await;
+        }
+        self.log_enforced_constraints().await
     }
 
     pub async fn enforce_codec_constraints(&self) -> Result<Option<String>> {
@@ -439,6 +482,7 @@ impl RemoteAccessCoordinator {
         let vnc = self.vnc.write().await.take();
         let rtsp = self.rtsp.write().await.take();
 
+        self.uu_remote.stop().await;
         if let Some(service) = rustdesk {
             if let Err(error) = service.stop().await {
                 tracing::warn!("Failed to stop RustDesk service: {}", error);

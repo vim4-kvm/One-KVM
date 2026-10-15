@@ -35,6 +35,7 @@ pub struct ConfigApplyLocks {
     pub rustdesk: Arc<Mutex<()>>,
     pub vnc: Arc<Mutex<()>>,
     pub rtsp: Arc<Mutex<()>>,
+    pub uu_remote: Arc<Mutex<()>>,
     pub watchdog: Arc<Mutex<()>>,
 }
 
@@ -55,6 +56,7 @@ impl ConfigApplyLocks {
             rustdesk: Arc::new(Mutex::new(())),
             vnc: Arc::new(Mutex::new(())),
             rtsp: Arc::new(Mutex::new(())),
+            uu_remote: Arc::new(Mutex::new(())),
             watchdog: Arc::new(Mutex::new(())),
         }
     }
@@ -121,6 +123,7 @@ impl AppState {
             stream_manager.clone(),
             hid.clone(),
             audio.clone(),
+            data_dir.clone(),
         );
         #[cfg(unix)]
         let msd = Arc::new(RwLock::new(msd));

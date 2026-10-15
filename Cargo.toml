@@ -31,6 +31,7 @@ desktop = [
     "dep:totp-rs",
     "dep:uuid",
     "dep:base64",
+    "dep:flate2",
     "dep:nix",
     "dep:reqwest",
     "dep:urlencoding",
@@ -111,6 +112,7 @@ totp-rs = { version = "5.7", features = ["gen_secret", "otpauth", "zeroize"], op
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"], optional = true }
 base64 = { version = "0.22", optional = true }
+flate2 = { version = "1", optional = true }
 tempfile = { version = "3", optional = true }
 
 # HTTP client (for URL downloads)
@@ -144,7 +146,7 @@ async-stream = { version = "0.3", optional = true }
 futures = { version = "0.3", optional = true }
 
 # WebSocket client (for ttyd proxy)
-tokio-tungstenite = { version = "0.29", optional = true }
+tokio-tungstenite = { version = "0.29", features = ["native-tls"], optional = true }
 
 # High-performance synchronization
 parking_lot = { version = "0.12", optional = true }

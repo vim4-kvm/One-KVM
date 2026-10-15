@@ -180,6 +180,22 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             post(handlers::config::start_vnc_service),
         )
         .route("/config/vnc/stop", post(handlers::config::stop_vnc_service))
+        // UU Remote host endpoints
+        .route(
+            "/config/uu-remote",
+            get(handlers::config::get_uu_remote_status)
+                .patch(handlers::config::update_uu_remote_config),
+        )
+        .route(
+            "/config/uu-remote/login",
+            get(handlers::config::get_uu_remote_login)
+                .post(handlers::config::start_uu_remote_login)
+                .delete(handlers::config::cancel_uu_remote_login),
+        )
+        .route(
+            "/config/uu-remote/logout",
+            post(handlers::config::logout_uu_remote),
+        )
         // RTSP configuration endpoints
         .route("/config/rtsp", get(handlers::config::get_rtsp_config))
         .route("/config/rtsp", patch(handlers::config::update_rtsp_config))

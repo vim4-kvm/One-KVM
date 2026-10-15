@@ -18,6 +18,7 @@ mod stream;
 #[cfg(unix)]
 mod uac;
 mod usb_update;
+mod uu_remote;
 pub(crate) mod video;
 mod vnc;
 mod watchdog;
@@ -45,6 +46,10 @@ pub use rustdesk::{
 pub use stream::{get_stream_config, update_stream_config};
 #[cfg(unix)]
 pub use uac::{get_uac_config, update_uac_config};
+pub use uu_remote::{
+    cancel_uu_remote_login, get_uu_remote_login, get_uu_remote_status, logout_uu_remote,
+    start_uu_remote_login, update_uu_remote_config,
+};
 pub use video::{get_video_config, update_video_config};
 pub use vnc::{
     get_vnc_config, get_vnc_status, start_vnc_service, stop_vnc_service, update_vnc_config,

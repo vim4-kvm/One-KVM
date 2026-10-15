@@ -291,6 +291,16 @@ export interface VncConfig {
 	allow_one_client: boolean;
 }
 
+/**
+ * UU Remote (网易UU远程) host. Account credentials live in a private file in the data
+ * directory, never in this configuration.
+ */
+export interface UuRemoteConfig {
+	enabled: boolean;
+	system: 'windows' | 'macos';
+	device_name: string;
+}
+
 export enum RtspCodec {
 	H264 = "h264",
 	H265 = "h265",
@@ -336,6 +346,7 @@ export interface AppConfig {
 	extensions: ExtensionsConfig;
 	rustdesk: RustDeskConfig;
 	vnc: VncConfig;
+	uu_remote: UuRemoteConfig;
 	rtsp: RtspConfig;
 	redfish: RedfishConfig;
 	watchdog: WatchdogConfig;

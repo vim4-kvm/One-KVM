@@ -50,6 +50,8 @@ pub mod update;
 #[cfg(feature = "desktop")]
 pub mod utils;
 #[cfg(feature = "desktop")]
+pub mod uu_remote;
+#[cfg(feature = "desktop")]
 pub mod video;
 #[cfg(feature = "desktop")]
 pub mod vnc;
