@@ -280,6 +280,7 @@ export default {
     positioningMode: 'Positioning Mode',
     sendInterval: 'Send Interval',
     showCursor: 'Show Cursor',
+    reverseScroll: 'Reverse Scroll',
     backend: 'Backend',
     devicePath: 'Device Path',
     baudrate: 'Baudrate',
@@ -1314,5 +1315,6 @@ export default {
     absoluteMode: 'Absolute mode maps mouse coordinates directly, suitable for most scenarios',
     relativeMode: 'Relative mode sends mouse movement delta, for games or special software',
     mouseThrottle: 'Send interval controls mouse event frequency. Higher values reduce network load',
+    reverseScroll: 'Enable when the target uses natural scrolling (e.g. macOS). Saved in this browser only',
   },
 }

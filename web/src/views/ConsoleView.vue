@@ -2912,7 +2912,7 @@ function handleMouseUpInternal(rawButton: number) {
 
 function handleWheel(e: WheelEvent) {
   e.preventDefault()
-  const scroll = e.deltaY > 0 ? -1 : 1
+  const scroll = (e.deltaY > 0 ? -1 : 1) * (localStorage.getItem('hidReverseScroll') === 'true' ? -1 : 1)
   sendMouseEvent({ type: 'scroll', scroll })
 }
 

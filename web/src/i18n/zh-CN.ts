@@ -280,6 +280,7 @@ export default {
     positioningMode: '定位模式',
     sendInterval: '发送间隔',
     showCursor: '显示指针',
+    reverseScroll: '反转滚动',
     backend: '后端类型',
     devicePath: '设备路径',
     baudrate: '波特率',
@@ -1313,5 +1314,6 @@ export default {
     absoluteMode: '绝对定位模式直接映射鼠标坐标，适用于大多数场景',
     relativeMode: '相对定位模式发送鼠标移动增量，适用于游戏或特殊软件',
     mouseThrottle: '发送间隔控制鼠标事件的发送频率，较大的值可减少网络负载',
+    reverseScroll: '被控机开启了自然滚动（如 macOS）时打开，仅保存在当前浏览器',
   },
 }

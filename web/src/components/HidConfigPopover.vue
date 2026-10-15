@@ -53,6 +53,11 @@ const mouseThrottle = ref<number>(
 const showCursor = ref<boolean>(
   localStorage.getItem('hidShowCursor') !== 'false' // default true
 )
+const reverseScroll = ref<boolean>(localStorage.getItem('hidReverseScroll') === 'true')
+
+watch(reverseScroll, (value) => {
+  localStorage.setItem('hidReverseScroll', value ? 'true' : 'false')
+})
 
 watch(showCursor, (newValue, oldValue) => {
   if (newValue !== oldValue) {
@@ -138,6 +143,7 @@ watch(() => props.open, (open) => {
   if (!open) return
   mouseThrottle.value = loadMouseMoveSendIntervalFromStorage()
   showCursor.value = localStorage.getItem('hidShowCursor') !== 'false'
+  reverseScroll.value = localStorage.getItem('hidReverseScroll') === 'true'
   if (!hidSaving.value) void configStore.refreshHid().catch(() => undefined)
 })
 </script>
@@ -229,6 +235,14 @@ watch(() => props.open, (open) => {
           <div class="flex items-center justify-between">
             <Label class="text-xs text-muted-foreground">{{ t('actionbar.showCursor') }}</Label>
             <Switch v-model="showCursor" />
+          </div>
+
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-1">
+              <Label class="text-xs text-muted-foreground">{{ t('actionbar.reverseScroll') }}</Label>
+              <HelpTooltip :content="t('help.reverseScroll')" icon-size="sm" />
+            </div>
+            <Switch v-model="reverseScroll" />
           </div>
         </div>
 
