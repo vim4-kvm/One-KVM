@@ -5,6 +5,7 @@
 pub mod cloud;
 mod ice;
 mod input;
+mod metrics;
 mod peer;
 mod signaling;
 mod wire;

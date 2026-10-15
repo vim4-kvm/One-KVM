@@ -496,11 +496,20 @@ impl Peer {
                         channel.on_message(Box::new(move |message: DataChannelMessage| {
                             let reply = reply.clone();
                             Box::pin(async move {
-                                let ping =
+                                if message.data.len() > 256 * 1024 {
+                                    return;
+                                }
+                                let Ok(value) =
                                     serde_json::from_slice::<serde_json::Value>(&message.data)
-                                        .is_ok_and(|v| {
-                                            v.get("type").and_then(|t| t.as_str()) == Some("ping")
-                                        });
+                                else {
+                                    return;
+                                };
+                                if let Some(event) = value.get("connection_period_stats_event") {
+                                    let metrics = super::metrics::collect(event);
+                                    info!(?metrics, "UU viewer timing");
+                                }
+                                let ping =
+                                    value.get("type").and_then(|t| t.as_str()) == Some("ping");
                                 if ping {
                                     let _ = reply
                                         .send(&Bytes::from_static(br#"{"type":"pong"}"#))
@@ -689,6 +698,14 @@ async fn stream_video(
         let mut waiting_for_keyframe = true;
         let mut last_sequence: Option<u64> = None;
         let mut last_request = Instant::now();
+        let mut report_at = Instant::now();
+        let mut report_frames = 0u64;
+        let mut send_us = 0u128;
+        let mut max_send_us = 0u128;
+        let mut max_gap_us = 0u128;
+        let mut previous_arrival: Option<Instant> = None;
+        let mut first_pts: Option<(Instant, i64)> = None;
+        let mut sequence_gaps = 0u64;
         loop {
             let frame = tokio::select! {
                 frame = frames.recv() => frame,
@@ -707,6 +724,7 @@ async fn stream_video(
                 continue;
             }
             let gap = last_sequence.is_some_and(|prev| frame.sequence > prev.saturating_add(1));
+            sequence_gaps += u64::from(gap && !waiting_for_keyframe);
             if waiting_for_keyframe || gap {
                 if !frame.is_keyframe {
                     waiting_for_keyframe = true;
@@ -719,6 +737,11 @@ async fn stream_video(
                 waiting_for_keyframe = false;
             }
             last_sequence = Some(frame.sequence);
+            let arrived = Instant::now();
+            if let Some(previous) = previous_arrival.replace(arrived) {
+                max_gap_us = max_gap_us.max(arrived.duration_since(previous).as_micros());
+            }
+            let (pts_origin, pts_start) = *first_pts.get_or_insert((arrived, frame.pts_ms));
             let sample = Sample {
                 data: frame.data.clone(),
                 duration: timeline.duration_after(Instant::now()),
@@ -737,6 +760,31 @@ async fn stream_video(
                 }
             }
             sent += 1;
+            let elapsed_us = arrived.elapsed().as_micros();
+            send_us += elapsed_us;
+            max_send_us = max_send_us.max(elapsed_us);
+            report_frames += 1;
+            if report_at.elapsed() >= Duration::from_secs(5) {
+                let fps = report_frames as f64 / report_at.elapsed().as_secs_f64();
+                // Relative growth only: PTS has no shared absolute epoch with Instant.
+                let pts_lag_growth_ms = arrived.duration_since(pts_origin).as_millis() as i128
+                    - i128::from(frame.pts_ms.saturating_sub(pts_start));
+                info!(
+                    fps,
+                    mean_send_us = send_us / u128::from(report_frames),
+                    max_send_us,
+                    max_gap_us,
+                    pts_lag_growth_ms,
+                    sequence_gaps,
+                    "UU sender timing"
+                );
+                report_at = Instant::now();
+                report_frames = 0;
+                send_us = 0;
+                max_send_us = 0;
+                max_gap_us = 0;
+                sequence_gaps = 0;
+            }
         }
     }
     info!("UU video ended: frames={sent}");
