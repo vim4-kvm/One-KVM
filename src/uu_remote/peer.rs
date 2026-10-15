@@ -28,7 +28,9 @@ use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpHeaderExtensionCapability, RTPCodecType,
 };
 use webrtc::rtp_transceiver::rtp_sender::RTCRtpSender;
+use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
+use webrtc::track::track_local::TrackLocal;
 
 use super::ice::SessionIce;
 use super::input::{self, HidAction, InputState};
@@ -101,6 +103,110 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+enum VideoTrack {
+    H264(Arc<TrackLocalStaticSample>),
+    H265(Arc<TrackLocalStaticRTP>),
+}
+
+impl VideoTrack {
+    fn new(codec: VideoCodecType) -> Self {
+        let capability = RTCRtpCodecCapability {
+            mime_type: if codec == VideoCodecType::H265 {
+                "video/H265"
+            } else {
+                "video/H264"
+            }
+            .into(),
+            clock_rate: 90_000,
+            ..Default::default()
+        };
+        if codec == VideoCodecType::H265 {
+            Self::H265(Arc::new(TrackLocalStaticRTP::new(
+                capability,
+                "video_0".into(),
+                "video_0".into(),
+            )))
+        } else {
+            Self::H264(Arc::new(TrackLocalStaticSample::new(
+                capability,
+                "video_0".into(),
+                "video_0".into(),
+            )))
+        }
+    }
+
+    fn local(&self) -> Arc<dyn TrackLocal + Send + Sync> {
+        match self {
+            Self::H264(track) => track.clone(),
+            Self::H265(track) => track.clone(),
+        }
+    }
+
+    async fn write(&self, sample: &Sample, hevc: &mut HevcPackets) -> webrtc::error::Result<()> {
+        let extensions = frame_extensions();
+        match self {
+            Self::H264(track) => {
+                track
+                    .write_sample_with_extensions(sample, &extensions)
+                    .await
+            }
+            Self::H265(track) => {
+                for packet in hevc.packetize(sample) {
+                    track
+                        .write_rtp_with_extensions(&packet, &extensions)
+                        .await?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+struct HevcPackets {
+    payloader: crate::webrtc::h265_payloader::H265Payloader,
+    sequence: u16,
+    timestamp: u32,
+}
+
+impl HevcPackets {
+    fn new() -> Self {
+        Self {
+            payloader: Default::default(),
+            sequence: rand::random(),
+            timestamp: rand::random(),
+        }
+    }
+
+    fn packetize(&mut self, sample: &Sample) -> Vec<rtp::packet::Packet> {
+        // The stack's default HEVC payloader drops CRA (type 21) and mishandles mixed
+        // Annex B prefixes. Use the board-tested payloader shared with the web viewer.
+        let payloads = self.payloader.payload(1100, &sample.data);
+        let count = payloads.len();
+        let packets = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(index, payload)| {
+                let packet = rtp::packet::Packet {
+                    header: rtp::header::Header {
+                        version: 2,
+                        marker: index + 1 == count,
+                        sequence_number: self.sequence,
+                        timestamp: self.timestamp,
+                        ..Default::default()
+                    },
+                    payload,
+                };
+                self.sequence = self.sequence.wrapping_add(1);
+                packet
+            })
+            .collect();
+        self.timestamp = self
+            .timestamp
+            .wrapping_add((sample.duration.as_secs_f64() * 90_000.0) as u32);
+        packets
+    }
 }
 
 /// Round up (+1 ns float guard) so webrtc's floor(duration * 90000) yields exactly `ticks`.
@@ -491,22 +597,9 @@ impl Peer {
             })
         }));
 
-        let video_track = Arc::new(TrackLocalStaticSample::new(
-            RTCRtpCodecCapability {
-                mime_type: if codec == VideoCodecType::H265 {
-                    "video/H265"
-                } else {
-                    "video/H264"
-                }
-                .to_owned(),
-                clock_rate: 90_000,
-                ..Default::default()
-            },
-            "video_0".to_owned(),
-            "video_0".to_owned(),
-        ));
+        let video_track = Arc::new(VideoTrack::new(codec));
         let video_sender = pc
-            .add_track(video_track.clone())
+            .add_track(video_track.local())
             .await
             .map_err(|e| format!("Add video track failed: {e}"))?;
         restrict_video_codec(&pc, &video_sender, codec).await?;
@@ -800,7 +893,7 @@ async fn wait_connected(pc: &RTCPeerConnection) -> bool {
 
 async fn stream_video(
     pc: Arc<RTCPeerConnection>,
-    track: Arc<TrackLocalStaticSample>,
+    track: Arc<VideoTrack>,
     shared: Arc<Shared>,
     codec: VideoCodecType,
 ) {
@@ -815,6 +908,7 @@ async fn stream_video(
     let mut health = tokio::time::interval(Duration::from_millis(500));
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut sent = 0u64;
+    let mut hevc = HevcPackets::new();
     'subscribe: while !closed(pc.connection_state()) {
         let Some(mut frames) = video.subscribe_encoded_frames().await else {
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -895,8 +989,7 @@ async fn stream_video(
                 duration: timeline.duration_after(Instant::now()),
                 ..Default::default()
             };
-            let extensions = frame_extensions();
-            let send = track.write_sample_with_extensions(&sample, &extensions);
+            let send = track.write(&sample, &mut hevc);
             tokio::pin!(send);
             loop {
                 tokio::select! {
@@ -1294,6 +1387,47 @@ async fn apply_capture_setting(
 mod tests {
     use super::*;
 
+    #[test]
+    fn hevc_preserves_cra_with_mixed_prefixes_and_exact_fragment_boundary() {
+        let mut data = vec![
+            0, 0, 0, 1, 64, 1, 7, 0, 0, 1, 66, 1, 8, 0, 0, 0, 1, 68, 1, 9, 0, 0, 1, 42, 1,
+        ];
+        data.extend(vec![0x55; 2194]);
+        let mut hevc = HevcPackets::new();
+        let sample = Sample {
+            data: Bytes::from(data),
+            duration: ticks_to_duration(1500),
+            ..Default::default()
+        };
+        let packets = hevc.packetize(&sample);
+        assert_eq!(packets.len(), 3); // parameter-set AP plus two CRA fragments
+        assert_eq!((packets[0].payload[0] >> 1) & 63, 48);
+        assert_eq!(packets[1].payload[2], 0x80 | 21);
+        assert_eq!(packets[2].payload[2], 0x40 | 21);
+        assert!(!packets[0].header.marker && !packets[1].header.marker);
+        assert!(packets[2].header.marker);
+        let body: Vec<u8> = packets[1..]
+            .iter()
+            .flat_map(|p| p.payload[3..].iter().copied())
+            .collect();
+        assert_eq!(body, vec![0x55; 2194]);
+        assert!(packets
+            .iter()
+            .all(|p| p.header.timestamp == packets[0].header.timestamp));
+        let next = hevc.packetize(&Sample {
+            data: Bytes::from_static(&[0, 0, 1, 2, 1, 9]),
+            ..sample
+        });
+        assert_eq!(
+            next[0].header.timestamp,
+            packets[0].header.timestamp.wrapping_add(1500)
+        );
+        assert_eq!(
+            next[0].header.sequence_number,
+            packets[2].header.sequence_number.wrapping_add(1)
+        );
+    }
+
     #[tokio::test]
     async fn hevc_answer_uses_h265_when_viewer_also_offers_h264() {
         let mut media = MediaEngine::default();
@@ -1308,16 +1442,8 @@ mod tests {
         let offer = viewer.create_offer(None).await.unwrap();
         assert!(offer.sdp.contains("H264/90000"));
         assert!(offer.sdp.contains("H265/90000"));
-        let track = Arc::new(TrackLocalStaticSample::new(
-            RTCRtpCodecCapability {
-                mime_type: "video/H265".into(),
-                clock_rate: 90_000,
-                ..Default::default()
-            },
-            "video_0".into(),
-            "video_0".into(),
-        ));
-        let sender = host.add_track(track).await.unwrap();
+        let track = VideoTrack::new(VideoCodecType::H265);
+        let sender = host.add_track(track.local()).await.unwrap();
         restrict_video_codec(&host, &sender, VideoCodecType::H265)
             .await
             .unwrap();
