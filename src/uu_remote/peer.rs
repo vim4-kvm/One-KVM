@@ -1410,13 +1410,16 @@ mod tests {
             ..Default::default()
         };
         let packets = hevc.packetize(&sample);
-        assert_eq!(packets.len(), 3); // parameter-set AP plus two CRA fragments
-        assert_eq!((packets[0].payload[0] >> 1) & 63, 48);
-        assert_eq!(packets[1].payload[2], 0x80 | 21);
-        assert_eq!(packets[2].payload[2], 0x40 | 21);
-        assert!(!packets[0].header.marker && !packets[1].header.marker);
-        assert!(packets[2].header.marker);
-        let body: Vec<u8> = packets[1..]
+        // VPS/SPS/PPS as separate single NAL units plus two CRA fragments.
+        assert_eq!(packets.len(), 5);
+        assert_eq!((packets[0].payload[0] >> 1) & 63, 32);
+        assert_eq!((packets[1].payload[0] >> 1) & 63, 33);
+        assert_eq!((packets[2].payload[0] >> 1) & 63, 34);
+        assert_eq!(packets[3].payload[2], 0x80 | 21);
+        assert_eq!(packets[4].payload[2], 0x40 | 21);
+        assert!(!packets[0].header.marker && !packets[3].header.marker);
+        assert!(packets[4].header.marker);
+        let body: Vec<u8> = packets[3..]
             .iter()
             .flat_map(|p| p.payload[3..].iter().copied())
             .collect();
@@ -1434,7 +1437,7 @@ mod tests {
         );
         assert_eq!(
             next[0].header.sequence_number,
-            packets[2].header.sequence_number.wrapping_add(1)
+            packets[4].header.sequence_number.wrapping_add(1)
         );
     }
 

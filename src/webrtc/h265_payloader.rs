@@ -20,21 +20,16 @@
 //! +---------------+---------------+---------------+
 //! ```
 //!
-//! Aggregation Packet (AP) for VPS+SPS+PPS:
-//! ```text
-//! +---------------+---------------+---------------+---------------+
-//! |    PayloadHdr (Type=48)       |   NALU 1 Size |   NALU 1 Size |
-//! +---------------+---------------+---------------+---------------+
-//! |   NALU 1 HDR  |  NALU 1 Data  |   NALU 2 Size |   ...         |
-//! +---------------+---------------+---------------+---------------+
-//! ```
+//! Parameter sets (VPS/SPS/PPS) are sent as separate single NAL unit
+//! packets, never inside an Aggregation Packet (AP, type 48). The UU
+//! client's H265VpsSpsPpsTracker walks AP contents starting one byte
+//! too early and drops every AP before it reaches the frame buffer;
+//! without SPS/PPS the viewer then demotes each IRAP frame to delta
+//! ("WebRTC-SpsPpsIdrIsH265Keyframe") and its decoder never starts.
 
 use bytes::{BufMut, Bytes, BytesMut};
 
 /// H.265 NAL unit types (6 bits)
-const H265_NAL_VPS: u8 = 32;
-const H265_NAL_SPS: u8 = 33;
-const H265_NAL_PPS: u8 = 34;
 const H265_NAL_AUD: u8 = 35;
 const H265_NAL_FILLER: u8 = 38;
 const H265_NAL_FU: u8 = 49; // Fragmentation Unit
@@ -45,22 +40,11 @@ const H265_NAL_HEADER_SIZE: usize = 2;
 /// FU header size (1 byte after NAL header)
 const H265_FU_HEADER_SIZE: usize = 1;
 
-/// Fixed PayloadHdr for AP packets: Type=48, LayerID=0, TID=1
-/// This matches the rtp crate's AGGR_PAYLOAD_HDR
-const AP_PAYLOAD_HDR: [u8; 2] = [0x60, 0x01];
-
 /// H.265 RTP Payloader
 ///
 /// Fragments H.265 NAL units for RTP transmission according to RFC 7798.
 #[derive(Default, Debug, Clone)]
-pub struct H265Payloader {
-    /// Cached VPS NAL unit
-    vps_nalu: Option<Bytes>,
-    /// Cached SPS NAL unit
-    sps_nalu: Option<Bytes>,
-    /// Cached PPS NAL unit
-    pps_nalu: Option<Bytes>,
-}
+pub struct H265Payloader {}
 
 impl H265Payloader {
     /// Create a new H265Payloader
@@ -106,27 +90,8 @@ impl H265Payloader {
             return;
         }
 
-        // Cache parameter sets (VPS/SPS/PPS)
-        match nal_type {
-            H265_NAL_VPS => {
-                self.vps_nalu = Some(nalu.clone());
-                return; // Don't emit VPS separately, will be sent in AP
-            }
-            H265_NAL_SPS => {
-                self.sps_nalu = Some(nalu.clone());
-                return; // Don't emit SPS separately, will be sent in AP
-            }
-            H265_NAL_PPS => {
-                self.pps_nalu = Some(nalu.clone());
-                return; // Don't emit PPS separately, will be sent in AP
-            }
-            _ => {}
-        }
-
-        // Try to emit Aggregation Packet with VPS+SPS+PPS before video NAL
-        self.try_emit_aggregation_packet(mtu, payloads);
-
-        // Single NAL unit mode - if NAL fits in one packet
+        // Single NAL unit mode - if NAL fits in one packet. VPS/SPS/PPS
+        // take this path too: see the module note on why AP is avoided.
         if nalu.len() <= mtu {
             payloads.push(nalu.clone());
             return;
@@ -134,55 +99,6 @@ impl H265Payloader {
 
         // Fragmentation Unit (FU) mode - fragment large NAL units
         self.emit_fragmented(nalu, mtu, payloads);
-    }
-
-    /// Try to emit an Aggregation Packet containing VPS+SPS+PPS
-    fn try_emit_aggregation_packet(&mut self, mtu: usize, payloads: &mut Vec<Bytes>) {
-        // Check if we have all three parameter sets
-        let (vps, sps, pps) = match (&self.vps_nalu, &self.sps_nalu, &self.pps_nalu) {
-            (Some(v), Some(s), Some(p)) => (v.clone(), s.clone(), p.clone()),
-            _ => return,
-        };
-
-        // Calculate AP size: PayloadHdr(2) + 3x(NALU size(2) + NALU data)
-        let ap_size = H265_NAL_HEADER_SIZE + 2 + vps.len() + 2 + sps.len() + 2 + pps.len();
-
-        // Only create AP if it fits in MTU
-        if ap_size > mtu {
-            // Fall back to sending separately (as single NAL unit packets)
-            payloads.push(vps);
-            payloads.push(sps);
-            payloads.push(pps);
-            self.vps_nalu = None;
-            self.sps_nalu = None;
-            self.pps_nalu = None;
-            return;
-        }
-
-        // Create Aggregation Packet
-        let mut ap = BytesMut::with_capacity(ap_size);
-
-        // PayloadHdr for AP (Type=48)
-        ap.extend_from_slice(&AP_PAYLOAD_HDR);
-
-        // VPS: size (2 bytes big-endian) + data
-        ap.put_u16(vps.len() as u16);
-        ap.extend_from_slice(&vps);
-
-        // SPS: size (2 bytes big-endian) + data
-        ap.put_u16(sps.len() as u16);
-        ap.extend_from_slice(&sps);
-
-        // PPS: size (2 bytes big-endian) + data
-        ap.put_u16(pps.len() as u16);
-        ap.extend_from_slice(&pps);
-
-        payloads.push(ap.freeze());
-
-        // Clear cached parameter sets
-        self.vps_nalu = None;
-        self.sps_nalu = None;
-        self.pps_nalu = None;
     }
 
     /// Fragment a large NAL unit using FU packets
@@ -382,6 +298,27 @@ mod tests {
                 assert_eq!(fu_s, 0, "Middle packet should have S=0");
                 assert_eq!(fu_e, 0, "Middle packet should have E=0");
             }
+        }
+    }
+
+    #[test]
+    fn test_parameter_sets_sent_as_separate_nalus() {
+        // The UU client's H265VpsSpsPpsTracker drops AP packets, so
+        // parameter sets must go out as individual single-NAL packets.
+        let mut payloader = H265Payloader::new();
+        let mut data = vec![
+            0, 0, 0, 1, 0x40, 0x01, 0x07, // VPS
+            0, 0, 1, 0x42, 0x01, 0x08, // SPS
+            0, 0, 0, 1, 0x44, 0x01, 0x09, // PPS
+            0, 0, 1, 0x2A, 0x01, 0xAA, // CRA slice
+        ];
+        data.extend(vec![0x55; 100]);
+        let result = payloader.payload(1200, &Bytes::from(data));
+
+        assert_eq!(result.len(), 4, "expected 3 param singles + 1 slice");
+        for (i, (pkt, want)) in result.iter().zip([32u8, 33, 34, 21]).enumerate() {
+            let nal_type = (pkt[0] >> 1) & 0x3F;
+            assert_eq!(nal_type, want, "packet {i} NAL type");
         }
     }
 
