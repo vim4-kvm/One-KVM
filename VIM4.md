@@ -136,6 +136,8 @@ GE2D 缩放使用私有 `libgst-aml-dma-allocator.so`，仅实现 amlvconv 调�
 应使用工作区构建的 Ubuntu deb。网页升级仅接收 `vim4-ubuntu-arm64` 制品和
 `x.y.z+vim4.YYYYMMDD.N` 版本，校验大小与 SHA256，再由限定助手验证包名、架构、
 版本及 APT 依赖计划。需要改动平台依赖时拒绝单应用升级；安装核验后重启应用。
+本地开发版本追加 `.dev.N.g<提交号>[.dirty]`，更新检查将其排序在基础正式版与下一正式版之间；
+下载安装仍只接受正式版，开发包使用工作区部署工具安装。
 默认更新源是 vim4-kvm/vim4-kvm 的 GitHub Release；构建包附带
 `onekvm-channels.json`、`onekvm-releases.json`，发布时与 deb 一起上传。
 没有发布清单时界面明确报告暂无此通道更新，不回退到上游通用二进制。
