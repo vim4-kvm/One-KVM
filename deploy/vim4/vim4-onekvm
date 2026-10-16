@@ -258,10 +258,14 @@ def open_image(name, writable):
     return fd
 
 
-def configure_media(name, cdrom, readonly):
+def configure_media(name, cdrom, readonly, expected=''):
     fd = open_image(name, not readonly) if name else None
     try:
         old = {key: (LUN / key).read_text().strip() for key in ('file', 'cdrom', 'ro', 'inquiry_string')}
+        # The caller's process-local ownership check precedes this helper. Check
+        # again under the shared media lock before touching USB or configfs.
+        if old['file'] != expected or (name and old['file']):
+            raise ValueError('MSD_EXTERNAL_MEDIA: Safely eject on the controlled computer, then eject in the manager')
         if fd is None and not old['file']:
             return
         config = GADGET / 'configs/c.1'
@@ -319,9 +323,9 @@ def main(args):
     if args == ['usb-restore']:
         restore_profile()
         return
-    if len(args) != 4 or args[0] != 'media' or any(arg not in ('true', 'false') for arg in args[2:]):
+    if len(args) not in (4, 5) or args[0] != 'media' or any(arg not in ('true', 'false') for arg in args[2:4]):
         raise ValueError('usage: vim4-onekvm media IMAGE CDROM READONLY')
-    configure_media(args[1], args[2] == 'true', args[2] == 'true' or args[3] == 'true')
+    configure_media(args[1], args[2] == 'true', args[2] == 'true' or args[3] == 'true', args[4] if len(args) == 5 else '')
 
 
 if __name__ == '__main__':

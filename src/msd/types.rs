@@ -103,6 +103,8 @@ pub const MULTI_DISK_MSD_LUNS: u8 = 8;
 pub enum MountedMediaKind {
     Drive,
     Image,
+    #[cfg(feature = "vim4")]
+    External,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -14,6 +14,7 @@ pub enum MsdErrorCode {
     MsdMediaSlotsFull,
     MsdMediaAlreadyMounted,
     MsdMediaInUse,
+    MsdExternalMedia,
     MsdImageTooLarge,
     MsdInvalidUrl,
     MsdRemoteDownloadFailed,
@@ -31,7 +32,7 @@ pub enum MsdErrorCode {
 }
 
 impl MsdErrorCode {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::MsdUnavailable,
         Self::MsdOperationInProgress,
         Self::MsdOperationFailed,
@@ -41,6 +42,7 @@ impl MsdErrorCode {
         Self::MsdMediaSlotsFull,
         Self::MsdMediaAlreadyMounted,
         Self::MsdMediaInUse,
+        Self::MsdExternalMedia,
         Self::MsdImageTooLarge,
         Self::MsdInvalidUrl,
         Self::MsdRemoteDownloadFailed,
@@ -68,6 +70,7 @@ impl MsdErrorCode {
             Self::MsdMediaSlotsFull => "MSD_MEDIA_SLOTS_FULL",
             Self::MsdMediaAlreadyMounted => "MSD_MEDIA_ALREADY_MOUNTED",
             Self::MsdMediaInUse => "MSD_MEDIA_IN_USE",
+            Self::MsdExternalMedia => "MSD_EXTERNAL_MEDIA",
             Self::MsdImageTooLarge => "MSD_IMAGE_TOO_LARGE",
             Self::MsdInvalidUrl => "MSD_INVALID_URL",
             Self::MsdRemoteDownloadFailed => "MSD_REMOTE_DOWNLOAD_FAILED",
@@ -96,6 +99,7 @@ impl MsdErrorCode {
             Self::MsdMediaSlotsFull => "All virtual media slots are in use.",
             Self::MsdMediaAlreadyMounted => "The virtual medium is already mounted.",
             Self::MsdMediaInUse => "The virtual medium is currently in use.",
+            Self::MsdExternalMedia => "Another interface or the manager mounted this medium. Safely eject it on the controlled computer, then eject it in the manager.",
             Self::MsdImageTooLarge => "The virtual media image is too large.",
             Self::MsdInvalidUrl => "The download URL is invalid.",
             Self::MsdRemoteDownloadFailed => "The remote image download failed.",
@@ -132,6 +136,7 @@ impl MsdErrorCode {
             Self::MsdMediaSlotsFull => "MsdMediaSlotsFull",
             Self::MsdMediaAlreadyMounted => "MsdMediaAlreadyMounted",
             Self::MsdMediaInUse => "MsdMediaInUse",
+            Self::MsdExternalMedia => "MsdExternalMedia",
             Self::MsdImageTooLarge => "MsdImageTooLarge",
             Self::MsdInvalidUrl => "MsdInvalidUrl",
             Self::MsdRemoteDownloadFailed => "MsdRemoteDownloadFailed",
@@ -160,6 +165,7 @@ impl MsdErrorCode {
 
     pub const fn resolution(self) -> &'static str {
         match self {
+            Self::MsdExternalMedia => "Safely eject the medium on the controlled computer, then eject it in the manager.",
             Self::MsdUnavailable => "Enable or restore the virtual media service, then retry.",
             Self::MsdOperationInProgress => {
                 "Wait for the current virtual media operation to finish, then retry."
@@ -354,6 +360,11 @@ mod tests {
                 MsdMediaInUse,
                 "MSD_MEDIA_IN_USE",
                 "The virtual medium is currently in use.",
+            ),
+            (
+                MsdExternalMedia,
+                "MSD_EXTERNAL_MEDIA",
+                "Another interface or the manager mounted this medium. Safely eject it on the controlled computer, then eject it in the manager.",
             ),
             (
                 MsdImageTooLarge,

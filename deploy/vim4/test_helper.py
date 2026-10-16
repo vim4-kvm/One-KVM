@@ -62,17 +62,34 @@ class MediaTest(unittest.TestCase):
         for name in ('hid.keyboard', 'hid.absolute', 'hid.relative', 'ncm.usb0'):
             (config / name).symlink_to(gadget / 'functions' / name)
         with patch.object(helper, 'GADGET', gadget), patch.object(helper, 'LUN', lun), \
-                patch.object(helper.time, 'sleep'), patch.object(helper.os, 'sync'):
+                patch.object(helper.time, 'sleep'), patch.object(helper.os, 'sync'), \
+                patch.object(helper, 'saved_profile', return_value=None):
             helper.main(['media', str(self.image), 'true', 'false'])
             self.assertEqual((lun / 'ro').read_text(), '1')
             self.assertTrue((config / 'mass_storage.disk0').is_symlink())
             self.assertFalse((config / 'ncm.usb0').is_symlink())
-            helper.main(['media', '', 'false', 'true'])
+            helper.main(['media', '', 'false', 'true', (lun / 'file').read_text()])
             self.assertTrue((config / 'ncm.usb0').is_symlink())
             self.assertFalse((config / 'mass_storage.disk0').is_symlink())
             self.assertEqual((gadget / 'UDC').read_text(), 'controller')
             for name in ('hid.keyboard', 'hid.absolute', 'hid.relative'):
                 self.assertTrue((config / name).is_symlink())
+
+    def test_foreign_media_and_racing_replacement_are_refused_before_writes(self):
+        gadget = self.root / 'gadget'
+        lun = gadget / 'functions/mass_storage.disk0/lun.0'
+        lun.mkdir(parents=True)
+        (gadget / 'UDC').write_text('controller')
+        for key, value in {'file': str(self.image), 'ro': '0', 'cdrom': '0',
+                           'inquiry_string': 'disk'}.items():
+            (lun / key).write_text(value)
+        before = {path: path.read_bytes() for path in lun.iterdir()}
+        with patch.object(helper, 'GADGET', gadget), patch.object(helper, 'LUN', lun):
+            for name, expected in [(str(self.image), ''), ('', ''), ('', '/previous.img')]:
+                with self.assertRaisesRegex(ValueError, 'MSD_EXTERNAL_MEDIA'):
+                    helper.configure_media(name, False, False, expected)
+                self.assertEqual((gadget / 'UDC').read_text(), 'controller')
+                self.assertEqual({path: path.read_bytes() for path in lun.iterdir()}, before)
 
     def test_rejects_unrecognized_actions_before_mutation(self):
         for args in (['reboot'], ['media', '', 'true', 'yes'], ['media']):
@@ -205,6 +222,6 @@ class UsbProfileTest(unittest.TestCase):
             self.assertTrue((self.config / 'uac2.usb0').is_symlink())
             self.assertTrue((self.config / 'mass_storage.disk0').is_symlink())
             self.assertFalse((self.config / 'ncm.usb0').exists())
-            helper.configure_media('', False, True)
+            helper.configure_media('', False, True, (self.lun / 'file').read_text())
             self.assertTrue((self.config / 'uac2.usb0').is_symlink())
             self.assertFalse((self.config / 'mass_storage.disk0').exists())

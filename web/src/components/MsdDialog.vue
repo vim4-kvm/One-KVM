@@ -170,7 +170,8 @@ const slotCapacity = computed(() => systemStore.msd?.slotCapacity ?? 1)
 const mountedMedia = computed<MountedMedia[]>(() => systemStore.msd?.mountedMedia ?? [])
 const mountedCount = computed(() => systemStore.msd?.mountedCount ?? mountedMedia.value.length)
 const msdConnected = computed(() => mountedCount.value > 0)
-const mediaSlotsFull = computed(() => mountedCount.value >= slotCapacity.value)
+const externalMedia = computed(() => mountedMedia.value.filter(media => media.kind === 'external'))
+const mediaSlotsFull = computed(() => externalMedia.value.length > 0 || mountedCount.value >= slotCapacity.value)
 const driveMedia = computed(() => mountedMedia.value.find(media => media.kind === 'drive') ?? null)
 // Drive is currently mounted on the target machine via USB — file ops are blocked
 const driveConnectedToTarget = computed(() => !!driveMedia.value)
@@ -699,7 +700,11 @@ function formatBytes(bytes: number): string {
   return (bytes / 1024 / 1024 / 1024).toFixed(1) + ' GB'
 }
 
+let mediaPoll: ReturnType<typeof setInterval> | undefined
 onMounted(async () => {
+  mediaPoll = setInterval(() => {
+    if (props.open && systemStore.platform?.mode_label === 'VIM4 Ubuntu') void refreshMsdState()
+  }, 2000)
   if (props.open) {
     await loadData()
   }
@@ -707,6 +712,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  clearInterval(mediaPoll)
   off('msd.download_progress', handleDownloadProgress)
 })
 </script>
@@ -773,6 +779,15 @@ onUnmounted(() => {
       </DialogHeader>
 
       <Separator class="shrink-0" />
+
+      <div v-if="externalMedia.length" class="mx-5 mt-3 rounded-md border p-3 text-sm" role="status">
+        <p class="font-medium">{{ t('msd.externalMedia') }}</p>
+        <p v-for="media in externalMedia" :key="media.id">
+          {{ media.name }} · {{ t(media.cdrom ? 'msd.cdrom' : 'msd.flash') }} ·
+          {{ t(media.read_only ? 'msd.readOnly' : 'msd.readWrite') }}
+        </p>
+        <p class="mt-1 text-xs text-muted-foreground">{{ t('msd.errors.externalMedia') }}</p>
+      </div>
 
       <div
         v-if="msdStatusError"

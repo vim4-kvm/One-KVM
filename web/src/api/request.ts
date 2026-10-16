@@ -89,6 +89,7 @@ const msdErrorKeys: Record<string, string> = {
   MSD_STORAGE_READ_ONLY: 'msd.errors.storageReadOnly',
   MSD_STORAGE_PERMISSION_DENIED: 'msd.errors.storagePermissionDenied',
   MSD_MEDIUM_REMOVAL_PREVENTED: 'msd.errors.mediumRemovalPrevented',
+  MSD_EXTERNAL_MEDIA: 'msd.errors.externalMedia',
   MSD_DISCONNECT_FAILED: 'msd.errors.disconnectFailed',
 }
 

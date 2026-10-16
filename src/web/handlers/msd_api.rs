@@ -112,6 +112,10 @@ pub async fn msd_status(State(state): State<Arc<AppState>>) -> Result<Json<MsdSt
     let msd_guard = state.msd.read().await;
     match msd_guard.as_ref() {
         Some(controller) => {
+            #[cfg(feature = "vim4")]
+            let msd_state = controller.live_state().await
+                .map_err(|error| operation_failed("read live media status", error))?;
+            #[cfg(not(feature = "vim4"))]
             let msd_state = controller.state().await;
             Ok(Json(MsdStatus {
                 available: true,

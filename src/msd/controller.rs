@@ -16,6 +16,8 @@ use crate::error::{AppError, MsdErrorCode, Result};
 use crate::otg::{MsdFunction, MsdLunConfig, OtgService};
 
 pub struct MsdController {
+    #[cfg(all(test, feature = "vim4"))]
+    test_gadget_path: Option<PathBuf>,
     otg_service: Arc<OtgService>,
     msd_function: RwLock<Option<MsdFunction>>,
     state: RwLock<MsdState>,
@@ -35,6 +37,8 @@ impl MsdController {
         let ventoy_dir = msd_dir.join("ventoy");
         let drive_path = ventoy_dir.join("ventoy.img");
         Self {
+            #[cfg(all(test, feature = "vim4"))]
+            test_gadget_path: None,
             otg_service,
             msd_function: RwLock::new(None),
             state: RwLock::new(MsdState::default()),
@@ -100,7 +104,88 @@ impl MsdController {
     }
 
     pub async fn state(&self) -> MsdState {
+        #[cfg(feature = "vim4")]
+        {
+            return self.live_state().await.unwrap_or_else(|_| {
+                // Do not advertise stale mounts or enabled controls after a read failure.
+                MsdState::default()
+            });
+        }
+        #[cfg(not(feature = "vim4"))]
         self.state.read().await.clone()
+    }
+
+    #[cfg(feature = "vim4")]
+    pub async fn live_state(&self) -> Result<MsdState> {
+        let mut state = self.state.write().await;
+        self.refresh_media(&mut state).await?;
+        Ok(state.clone())
+    }
+
+    #[cfg(feature = "vim4")]
+    async fn refresh_media(&self, state: &mut MsdState) -> Result<()> {
+        if !state.available {
+            return Ok(());
+        }
+        let path = self.active_gadget_path().await?;
+        let function = self.msd_function.read().await;
+        let function = function.as_ref().ok_or(MsdErrorCode::MsdUnavailable)?;
+        Self::reconcile_media(state, function, &path)
+    }
+
+    #[cfg(feature = "vim4")]
+    fn reconcile_media(state: &mut MsdState, function: &MsdFunction, path: &Path) -> Result<()> {
+        let mut live = Vec::new();
+        for lun in 0..state.disk_mode.capacity() {
+            let (file, read_only, cdrom) = function.read_lun(path, lun)?;
+            if file.as_os_str().is_empty() {
+                continue;
+            }
+            // Directory membership does not establish ownership. Only a successful
+            // mount in this process, on this LUN, may authorize a later eject.
+            let mut media = state
+                .mounted_media
+                .iter()
+                .find(|media| {
+                    media.lun == lun
+                        && media.path == file
+                        && media.kind != MountedMediaKind::External
+                })
+                .cloned()
+                .unwrap_or_else(|| MountedMedia {
+                    id: format!("external-{lun}"),
+                    kind: MountedMediaKind::External,
+                    name: file.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                    size: std::fs::metadata(&file).map(|meta| meta.len()).unwrap_or(0),
+                    path: file,
+                    lun,
+                    cdrom,
+                    read_only,
+                });
+            media.cdrom = cdrom;
+            media.read_only = read_only;
+            live.push(media);
+        }
+        state.mounted_media = live;
+        Ok(())
+    }
+
+    #[cfg(feature = "vim4")]
+    async fn assert_media_owned(&self, state: &mut MsdState) -> Result<()> {
+        self.refresh_media(state).await?;
+        Self::reject_external_media(state)
+    }
+
+    #[cfg(feature = "vim4")]
+    fn reject_external_media(state: &MsdState) -> Result<()> {
+        if state
+            .mounted_media
+            .iter()
+            .any(|media| media.kind == MountedMediaKind::External)
+        {
+            return Err(MsdErrorCode::MsdExternalMedia.into());
+        }
+        Ok(())
     }
 
     pub async fn set_event_bus(&self, events: std::sync::Arc<crate::events::EventBus>) {
@@ -144,6 +229,8 @@ impl MsdController {
     ) -> Result<()> {
         let _op_guard = self.try_operation()?;
         let mut state = self.state.write().await;
+        #[cfg(feature = "vim4")]
+        self.assert_media_owned(&mut state).await?;
         let previous_state = state.clone();
 
         self.assert_available(&state).await?;
@@ -191,6 +278,8 @@ impl MsdController {
     pub async fn mount_drive(&self) -> Result<()> {
         let _op_guard = self.try_operation()?;
         let mut state = self.state.write().await;
+        #[cfg(feature = "vim4")]
+        self.assert_media_owned(&mut state).await?;
         let previous_state = state.clone();
 
         self.assert_available(&state).await?;
@@ -310,6 +399,8 @@ impl MsdController {
         let _op_guard = self.try_operation()?;
         let previous_state = {
             let mut state = self.state.write().await;
+            #[cfg(feature = "vim4")]
+            self.assert_media_owned(&mut state).await?;
             self.assert_available(&state).await?;
             if state.disk_mode == disk_mode {
                 return Ok(false);
@@ -398,13 +489,15 @@ impl MsdController {
         let _op_guard = self.try_operation()?;
 
         let mut state = self.state.write().await;
+        #[cfg(feature = "vim4")]
+        self.assert_media_owned(&mut state).await?;
         let Some(index) = state.mounted_media.iter().position(predicate) else {
             debug!("Requested media was not mounted, skipping unmount");
             return Ok(false);
         };
         let media = state.mounted_media[index].clone();
 
-        self.disconnect_lun(media.lun).await?;
+        self.disconnect_media(&media).await?;
         state.mounted_media.remove(index);
         if media.kind == MountedMediaKind::Drive {
             state.drive_info = state
@@ -443,6 +536,7 @@ impl MsdController {
         Ok(())
     }
 
+    #[cfg(not(feature = "vim4"))]
     async fn disconnect_lun(&self, lun: u8) -> Result<()> {
         let gadget_path = self.active_gadget_path().await?;
         let msd_hold = self.msd_function.read().await;
@@ -450,6 +544,18 @@ impl MsdController {
             .as_ref()
             .ok_or_else(|| AppError::from(MsdErrorCode::MsdUnavailable))?;
         msd.disconnect_lun_async(&gadget_path, lun).await
+    }
+
+    async fn disconnect_media(&self, media: &MountedMedia) -> Result<()> {
+        #[cfg(feature = "vim4")]
+        return crate::platform::vim4::configure_media_expected(
+            media.lun,
+            &MsdLunConfig::default(),
+            &media.path,
+        )
+        .await;
+        #[cfg(not(feature = "vim4"))]
+        self.disconnect_lun(media.lun).await
     }
 
     async fn rollback_mode_switch(&self, previous_state: &MsdState) -> Result<()> {
@@ -479,6 +585,8 @@ impl MsdController {
         let _op_guard = self.try_operation()?;
 
         let mut state = self.state.write().await;
+        #[cfg(feature = "vim4")]
+        self.assert_media_owned(&mut state).await?;
         if state.mounted_media.is_empty() {
             debug!("Nothing mounted, skipping disconnect");
             return Ok(());
@@ -487,7 +595,7 @@ impl MsdController {
         let mounted_media = state.mounted_media.clone();
         let mut disconnected = Vec::new();
         for media in &mounted_media {
-            if let Err(error) = self.disconnect_lun(media.lun).await {
+            if let Err(error) = self.disconnect_media(media).await {
                 for prior in &disconnected {
                     if let Err(restore_error) = self.configure_media(prior).await {
                         state.available = false;
@@ -527,6 +635,13 @@ impl MsdController {
     }
 
     pub async fn is_drive_connected(&self) -> bool {
+        #[cfg(feature = "vim4")]
+        return self
+            .live_state()
+            .await
+            .map(|state| state.mounted_media.iter().any(|media| media.path == self.drive_path))
+            .unwrap_or(true);
+        #[cfg(not(feature = "vim4"))]
         self.state
             .read()
             .await
@@ -688,6 +803,10 @@ impl MsdController {
     }
 
     async fn active_gadget_path(&self) -> Result<PathBuf> {
+        #[cfg(all(test, feature = "vim4"))]
+        if let Some(path) = &self.test_gadget_path {
+            return Ok(path.clone());
+        }
         self.otg_service
             .gadget_path()
             .await
@@ -728,6 +847,74 @@ mod tests {
     use super::*;
     use crate::msd::MULTI_DISK_MSD_LUNS;
     use tempfile::TempDir;
+
+    #[cfg(feature = "vim4")]
+    #[tokio::test]
+    async fn live_luns_preserve_only_process_owned_media() {
+        let temp = TempDir::new().unwrap();
+        let mut controller = MsdController::new(Arc::new(OtgService::new()), temp.path());
+        controller.test_gadget_path = Some(temp.path().into());
+        *controller.msd_function.write().await = Some(MsdFunction::new(
+            0, 8, crate::otg::msd::MsdInquiryStrings::default(),
+        ).unwrap());
+        {
+            let mut state = controller.state.write().await;
+            state.available = true;
+            state.disk_mode = DiskMode::Multi;
+        }
+        for lun in 0..8 {
+            let path = temp.path().join(format!("functions/mass_storage.usb0/lun.{lun}"));
+            std::fs::create_dir_all(&path).unwrap();
+            for (attr, value) in [("file", "\n"), ("ro", "0"), ("cdrom", "0")] {
+                std::fs::write(path.join(attr), value).unwrap();
+            }
+        }
+        let lun = temp.path().join("functions/mass_storage.usb0/lun.7");
+        // Even an image in our own data directory is external after startup.
+        let image = ImageInfo::new("test".into(), "test.iso".into(), controller.images_path.join("test.iso"), 512);
+        std::fs::create_dir_all(&controller.images_path).unwrap();
+        std::fs::write(&image.path, [0u8; 512]).unwrap();
+        std::fs::write(lun.join("file"), image.path.to_str().unwrap()).unwrap();
+        std::fs::write(lun.join("ro"), "1").unwrap();
+        std::fs::write(lun.join("cdrom"), "1").unwrap();
+        let state = controller.live_state().await.unwrap();
+        assert_eq!(state.mounted_media[0].kind, MountedMediaKind::External);
+        assert_eq!(state.mounted_media[0].name, "test.iso");
+        assert_eq!(state.mounted_media[0].size, 512);
+        assert!(state.mounted_media[0].read_only && state.mounted_media[0].cdrom);
+        for result in [
+            controller.mount_image(&image, true, true).await,
+            controller.mount_drive().await,
+            controller.unmount_image("test").await,
+            controller.unmount_drive().await,
+            controller.disconnect().await,
+            controller.unmount_lun(7).await.map(|_| ()),
+        ] {
+            assert!(matches!(result, Err(AppError::Msd(error)) if error.code() == MsdErrorCode::MsdExternalMedia));
+        }
+        assert_eq!(std::fs::read_to_string(lun.join("file")).unwrap(), image.path.to_str().unwrap());
+        // A successful own mount record survives refresh and keeps live flags.
+        controller.state.write().await.mounted_media = vec![MountedMedia::image(7, &image, false, false)];
+        let state = controller.live_state().await.unwrap();
+        assert_eq!(state.mounted_media[0].kind, MountedMediaKind::Image);
+        assert!(state.mounted_media[0].cdrom);
+        MsdController::reject_external_media(&state).unwrap();
+        std::fs::write(lun.join("file"), "\n").unwrap();
+        assert!(controller.live_state().await.unwrap().mounted_media.is_empty());
+        assert!(!controller.unmount_lun(7).await.unwrap());
+        // Reattaching the same path externally does not revive ownership.
+        std::fs::write(lun.join("file"), image.path.to_str().unwrap()).unwrap();
+        assert_eq!(controller.live_state().await.unwrap().mounted_media[0].kind, MountedMediaKind::External);
+        // Ventoy's familiar filename must not imply that this process owns it.
+        std::fs::write(lun.join("file"), controller.drive_path.to_str().unwrap()).unwrap();
+        assert_eq!(controller.live_state().await.unwrap().mounted_media[0].kind, MountedMediaKind::External);
+        assert!(controller.is_drive_connected().await);
+        std::fs::write(lun.join("file"), "\n").unwrap();
+        assert!(!controller.is_drive_connected().await);
+        std::fs::remove_file(lun.join("ro")).unwrap();
+        assert!(controller.live_state().await.is_err());
+        assert!(controller.mount_image(&image, true, true).await.is_err());
+    }
 
     #[tokio::test]
     async fn test_controller_creation() {

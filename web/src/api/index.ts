@@ -595,7 +595,7 @@ export interface DriveInfo {
 }
 
 export type DiskMode = 'single' | 'multi'
-export type MountedMediaKind = 'drive' | 'image'
+export type MountedMediaKind = 'drive' | 'image' | 'external'
 
 export interface MountedMedia {
   id: string

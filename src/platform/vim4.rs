@@ -193,6 +193,14 @@ pub async fn configure_media(
     lun: u8,
     config: &crate::otg::msd::MsdLunConfig,
 ) -> crate::error::Result<()> {
+    configure_media_expected(lun, config, std::path::Path::new("")).await
+}
+
+pub async fn configure_media_expected(
+    lun: u8,
+    config: &crate::otg::msd::MsdLunConfig,
+    expected: &std::path::Path,
+) -> crate::error::Result<()> {
     use crate::error::AppError;
     if lun != 0 {
         return Err(AppError::BadRequest(
@@ -204,12 +212,16 @@ pub async fn configure_media(
     command
         .arg(&config.file)
         .arg(if config.cdrom { "true" } else { "false" })
-        .arg(if config.ro { "true" } else { "false" });
+        .arg(if config.ro { "true" } else { "false" })
+        .arg(expected);
     let output = command
         .output()
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     if !output.status.success() {
+        if String::from_utf8_lossy(&output.stderr).contains("MSD_EXTERNAL_MEDIA") {
+            return Err(crate::error::MsdErrorCode::MsdExternalMedia.into());
+        }
         return Err(AppError::Internal(
             String::from_utf8_lossy(&output.stderr).trim().into(),
         ));

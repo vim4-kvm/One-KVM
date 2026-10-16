@@ -371,6 +371,7 @@ fn msd_error_response(code: MsdErrorCode) -> Response {
         | MsdMediaSlotsFull
         | MsdMediaAlreadyMounted
         | MsdMediaInUse
+        | MsdExternalMedia
         | MsdDriveConnected
         | MsdMediumRemovalPrevented => StatusCode::CONFLICT,
         MsdInvalidRequest

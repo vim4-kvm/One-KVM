@@ -511,6 +511,16 @@ impl MsdFunction {
         None
     }
 
+    /// Read all live attributes; a read failure must never look like an empty LUN.
+    #[cfg(feature = "vim4")]
+    pub fn read_lun(&self, gadget_path: &Path, lun: u8) -> Result<(PathBuf, bool, bool)> {
+        let path = self.lun_path(gadget_path, lun);
+        let file = fs::read_to_string(path.join("file"))?;
+        let ro = fs::read_to_string(path.join("ro"))?;
+        let cdrom = fs::read_to_string(path.join("cdrom"))?;
+        Ok((PathBuf::from(file.trim()), ro.trim() == "1", cdrom.trim() == "1"))
+    }
+
     pub fn is_lun_connected(&self, gadget_path: &Path, lun: u8) -> bool {
         self.get_lun_file(gadget_path, lun).is_some()
     }

@@ -70,6 +70,7 @@ pub(crate) fn msd_status_code(code: crate::error::MsdErrorCode) -> StatusCode {
         | MsdMediaSlotsFull
         | MsdMediaAlreadyMounted
         | MsdMediaInUse
+        | MsdExternalMedia
         | MsdDriveConnected
         | MsdMediumRemovalPrevented => StatusCode::CONFLICT,
         MsdInvalidRequest
@@ -153,6 +154,7 @@ mod tests {
             (MsdMediaSlotsFull, StatusCode::CONFLICT),
             (MsdMediaAlreadyMounted, StatusCode::CONFLICT),
             (MsdMediaInUse, StatusCode::CONFLICT),
+            (MsdExternalMedia, StatusCode::CONFLICT),
             (MsdImageTooLarge, StatusCode::BAD_REQUEST),
             (MsdInvalidUrl, StatusCode::BAD_REQUEST),
             (MsdRemoteDownloadFailed, StatusCode::INTERNAL_SERVER_ERROR),

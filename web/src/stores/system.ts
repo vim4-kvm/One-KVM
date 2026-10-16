@@ -118,7 +118,7 @@ export interface MsdDeviceInfo {
   mounted_count: number
   mounted_media: Array<{
     id: string
-    kind: 'drive' | 'image'
+    kind: 'drive' | 'image' | 'external'
     name: string
     cdrom: boolean
     read_only: boolean

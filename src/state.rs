@@ -276,6 +276,8 @@ impl AppState {
                     kind: match media.kind {
                         crate::msd::MountedMediaKind::Drive => "drive",
                         crate::msd::MountedMediaKind::Image => "image",
+                        #[cfg(feature = "vim4")]
+                        crate::msd::MountedMediaKind::External => "external",
                     }
                     .to_string(),
                     name: media.name.clone(),
