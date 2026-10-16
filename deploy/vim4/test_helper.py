@@ -2,10 +2,19 @@ import importlib.machinery
 import importlib.util
 import os
 import copy
+import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
+import sys
+from contextlib import nullcontext, redirect_stdout
 from unittest.mock import patch
+
+board_spec = importlib.util.spec_from_file_location('vim4media', Path(__file__).resolve().parents[3] / 'board/vim4media.py')
+vim4media = importlib.util.module_from_spec(board_spec)
+sys.modules['vim4media'] = vim4media
+board_spec.loader.exec_module(vim4media)
 
 loader = importlib.machinery.SourceFileLoader('helper', str(Path(__file__).with_name('vim4-onekvm')))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -19,6 +28,8 @@ class MediaTest(unittest.TestCase):
         self.media = self.root / 'msd'
         (self.media / 'images').mkdir(parents=True)
         self.enterContext(patch.object(helper, 'MEDIA', self.media))
+        self.enterContext(patch.object(vim4media, 'IMAGE_ROOTS', {'onekvm': self.media}))
+        self.enterContext(patch.object(vim4media, 'media_locks', side_effect=lambda wait=False: nullcontext()))
         self.enterContext(patch.object(helper, 'PROFILE_DIR', self.root / 'profile'))
         self.image = self.media / 'images' / 'test.iso'
         self.image.write_bytes(b'0' * 512)
@@ -61,10 +72,19 @@ class MediaTest(unittest.TestCase):
         (gadget / 'UDC').write_text('controller')
         for name in ('hid.keyboard', 'hid.absolute', 'hid.relative', 'ncm.usb0'):
             (config / name).symlink_to(gadget / 'functions' / name)
+        write_text = Path.write_text
+        def kernel_write(path, value, *args, **kwargs):
+            if path == lun / 'file' and value.startswith('/proc/self/fd/'):
+                value = os.readlink(value)
+            return write_text(path, value, *args, **kwargs)
         with patch.object(helper, 'GADGET', gadget), patch.object(helper, 'LUN', lun), \
                 patch.object(helper.time, 'sleep'), patch.object(helper.os, 'sync'), \
+                patch.object(Path, 'write_text', kernel_write), \
                 patch.object(helper, 'saved_profile', return_value=None):
-            helper.main(['media', str(self.image), 'true', 'false'])
+            output = io.StringIO()
+            with redirect_stdout(output):
+                helper.main(['media', str(self.image), 'true', 'false'])
+            self.assertEqual(json.loads(output.getvalue())['file'], str(self.image))
             self.assertEqual((lun / 'ro').read_text(), '1')
             self.assertTrue((config / 'mass_storage.disk0').is_symlink())
             self.assertFalse((config / 'ncm.usb0').is_symlink())
@@ -95,6 +115,46 @@ class MediaTest(unittest.TestCase):
         for args in (['reboot'], ['media', '', 'true', 'yes'], ['media']):
             with self.assertRaises(ValueError):
                 helper.main(args)
+
+    def test_foreign_policy_and_data_edit_lock(self):
+        import fcntl
+        self.enterContext(patch.object(vim4media, 'DATA_DIR', self.media / 'images'))
+        with patch.object(helper, '_configure_media') as configure:
+            helper.configure_media('pikvm/test.iso', False, False)
+            configure.assert_called_with('pikvm/test.iso', True, True, '')
+            helper.configure_media('jetkvm/test.img', False, False)
+            configure.assert_called_with('jetkvm/test.img', False, True, '')
+            helper.configure_media('data/test.img', True, False)
+            configure.assert_called_with('data/test.img', False, False, '')
+        disk = self.media / 'images/test.img'
+        disk.write_bytes(b'd' * 512)
+        with disk.open('r+b') as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(ValueError, '正在管理面板中编辑'):
+                helper.configure_media('data/test.img', False, False)
+
+    def test_locks_are_held_when_opening_media(self):
+        from contextlib import contextmanager
+        held = []
+
+        @contextmanager
+        def locks(wait=False):
+            self.assertTrue(wait, 'application helpers wait for the shared media lock')
+            held.append(True)
+            try:
+                yield
+            finally:
+                held.pop()
+
+        def open_locked(*args, **kwargs):
+            self.assertEqual(held, [True])
+            raise ValueError('stop before touching LUN')
+
+        vim4media.media_locks.side_effect = locks
+        with patch.object(vim4media, 'open_image', side_effect=open_locked):
+            with self.assertRaisesRegex(ValueError, 'stop before touching LUN'):
+                helper.configure_media('data/test.img', False, False)
+        self.assertEqual(held, [])
 
 
 class UsbProfileTest(unittest.TestCase):
@@ -217,7 +277,8 @@ class UsbProfileTest(unittest.TestCase):
         (media / 'images').mkdir(parents=True)
         image = media / 'images/disk.img'
         image.write_bytes(b'0' * 512)
-        with patch.object(helper, 'MEDIA', media), patch.object(helper.os, 'sync'):
+        with patch.object(helper, 'MEDIA', media), patch.object(helper.os, 'sync'), \
+                patch.object(vim4media, 'IMAGE_ROOTS', {'onekvm': media}):
             helper.configure_media(str(image), False, True)
             self.assertTrue((self.config / 'uac2.usb0').is_symlink())
             self.assertTrue((self.config / 'mass_storage.disk0').is_symlink())

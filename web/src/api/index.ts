@@ -571,6 +571,7 @@ export const atxApi = {
 }
 
 export interface MsdImage {
+  source?: string
   id: string
   name: string
   size: number

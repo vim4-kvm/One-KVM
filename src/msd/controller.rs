@@ -227,6 +227,12 @@ impl MsdController {
         read_only: bool,
         requested_lun: Option<u8>,
     ) -> Result<()> {
+        #[cfg(feature = "vim4")]
+        let (cdrom, read_only) = match image.source.as_deref() {
+            Some("data") => (false, read_only),
+            Some(_) => (cdrom || image.name.to_lowercase().ends_with(".iso"), true),
+            None => (cdrom, read_only),
+        };
         let _op_guard = self.try_operation()?;
         let mut state = self.state.write().await;
         #[cfg(feature = "vim4")]
@@ -235,7 +241,12 @@ impl MsdController {
 
         self.assert_available(&state).await?;
 
-        if !image.path.exists() {
+        // Catalog files may be root-only; the helper validates and opens them.
+        #[cfg(feature = "vim4")]
+        let catalog_image = image.source.is_some();
+        #[cfg(not(feature = "vim4"))]
+        let catalog_image = false;
+        if !catalog_image && !image.path.exists() {
             let error_msg = format!("Image file not found: {}", image.path.display());
             self.monitor
                 .report_error(&error_msg, "image_not_found")
@@ -254,10 +265,13 @@ impl MsdController {
         let lun = Self::select_lun(&state, requested_lun)?;
 
         let media = MountedMedia::image(lun, image, cdrom, read_only);
-        if let Err(e) = self.configure_media(&media).await {
-            *state = previous_state;
-            return Err(e);
-        }
+        let media = match self.configure_media(&media).await {
+            Ok(media) => media,
+            Err(e) => {
+                *state = previous_state;
+                return Err(e);
+            }
+        };
         state.mounted_media.push(media);
 
         info!(
@@ -312,10 +326,13 @@ impl MsdController {
             .ok_or_else(|| AppError::from(MsdErrorCode::MsdMediaSlotsFull))?;
 
         let media = MountedMedia::drive(lun, &drive_info);
-        if let Err(e) = self.configure_media(&media).await {
-            *state = previous_state;
-            return Err(e);
-        }
+        let media = match self.configure_media(&media).await {
+            Ok(media) => media,
+            Err(e) => {
+                *state = previous_state;
+                return Err(e);
+            }
+        };
         state.mounted_media.push(media);
         state.drive_info =
             Some(drive_info.with_file_access(DriveFileAccess::BlockedWhileConnected));
@@ -515,25 +532,42 @@ impl MsdController {
         Ok(true)
     }
 
-    async fn configure_media(&self, media: &MountedMedia) -> Result<()> {
-        if let Err(e) = self
-            .otg_service
-            .configure_msd_lun(media.lun, &Self::media_config(media))
-            .await
+    async fn configure_media(&self, media: &MountedMedia) -> Result<MountedMedia> {
+        #[cfg(feature = "vim4")]
         {
-            let error_msg = format!("Failed to configure LUN {}: {}", media.lun, e);
-            self.monitor
-                .report_error(&error_msg, "configfs_error")
-                .await;
-            return Err(match e {
-                AppError::Msd(error) => AppError::Msd(error),
-                error => {
-                    warn!(%error, "Unclassified MSD media configuration failure");
-                    MsdErrorCode::MsdOperationFailed.into()
-                }
-            });
+            let path = crate::platform::vim4::configure_media_result(
+                media.lun,
+                &Self::media_config(media),
+                Path::new(""),
+            )
+            .await?;
+            let mut mounted = media.clone();
+            // Retain the kernel path captured under the helper's media locks,
+            // so reconciliation and later eject use the same ownership key.
+            mounted.path = path;
+            return Ok(mounted);
         }
-        Ok(())
+        #[cfg(not(feature = "vim4"))]
+        {
+            if let Err(e) = self
+                .otg_service
+                .configure_msd_lun(media.lun, &Self::media_config(media))
+                .await
+            {
+                let error_msg = format!("Failed to configure LUN {}: {}", media.lun, e);
+                self.monitor
+                    .report_error(&error_msg, "configfs_error")
+                    .await;
+                return Err(match e {
+                    AppError::Msd(error) => AppError::Msd(error),
+                    error => {
+                        warn!(%error, "Unclassified MSD media configuration failure");
+                        MsdErrorCode::MsdOperationFailed.into()
+                    }
+                });
+            }
+            Ok(media.clone())
+        }
     }
 
     #[cfg(not(feature = "vim4"))]

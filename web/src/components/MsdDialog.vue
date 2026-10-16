@@ -67,6 +67,8 @@ const activeTab = ref('images')
 const msdStatusError = ref<string | null>(null)
 
 const images = ref<MsdImage[]>([])
+const sourceLabels: Record<string, string> = { data: '共享数据盘', shared: 'NanoKVM 镜像', jetkvm: 'JetKVM 镜像', pikvm: 'PiKVM 镜像' }
+const groupedImages = computed(() => [...images.value].sort((a, b) => (a.source ?? '').localeCompare(b.source ?? '')))
 const loadingImages = ref(false)
 const imagesError = ref<string | null>(null)
 const uploadProgress = ref(0)
@@ -326,7 +328,7 @@ async function connectImage(image: MsdImage) {
 
   pendingMountImage.value = image
   mountMode.value = isIsoImage(image) ? 'cdrom' : 'flash'
-  accessMode.value = isIsoImage(image) ? 'readonly' : 'readwrite'
+  accessMode.value = isIsoImage(image) || (image.source && image.source !== 'data') ? 'readonly' : 'readwrite'
   showMountOptionsDialog.value = true
 }
 
@@ -876,7 +878,8 @@ onUnmounted(() => {
                     </EmptyHeader>
                   </Empty>
 
-                  <template v-else v-for="image in images" :key="image.id">
+                  <template v-else v-for="(image, index) in groupedImages" :key="image.id">
+                    <p v-if="image.source && image.source !== groupedImages[index - 1]?.source" class="text-sm font-medium pt-2">{{ sourceLabels[image.source] ?? image.source }}</p>
                     <div
                       class="rounded-md border p-2.5 transition-colors"
                       :class="[
@@ -944,6 +947,7 @@ onUnmounted(() => {
                             </Button>
                           </template>
                           <Button
+                            v-if="!image.source"
                             variant="ghost"
                             size="icon"
                             class="size-8 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
@@ -1398,6 +1402,7 @@ onUnmounted(() => {
           <Label>{{ t('msd.storageMode') }}</Label>
           <ToggleGroup
             :model-value="mountMode"
+            :disabled="!!pendingMountImage?.source && (pendingMountImage.source === 'data' || isIsoImage(pendingMountImage))"
             type="single"
             size="sm"
             :spacing="1"
@@ -1423,7 +1428,7 @@ onUnmounted(() => {
             <ToggleGroupItem
               value="readwrite"
               :class="segmentedItemClass"
-              :disabled="cdromMode"
+              :disabled="cdromMode || (!!pendingMountImage?.source && pendingMountImage.source !== 'data')"
             >
               {{ t('msd.readWrite') }}
             </ToggleGroupItem>

@@ -5,6 +5,54 @@ use crate::video::format::{PixelFormat, Resolution};
 pub const VIDEO_DEVICE: &str = "/dev/video_cap";
 pub const GADGET: &str = "/sys/kernel/config/usb_gadget/kvm";
 
+#[derive(serde::Deserialize)]
+struct CatalogEntry {
+    id: String,
+    name: String,
+    source: String,
+    size: u64,
+}
+
+impl CatalogEntry {
+    fn into_image(self) -> crate::error::Result<crate::msd::ImageInfo> {
+        let root = match self.source.as_str() {
+            "shared" => "/var/lib/vim4-kvm/images",
+            "jetkvm" => "/var/lib/jetkvm/images",
+            "pikvm" => "/var/lib/kvmd/msd",
+            "data" => "/var/lib/vim4-kvm/usb",
+            _ => return Err(crate::error::MsdErrorCode::MsdInvalidRequest.into()),
+        };
+        // Keep catalog identity in a single URL segment, separate from local IDs.
+        let id = format!("vim4-{}", self.id.bytes().map(|b| format!("{b:02x}")).collect::<String>());
+        let path = std::path::Path::new(root).join(&self.name);
+        let mut image = crate::msd::ImageInfo::new(id, self.name, path, self.size);
+        image.source = Some(self.source);
+        Ok(image)
+    }
+}
+
+pub async fn catalog_images() -> crate::error::Result<Vec<crate::msd::ImageInfo>> {
+    use crate::error::AppError;
+    let output = tokio::process::Command::new("sudo")
+        .args(["-n", "/usr/libexec/vim4-onekvm", "catalog"])
+        .output().await.map_err(|e| AppError::Internal(e.to_string()))?;
+    if !output.status.success() {
+        return Err(AppError::Internal(String::from_utf8_lossy(&output.stderr).trim().into()));
+    }
+    let entries: Vec<CatalogEntry> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    entries.into_iter().filter(|entry| entry.source != "onekvm")
+        .map(CatalogEntry::into_image).collect()
+}
+
+pub async fn find_image(manager: &crate::msd::ImageManager, id: &str) -> crate::error::Result<crate::msd::ImageInfo> {
+    if id.starts_with("vim4-") {
+        return catalog_images().await?.into_iter().find(|image| image.id == id)
+            .ok_or_else(|| crate::error::MsdErrorCode::MsdResourceNotFound.into());
+    }
+    manager.get(id)
+}
+
 pub fn hid_paths(hid: &crate::config::HidConfig) -> crate::otg::HidDevicePaths {
     let functions = hid.constrained_otg_functions();
     crate::otg::HidDevicePaths {
@@ -201,6 +249,14 @@ pub async fn configure_media_expected(
     config: &crate::otg::msd::MsdLunConfig,
     expected: &std::path::Path,
 ) -> crate::error::Result<()> {
+    configure_media_result(lun, config, expected).await.map(|_| ())
+}
+
+pub async fn configure_media_result(
+    lun: u8,
+    config: &crate::otg::msd::MsdLunConfig,
+    expected: &std::path::Path,
+) -> crate::error::Result<std::path::PathBuf> {
     use crate::error::AppError;
     if lun != 0 {
         return Err(AppError::BadRequest(
@@ -226,12 +282,34 @@ pub async fn configure_media_expected(
             String::from_utf8_lossy(&output.stderr).trim().into(),
         ));
     }
-    Ok(())
+    #[derive(serde::Deserialize)]
+    struct Mounted {
+        file: std::path::PathBuf,
+    }
+    let result: Mounted = serde_json::from_slice(&output.stdout)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(result.file)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn msd_catalog_identity_preserves_source_and_real_lun_path() {
+        let make = |source: &str| CatalogEntry {
+            id: format!("{source}/install disk.img"),
+            name: "install disk.img".into(), source: source.into(), size: 4096,
+        }.into_image().unwrap();
+        let data = make("data");
+        let foreign = make("pikvm");
+        assert_ne!(data.id, foreign.id);
+        assert_eq!(data.id, make("data").id);
+        assert!(!data.id.contains('/') && !data.id.contains(' '));
+        assert_eq!(data.path, std::path::Path::new("/var/lib/vim4-kvm/usb/install disk.img"));
+        assert_eq!(foreign.source.as_deref(), Some("pikvm"));
+        assert_eq!(foreign.path, std::path::Path::new("/var/lib/kvmd/msd/install disk.img"));
+    }
+
     #[test]
     fn output_limits_preserve_aspect_ratio_and_never_increase_source_rate() {
         let settings = OutputSettings {

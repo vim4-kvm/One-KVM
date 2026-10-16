@@ -21,7 +21,7 @@
 
 应用以 khadas 运行，不创建、删除 USB gadget，不重启 HDMI 服务。
 仅用户明确应用 EDID 时调用共享助手重新协商显示器；普通观看、调码率与缩放不触发 HPD。
-虚拟介质经限定 sudo 助手操作 configfs，镜像只允许来自
+虚拟介质经限定 sudo 助手操作 configfs，本地镜像保存在
 `/var/lib/one-kvm/msd/images` 或 `ventoy`，拒绝符号链接与硬链接。
 不支持多 LUN、以太网桥接；ATX 未连接。
 Ubuntu 包将仓库内的 Ventoy 引导资源解压到 `/usr/share/vim4-onekvm/ventoy`，
@@ -29,6 +29,12 @@ Ubuntu 包将仓库内的 Ventoy 引导资源解压到 `/usr/share/vim4-onekvm/v
 普通 ISO/IMG 不依赖这些引导资源。虚拟盘测试使用同一套资源，缺失或解压失败时必须失败。
 
 ## 虚拟介质状态
+
+镜像列表按来源分组显示其他 KVM 的 ISO/IMG 和共享数据盘；这些条目不能删除或重命名。
+其他应用的镜像强制只读（ISO 为光盘），共享数据盘可选择只读或可写。
+助手的 `catalog` 与挂载使用 `/usr/lib/vim4-kvm/python/vim4media.py`，所有介质变更
+持有两个共享锁，打开数据盘时检查管理面板编辑锁。通过本页面挂载的外部来源镜像
+属于本进程，可正常弹出；他处挂载的介质仍按外部介质保护。
 
 VIM4 的 `/api/msd/status` 每次读取共享 LUN 的 `file`、`ro`、`cdrom`。
 网页介质弹窗每两秒刷新，显示外部介质文件名、光盘/磁盘及只读/可写状态。
@@ -39,7 +45,8 @@ images 目录镜像和 Ventoy 盘也属于外部介质。外部弹出后清除�
 上游非 VIM4 构建保留原行为。
 
 离线假 LUN 测试覆盖外部介质、拒绝操作、外部弹出和自身挂载状态；助手测试覆盖
-挂载/弹出及检查后介质被替换的拒绝路径。Mac 未安装 Cargo，Rust 测试与构建尚未验证；
+挂载/弹出及检查后介质被替换的拒绝路径。ARM64 Ubuntu 构建器已通过 MSD Rust 测试、
+`cargo check --locked --features vim4`、助手测试与网页 typecheck/build；
 离线文件不模拟 configfs、SCSI 防弹出锁或 USB 枚举，仍需独立上板验收。本次未访问板子。
 
 ## HID 功能配置

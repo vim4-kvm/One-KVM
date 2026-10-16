@@ -137,6 +137,12 @@ pub async fn msd_images_list(State(state): State<Arc<AppState>>) -> Result<Json<
     let manager = ImageManager::new(images_path);
 
     let images = manager.list()?;
+    #[cfg(feature = "vim4")]
+    let images = {
+        let mut images = images;
+        images.extend(crate::platform::vim4::catalog_images().await?);
+        images
+    };
     Ok(Json(images))
 }
 
@@ -184,6 +190,9 @@ pub async fn msd_image_get(
     let images_path = config.msd.images_dir();
     let manager = ImageManager::new(images_path);
 
+    #[cfg(feature = "vim4")]
+    let image = crate::platform::vim4::find_image(&manager, &id).await?;
+    #[cfg(not(feature = "vim4"))]
     let image = manager.get(&id)?;
     Ok(Json(image))
 }
@@ -342,6 +351,9 @@ pub async fn msd_image_mount(
 
     let images_path = config.msd.images_dir();
     let manager = ImageManager::new(images_path);
+    #[cfg(feature = "vim4")]
+    let image = crate::platform::vim4::find_image(&manager, &id).await?;
+    #[cfg(not(feature = "vim4"))]
     let image = manager.get(&id)?;
 
     controller

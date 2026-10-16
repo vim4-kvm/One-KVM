@@ -76,6 +76,8 @@ impl ImageManager {
             name,
             path: path.to_path_buf(),
             size: metadata.len(),
+            #[cfg(feature = "vim4")]
+            source: None,
             created_at,
         })
     }

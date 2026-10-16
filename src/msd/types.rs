@@ -17,6 +17,9 @@ pub struct ImageInfo {
     #[serde(skip_serializing)]
     pub path: PathBuf,
     pub size: u64,
+    #[cfg(feature = "vim4")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
@@ -28,6 +31,8 @@ impl ImageInfo {
             name,
             path,
             size,
+            #[cfg(feature = "vim4")]
+            source: None,
             created_at: OffsetDateTime::now_utc(),
         }
     }

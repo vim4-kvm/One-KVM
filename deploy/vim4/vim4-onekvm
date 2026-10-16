@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 """Restricted USB profiles on the existing board-owned VIM4 gadget."""
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -9,6 +8,9 @@ import sys
 import subprocess
 import time
 import uuid
+
+sys.path.insert(0, '/usr/lib/vim4-kvm/python')
+import vim4media
 
 MEDIA = Path('/var/lib/one-kvm/msd')
 GADGET = Path('/sys/kernel/config/usb_gadget/kvm')
@@ -237,28 +239,30 @@ def restore_profile():
 
 
 def open_image(name, writable):
+    return vim4media.open_image(image_id(name), readonly=not writable)
+
+
+def image_id(name):
     path = Path(name)
-    if path.parent not in (MEDIA / 'images', MEDIA / 'ventoy') or path.suffix.lower() not in ('.iso', '.img'):
-        raise ValueError('Image must be in the One-KVM media directory')
-    # Walk every parent without following symlinks, then give configfs the
-    # validated descriptor so replacing the path cannot change the image.
-    directory = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in path.parent.parts[1:]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-            os.close(directory)
-            directory = child
-        fd = os.open(path.name, (os.O_RDWR if writable else os.O_RDONLY) | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-    finally:
-        os.close(directory)
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_size < 512 or info.st_nlink != 1:
-        os.close(fd)
-        raise ValueError('Image must be a regular file of at least 512 bytes without hard links')
-    return fd
+    if path.is_absolute():
+        for source, root in {**vim4media.IMAGE_ROOTS, 'data': vim4media.DATA_DIR}.items():
+            if path.is_relative_to(root):
+                return source + '/' + str(path.relative_to(root))
+        raise ValueError('Image must be in the media catalog')
+    return name
 
 
 def configure_media(name, cdrom, readonly, expected=''):
+    with vim4media.media_locks(wait=True):
+        if name:
+            name = image_id(name)
+            source = name.split('/')[0]
+            cdrom = (cdrom or (source != 'onekvm' and name.lower().endswith('.iso'))) and source != 'data'
+            readonly = readonly or cdrom or source not in ('onekvm', 'data')
+        return _configure_media(name, cdrom, readonly, expected)
+
+
+def _configure_media(name, cdrom, readonly, expected):
     fd = open_image(name, not readonly) if name else None
     try:
         old = {key: (LUN / key).read_text().strip() for key in ('file', 'cdrom', 'ro', 'inquiry_string')}
@@ -267,7 +271,7 @@ def configure_media(name, cdrom, readonly, expected=''):
         if old['file'] != expected or (name and old['file']):
             raise ValueError('MSD_EXTERNAL_MEDIA: Safely eject on the controlled computer, then eject in the manager')
         if fd is None and not old['file']:
-            return
+            return ''
         config = GADGET / 'configs/c.1'
         udc = GADGET / 'UDC'
         controller = udc.read_text().strip()
@@ -303,39 +307,47 @@ def configure_media(name, cdrom, readonly, expected=''):
             for key in functions:
                 (config / key).unlink(missing_ok=True)
             (LUN / 'file').write_text('\n')
-            for key in ('cdrom', 'ro', 'inquiry_string', 'file'):
+            for key in ('cdrom', 'ro', 'inquiry_string'):
                 (LUN / key).write_text(old[key] or '\n')
+            if old['file']:
+                restore_fd = open_image(old['file'], old['ro'] != '1')
+                try:
+                    (LUN / 'file').write_text(f'/proc/self/fd/{restore_fd}')
+                finally:
+                    os.close(restore_fd)
             for key in old_links:
                 (config / key).symlink_to(GADGET / 'functions' / key)
             if controller:
                 udc.write_text(controller)
             raise
         os.sync()
+        return (LUN / 'file').read_text().strip()
     finally:
         if fd is not None:
             os.close(fd)
 
 
 def main(args):
+    if args == ['catalog']:
+        print(json.dumps(vim4media.catalog()))
+        return
     if len(args) == 2 and args[0] == 'usb':
-        configure_profile(json.loads(args[1]))
+        with vim4media.media_locks(wait=True):
+            configure_profile(json.loads(args[1]))
         return
     if args == ['usb-restore']:
-        restore_profile()
+        with vim4media.media_locks(wait=True):
+            restore_profile()
         return
     if len(args) not in (4, 5) or args[0] != 'media' or any(arg not in ('true', 'false') for arg in args[2:4]):
         raise ValueError('usage: vim4-onekvm media IMAGE CDROM READONLY')
-    configure_media(args[1], args[2] == 'true', args[2] == 'true' or args[3] == 'true', args[4] if len(args) == 5 else '')
+    path = configure_media(args[1], args[2] == 'true', args[2] == 'true' or args[3] == 'true', args[4] if len(args) == 5 else '')
+    print(json.dumps({'file': path}))
 
 
 if __name__ == '__main__':
     try:
-        fd = os.open('/run/lock/vim4-media.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, 'r+') as lock:
-            if os.fstat(lock.fileno()).st_uid != 0:
-                raise ValueError('Invalid media lock owner')
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            main(sys.argv[1:])
+        main(sys.argv[1:])
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(error, file=sys.stderr)
         sys.exit(1)
