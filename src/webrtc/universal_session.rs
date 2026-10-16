@@ -234,6 +234,22 @@ impl UniversalSession {
             .register_default_codecs()
             .map_err(|e| AppError::VideoError(format!("Failed to register codecs: {}", e)))?;
 
+        // Interactive video should render promptly instead of accumulating playout delay.
+        // The RTP writer sends this hint only when the receiver negotiates it.
+        if cfg!(feature = "vim4") {
+            media_engine
+                .register_header_extension(
+                    webrtc::rtp_transceiver::rtp_codec::RTCRtpHeaderExtensionCapability {
+                        uri: "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay".into(),
+                    },
+                    RTPCodecType::Video,
+                    None,
+                )
+                .map_err(|e| {
+                    AppError::VideoError(format!("Failed to register playout delay: {e}"))
+                })?;
+        }
+
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media_engine)
             .map_err(|e| AppError::VideoError(format!("Failed to register interceptors: {}", e)))?;
@@ -976,6 +992,37 @@ mod tests {
             .collect();
         session.close().await.unwrap();
         assert_eq!(groups.len(), if cfg!(feature = "vim4") { 2 } else { 1 });
+    }
+
+    #[tokio::test]
+    async fn h26x_playout_hint_is_offered_only_for_vim4_video() {
+        for codec in [VideoEncoderType::H264, VideoEncoderType::H265] {
+            let session = UniversalSession::new(
+                UniversalSessionConfig {
+                    codec,
+                    audio_enabled: true,
+                    ..Default::default()
+                },
+                "playout-extension-test".to_owned(),
+                None,
+            )
+            .await
+            .unwrap();
+            let offer = session.pc.create_offer(None).await.unwrap();
+            session.close().await.unwrap();
+            let mut media = "";
+            let mut video_hint = false;
+            for line in offer.sdp.lines() {
+                if let Some(value) = line.strip_prefix("m=") {
+                    media = value.split_whitespace().next().unwrap();
+                }
+                if line.starts_with("a=extmap:") && line.ends_with("/playout-delay") {
+                    assert_eq!(media, "video", "Video playout policy leaked into audio");
+                    video_hint = true;
+                }
+            }
+            assert_eq!(video_hint, cfg!(feature = "vim4"), "codec: {codec:?}");
+        }
     }
 
     #[test]

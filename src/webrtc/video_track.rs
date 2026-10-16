@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use rtp::codecs::h264::H264Payloader;
+use rtp::extension::{playout_delay_extension::PlayoutDelayExtension, HeaderExtension};
 use rtp::packetizer::Payloader;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +12,7 @@ use webrtc::media::Sample;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
-use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
+use webrtc::track::track_local::TrackLocal;
 
 // rtp `HevcPayloader` mishandles AP+IDR and NAL 20 (`IDR_N_LP`).
 use super::h265_payloader::H265Payloader;
@@ -353,6 +354,11 @@ impl UniversalVideoTrack {
         }
         let timestamp = state.clock.next(pts_ms);
         let count = payloads.len();
+        // Repeat the hint once per frame so packet loss cannot leave a stale policy.
+        let extensions = [HeaderExtension::PlayoutDelay(PlayoutDelayExtension {
+            min_delay: 0,
+            max_delay: 0,
+        })];
         // Serialize complete access units, including their sequence allocation.
         for (index, payload) in payloads.into_iter().enumerate() {
             let sequence_number = state.sequence_number;
@@ -368,7 +374,14 @@ impl UniversalVideoTrack {
                 payload,
             };
             track
-                .write_rtp(&packet)
+                .write_rtp_with_extensions(
+                    &packet,
+                    if cfg!(feature = "vim4") && index == 0 {
+                        &extensions
+                    } else {
+                        &[]
+                    },
+                )
                 .await
                 .map_err(|e| AppError::WebRtcError(format!("H264 RTP write failed: {e}")))?;
         }
@@ -463,6 +476,10 @@ impl UniversalVideoTrack {
             (payloads, timestamp, seq_start, num_payloads)
         };
 
+        let extensions = [HeaderExtension::PlayoutDelay(PlayoutDelayExtension {
+            min_delay: 0,
+            max_delay: 0,
+        })];
         for (i, payload_data) in payloads.into_iter().enumerate() {
             let seq = seq_start.wrapping_add(i as u16);
             let is_last = i == num_payloads - 1;
@@ -482,7 +499,17 @@ impl UniversalVideoTrack {
                 payload: payload_data.clone(),
             };
 
-            if let Err(e) = rtp_track.write_rtp(&packet).await {
+            if let Err(e) = rtp_track
+                .write_rtp_with_extensions(
+                    &packet,
+                    if cfg!(feature = "vim4") && i == 0 {
+                        &extensions
+                    } else {
+                        &[]
+                    },
+                )
+                .await
+            {
                 trace!("H265 write_rtp failed: {}", e);
                 return Err(AppError::WebRtcError(format!(
                     "H265 write_rtp failed: {}",
