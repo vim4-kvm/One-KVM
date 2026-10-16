@@ -52,7 +52,9 @@ pub enum BoardVideoChange {
 impl BoardVideoChange {
     fn command(&self) -> Result<(&'static str, Vec<String>)> {
         match self {
-            Self::Edid { preset } if ["VIM4-4K60", "VIM4-1080P60"].contains(&preset.as_str()) => {
+            Self::Edid { preset }
+                if ["VIM4-4K60", "VIM4-1080P60", "RTK-CONTROL"].contains(&preset.as_str()) =>
+            {
                 Ok((
                     "/usr/libexec/vim4-edid",
                     vec!["preset".into(), preset.clone()],
@@ -118,6 +120,11 @@ mod tests {
         assert!(BoardVideoChange::Hdr {
             white: 203,
             peak: 1000
+        }
+        .command()
+        .is_ok());
+        assert!(BoardVideoChange::Edid {
+            preset: "RTK-CONTROL".into()
         }
         .command()
         .is_ok());
