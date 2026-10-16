@@ -33,7 +33,7 @@ use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSampl
 use webrtc::track::track_local::TrackLocal;
 
 use super::ice::SessionIce;
-use super::input::{self, HidAction, InputState};
+use super::input::{self, HidAction, SessionInput, SessionInputEvent};
 use super::signaling::{SignalingClient, SoacMessage};
 use super::wire::{self, Rect};
 use crate::audio::AudioController;
@@ -345,7 +345,8 @@ struct Shared {
     actual_kbps: AtomicU64,
     default_bitrate: BitratePreset,
     settings_lock: Mutex<()>,
-    input: Mutex<InputState>,
+    input: SessionInput,
+    codec: VideoCodecType,
 }
 
 impl Shared {
@@ -396,9 +397,10 @@ impl Shared {
         }
     }
 
-    async fn release_input(&self) {
-        let actions = self.input.lock().await.release_all();
-        self.send_hid(actions).await;
+    async fn update_input(&self, event: SessionInputEvent<'_>) {
+        self.input
+            .update(event, |actions| self.send_hid(actions))
+            .await;
     }
 }
 
@@ -407,6 +409,7 @@ pub struct Peer {
     context: Arc<Mutex<Context>>,
     video: Arc<VideoStreamManager>,
     codec: VideoCodecType,
+    shared: Arc<Shared>,
 }
 
 fn select_video_codec(
@@ -568,7 +571,8 @@ impl Peer {
             sequence: AtomicU64::new(1),
             screen: watch::channel(initial).0,
             quality: AtomicU64::new(wire::quality::AUTO),
-            input: Mutex::new(InputState::new(deps.system, deps.reverse_scroll)),
+            input: SessionInput::new(deps.system, deps.reverse_scroll),
+            codec,
         });
 
         let (ice_context, ice_signal) = (context.clone(), deps.signaling.clone());
@@ -637,11 +641,15 @@ impl Peer {
             let (video_track, audio_track) = (video_track.clone(), audio_track.clone());
             Box::pin(async move {
                 info!("UU peer connection state: {state:?}");
-                if matches!(
-                    state,
-                    PcState::Closed | PcState::Failed | PcState::Disconnected
-                ) {
-                    shared.release_input().await;
+                match state {
+                    PcState::Connected => shared.update_input(SessionInputEvent::Connected).await,
+                    PcState::Disconnected => {
+                        shared.update_input(SessionInputEvent::Disconnected).await
+                    }
+                    PcState::Closed | PcState::Failed => {
+                        shared.update_input(SessionInputEvent::Close).await
+                    }
+                    _ => {}
                 }
                 if state != PcState::Connected || started.swap(true, Ordering::AcqRel) {
                     return;
@@ -723,6 +731,7 @@ impl Peer {
             context,
             video: deps.video.clone(),
             codec,
+            shared,
         })
     }
 
@@ -838,6 +847,8 @@ impl Peer {
     }
 
     pub async fn close(&self) {
+        // Finish releases before the room loop can create a replacement peer.
+        self.shared.update_input(SessionInputEvent::Close).await;
         if let Err(e) = self.pc.close().await {
             debug!("UU peer close: {e}");
         }
@@ -1118,8 +1129,14 @@ fn attach_control(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
     channel.on_open(Box::new(move || {
         let (channel, shared) = (open_channel.clone(), open_shared.clone());
         Box::pin(async move {
+            shared.update_input(SessionInputEvent::ControlOpened).await;
             tokio::spawn(control_initialization(channel, shared));
         })
+    }));
+    let closing = shared.clone();
+    channel.on_close(Box::new(move || {
+        let shared = closing.clone();
+        Box::pin(async move { shared.update_input(SessionInputEvent::Close).await })
     }));
     let reply = channel.clone();
     channel.on_message(Box::new(move |message: DataChannelMessage| {
@@ -1138,6 +1155,7 @@ async fn control_initialization(channel: Arc<RTCDataChannel>, shared: Arc<Shared
     let mut messages = vec![
         wire::capture_change(shared.next_seq(), ts, SCREEN_NAME),
         wire::system_metrics(shared.next_seq(), ts, sound),
+        wire::codec_negotiation(shared.next_seq(), ts, size, fps, shared.codec),
     ];
     match wire::screen_sources_with_output(
         shared.next_seq(),
@@ -1210,8 +1228,7 @@ async fn handle_control(channel: &RTCDataChannel, shared: &Shared, data: &[u8]) 
     // Input is JSON; '{' is an invalid protobuf group tag, so the two never overlap.
     let Ok(fields) = wire::decode(data) else {
         if let Some(event) = input::decode(data) {
-            let actions = shared.input.lock().await.translate(&event);
-            shared.send_hid(actions).await;
+            shared.update_input(SessionInputEvent::Input(&event)).await;
         }
         return;
     };
@@ -1307,8 +1324,9 @@ async fn handle_control(channel: &RTCDataChannel, shared: &Shared, data: &[u8]) 
             return;
         }
     };
-    let actions = shared.input.lock().await.shortcut(shortcut);
-    shared.send_hid(actions).await;
+    shared
+        .update_input(SessionInputEvent::Shortcut(shortcut))
+        .await;
 }
 
 fn native_screen(fallback: Rect) -> Rect {
@@ -1511,6 +1529,39 @@ mod tests {
         use crate::config::UuVideoCodec as Preference;
         let offer = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 98 99\r\na=recvonly\r\na=rtpmap:98 H264/90000\r\na=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1;tx-mode=SRST\r\n";
         let both = [VideoCodecType::H264, VideoCodecType::H265];
+        // A shared H.264 consumer or an explicit preference must also constrain
+        // the CONTROL announcement, even when the viewer offers both codecs.
+        for (preference, allowed, expected) in [
+            (Preference::Auto, &both[..], 2),
+            (Preference::H264, &both[..], 1),
+            (Preference::Auto, &both[..1], 1),
+        ] {
+            let codec = select_video_codec(offer, preference, allowed).unwrap();
+            let announcement = wire::codec_negotiation(
+                7,
+                123,
+                Rect {
+                    width: 1920,
+                    height: 1080,
+                },
+                30,
+                codec,
+            );
+            let envelope = wire::decode(&announcement).unwrap();
+            let caps =
+                wire::decode(wire::message(&envelope, wire::which::CODEC_NEGOTIATION).unwrap())
+                    .unwrap();
+            assert_eq!(
+                caps.len(),
+                1,
+                "must not advertise codecs locked out of this session"
+            );
+            let cap = wire::decode(wire::message(&caps, 1).unwrap()).unwrap();
+            assert_eq!(wire::number(&cap, 3), Some(expected));
+            assert_eq!(wire::number(&cap, 2), Some(30));
+            assert_eq!(wire::number(&cap, 4), Some(1920));
+            assert_eq!(wire::number(&cap, 5), Some(1080));
+        }
         assert_eq!(
             select_video_codec(offer, Preference::Auto, &both).unwrap(),
             VideoCodecType::H265

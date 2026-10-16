@@ -142,6 +142,7 @@ pub mod which {
     pub const SYSTEM_METRICS: u32 = 13;
     pub const SYSTEM_STATE_CHANGE: u32 = 15;
     pub const QUERY_SYSTEM_STATE: u32 = 16;
+    pub const CODEC_NEGOTIATION: u32 = 18;
     pub const INPUT: u32 = 20;
     pub const RPC_REQUEST: u32 = 21;
     pub const RPC_RESPONSE: u32 = 22;
@@ -180,6 +181,36 @@ pub fn echo_response(seq: u64, timestamp: u64, request_seq: u64) -> Vec<u8> {
 pub struct Rect {
     pub width: i32,
     pub height: i32,
+}
+
+/// Message 18 CodecNegotiation from the official Windows host descriptor:
+/// encoder_cap_list { capture_mode, fps, codec_type, width, height }.
+/// Only advertise the selected codec: the shared encoder stays locked to it
+/// for this session, even if the viewer's offer contained additional codecs.
+pub fn codec_negotiation(
+    seq: u64,
+    timestamp: u64,
+    size: Rect,
+    fps: u32,
+    codec: crate::video::codec::VideoCodecType,
+) -> Vec<u8> {
+    let mut cap = Vec::new();
+    put_varint(1, 1, &mut cap); // DESKTOP capture mode
+    put_varint(2, u64::from(fps), &mut cap);
+    put_varint(
+        3,
+        if codec == crate::video::codec::VideoCodecType::H265 {
+            2
+        } else {
+            1
+        },
+        &mut cap,
+    );
+    put_int(4, size.width, &mut cap);
+    put_int(5, size.height, &mut cap);
+    let mut payload = Vec::new();
+    put_bytes(1, &cap, &mut payload);
+    envelope(seq, timestamp, which::CODEC_NEGOTIATION, &payload)
 }
 
 impl Rect {

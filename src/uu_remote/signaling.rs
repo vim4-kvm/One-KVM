@@ -146,10 +146,19 @@ impl SignalingClient {
             let mut next_refresh = Instant::now() + REFRESH_FIRST;
             let mut refresh_acks: VecDeque<u64> = VecDeque::new();
             let mut accepted_refresh = 0u64;
+            // Engine.IO v4 requires a ping within pingInterval + pingTimeout.
+            // TCP can remain half-open after a NAT drop without a read error.
+            let mut ping_window = Duration::from_secs(45);
+            let mut ping_deadline = Instant::now() + ping_window;
             loop {
                 let message = tokio::select! {
                     // The room loop dropped its receiver: this room is obsolete.
                     _ = events.closed() => break,
+                    _ = sleep_until(ping_deadline) => {
+                        warn!("UU signaling heartbeat lost; reconnecting");
+                        let _ = events.send(SignalingEvent::Disconnected).await;
+                        break;
+                    }
                     _ = sleep_until(next_refresh), if connected => {
                         ack_id += 1;
                         refresh_acks.push_back(ack_id);
@@ -175,8 +184,20 @@ impl SignalingClient {
                     Ok(Message::Text(text)) => {
                         let text = text.as_str();
                         if text.starts_with('0') {
+                            if let Ok(open) = serde_json::from_str::<Value>(&text[1..]) {
+                                if let (Some(interval), Some(timeout)) = (
+                                    open.get("pingInterval").and_then(Value::as_u64),
+                                    open.get("pingTimeout").and_then(Value::as_u64),
+                                ) {
+                                    ping_window = Duration::from_millis(
+                                        interval.saturating_add(timeout).clamp(5_000, 300_000),
+                                    );
+                                    ping_deadline = Instant::now() + ping_window;
+                                }
+                            }
                             let _ = replies.send("40".into()).await; // Engine.IO open -> Socket.IO connect
                         } else if text == "2" {
+                            ping_deadline = Instant::now() + ping_window;
                             let _ = replies.send("3".into()).await; // ping -> pong
                         } else if text.starts_with("40") {
                             connected = true;
@@ -197,7 +218,9 @@ impl SignalingClient {
                                         accepted_refresh = id;
                                         next_refresh = Instant::now() + REFRESH_INTERVAL;
                                     }
-                                    info!("UU reconnect-key refresh acknowledged: success={success}");
+                                    info!(
+                                        "UU reconnect-key refresh acknowledged: success={success}"
+                                    );
                                 }
                                 None => debug!("UU room_info acknowledged"),
                             }
@@ -338,14 +361,83 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn heartbeat_keeps_socket_alive_then_detects_silent_half_open_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (silent_tx, silent_rx) = tokio::sync::oneshot::channel();
+        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            socket
+                .send(Message::Text(
+                    r#"0{"pingInterval":3000,"pingTimeout":2000}"#.into(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                socket.next().await.unwrap().unwrap(),
+                Message::Text("40".into())
+            );
+            socket.send(Message::Text("40{}".into())).await.unwrap();
+            // Cross the original five-second deadline with acknowledged pings.
+            for _ in 0..2 {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                socket.send(Message::Text("2".into())).await.unwrap();
+                loop {
+                    if socket.next().await.unwrap().unwrap() == Message::Text("3".into()) {
+                        break;
+                    }
+                }
+            }
+            silent_tx.send(()).unwrap();
+            let _ = hold_rx.await; // Retain TCP without sending pings or a close frame.
+        });
+        let (sender, mut events) = mpsc::channel(8);
+        let client = SignalingClient::connect(&format!("ws://{address}"), "synthetic-only", sender)
+            .await
+            .unwrap();
+        assert!(matches!(
+            events.recv().await,
+            Some(SignalingEvent::Connected)
+        ));
+        tokio::time::timeout(Duration::from_secs(10), silent_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            events.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(8), events.recv())
+                .await
+                .unwrap(),
+            Some(SignalingEvent::Disconnected)
+        ));
+        // Even retained peer callbacks must lose access to the obsolete writer.
+        client.outgoing.closed().await;
+        drop(hold_tx);
+        server.await.unwrap();
+    }
+
     #[test]
     fn refresh_ack_requires_success_and_a_bounded_key() {
-        assert!(refresh_succeeded(&json!(["success", {"reconnect_key": "k"}])));
-        assert!(!refresh_succeeded(&json!(["success", {"reconnect_key": ""}])));
+        assert!(refresh_succeeded(
+            &json!(["success", {"reconnect_key": "k"}])
+        ));
+        assert!(!refresh_succeeded(
+            &json!(["success", {"reconnect_key": ""}])
+        ));
         assert!(!refresh_succeeded(&json!(["success", {}])));
-        assert!(!refresh_succeeded(&json!(["error", {"reconnect_key": "k"}])));
+        assert!(!refresh_succeeded(
+            &json!(["error", {"reconnect_key": "k"}])
+        ));
         assert!(!refresh_succeeded(&json!({"reconnect_key": "k"})));
         let long = "k".repeat(16_385);
-        assert!(!refresh_succeeded(&json!(["success", {"reconnect_key": long}])));
+        assert!(!refresh_succeeded(
+            &json!(["success", {"reconnect_key": long}])
+        ));
     }
 }

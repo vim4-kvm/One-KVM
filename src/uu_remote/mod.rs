@@ -350,8 +350,10 @@ fn set_state(inner: &Inner, state: UuRemoteServiceState, error: Option<String>) 
 }
 
 async fn close_all(inner: &Inner) {
-    let peers: Vec<Arc<Peer>> = inner.peers.lock().await.drain().map(|(_, p)| p).collect();
-    for peer in peers {
+    // Match handle_soac's replacement ordering: logout can run alongside the
+    // room loop, so new offers must wait until old input releases finish.
+    let mut peers = inner.peers.lock().await;
+    for (_, peer) in peers.drain() {
         peer.close().await;
     }
 }

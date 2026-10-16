@@ -23,6 +23,211 @@ pub enum ControlInput {
     MouseScroll { dx: i32, dy: i32 },
 }
 
+pub enum SessionInputEvent<'a> {
+    Connected,
+    Disconnected,
+    ControlOpened,
+    Close,
+    Input(&'a ControlInput),
+    Shortcut(&'a [CanonicalKey]),
+}
+
+struct SessionInputState {
+    input: InputState,
+    connected: bool,
+    control_open: bool,
+    closed: bool,
+}
+
+/// Serializes input delivery with teardown, including the asynchronous HID writes.
+/// A replacement peer is created only after the old peer's Close has completed;
+/// its late callbacks can then neither inject input nor release the new peer's keys.
+pub struct SessionInput(tokio::sync::Mutex<SessionInputState>);
+
+impl SessionInput {
+    pub fn new(system: UuRemoteSystem, reverse_scroll: bool) -> Self {
+        Self(tokio::sync::Mutex::new(SessionInputState {
+            input: InputState::new(system, reverse_scroll),
+            connected: false,
+            control_open: false,
+            closed: false,
+        }))
+    }
+
+    pub async fn update<F, Fut>(&self, event: SessionInputEvent<'_>, deliver: F)
+    where
+        F: FnOnce(Vec<HidAction>) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let mut state = self.0.lock().await;
+        if state.closed {
+            return;
+        }
+        let actions = match event {
+            SessionInputEvent::Connected => {
+                state.connected = true;
+                return;
+            }
+            SessionInputEvent::ControlOpened => {
+                state.control_open = true;
+                return;
+            }
+            SessionInputEvent::Disconnected => {
+                state.connected = false;
+                state.input.release_all()
+            }
+            SessionInputEvent::Close => {
+                state.closed = true;
+                state.input.release_all()
+            }
+            SessionInputEvent::Input(event) if state.connected && state.control_open => {
+                state.input.translate(event)
+            }
+            SessionInputEvent::Shortcut(keys) if state.connected && state.control_open => {
+                state.input.shortcut(keys)
+            }
+            _ => return,
+        };
+        // Keep the lock until reports reach the HID controller, so release cannot
+        // overtake an in-flight key press and leave it stuck after disconnect.
+        if !actions.is_empty() {
+            deliver(actions).await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, oneshot};
+
+    async fn update(
+        session: &SessionInput,
+        event: SessionInputEvent<'_>,
+        tx: &mpsc::UnboundedSender<Vec<HidAction>>,
+    ) {
+        session
+            .update(event, |actions| async {
+                tx.send(actions).unwrap();
+            })
+            .await;
+    }
+
+    async fn open(session: &SessionInput, tx: &mpsc::UnboundedSender<Vec<HidAction>>) {
+        update(session, SessionInputEvent::ControlOpened, tx).await;
+        update(session, SessionInputEvent::Connected, tx).await;
+    }
+
+    #[tokio::test]
+    async fn close_waits_for_inflight_press_and_rejects_late_callbacks() {
+        let old = Arc::new(SessionInput::new(UuRemoteSystem::Windows, false));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        open(&old, &tx).await;
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (finish_tx, finish_rx) = oneshot::channel();
+        let pressing = {
+            let old = old.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                old.update(
+                    SessionInputEvent::Input(&ControlInput::Keyboard {
+                        key: 65,
+                        pressed: true,
+                    }),
+                    |actions| async move {
+                        entered_tx.send(()).unwrap();
+                        finish_rx.await.unwrap();
+                        tx.send(actions).unwrap();
+                    },
+                )
+                .await;
+            })
+        };
+        entered_rx.await.unwrap();
+        let closing = update(&old, SessionInputEvent::Close, &tx);
+        tokio::pin!(closing);
+        assert!(futures::poll!(&mut closing).is_pending());
+        assert!(rx.try_recv().is_err());
+        finish_tx.send(()).unwrap();
+        closing.await;
+        pressing.await.unwrap();
+        assert!(
+            matches!(&rx.recv().await.unwrap()[0], HidAction::Keyboard(e) if e.event_type == KeyEventType::Down)
+        );
+        assert!(
+            matches!(&rx.recv().await.unwrap()[0], HidAction::Keyboard(e) if e.event_type == KeyEventType::Up)
+        );
+
+        let new = SessionInput::new(UuRemoteSystem::Windows, false);
+        open(&new, &tx).await;
+        update(
+            &new,
+            SessionInputEvent::Input(&ControlInput::Keyboard {
+                key: 66,
+                pressed: true,
+            }),
+            &tx,
+        )
+        .await;
+        rx.recv().await.unwrap();
+        for event in [
+            SessionInputEvent::Connected,
+            SessionInputEvent::ControlOpened,
+            SessionInputEvent::Input(&ControlInput::Keyboard {
+                key: 65,
+                pressed: true,
+            }),
+            SessionInputEvent::Shortcut(&[CanonicalKey::MetaLeft, CanonicalKey::KeyD]),
+            SessionInputEvent::Disconnected,
+            SessionInputEvent::Close,
+        ] {
+            update(&old, event, &tx).await;
+        }
+        assert!(rx.try_recv().is_err());
+        update(&new, SessionInputEvent::Close, &tx).await;
+        assert!(
+            matches!(&rx.recv().await.unwrap()[0], HidAction::Keyboard(e) if e.event_type == KeyEventType::Up && e.key == CanonicalKey::KeyB)
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_reconnect_resumes_input_but_control_close_is_final() {
+        let session = SessionInput::new(UuRemoteSystem::Windows, false);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let press = ControlInput::MouseButton {
+            button: 1,
+            pressed: true,
+        };
+        update(&session, SessionInputEvent::Connected, &tx).await;
+        update(&session, SessionInputEvent::Input(&press), &tx).await;
+        assert!(rx.try_recv().is_err()); // No CONTROL channel yet.
+        update(&session, SessionInputEvent::ControlOpened, &tx).await;
+        for _ in 0..2 {
+            update(&session, SessionInputEvent::Input(&press), &tx).await;
+            assert!(
+                matches!(&rx.recv().await.unwrap()[0], HidAction::Mouse(e) if e.event_type == MouseEventType::Down)
+            );
+            update(&session, SessionInputEvent::Disconnected, &tx).await;
+            assert!(
+                matches!(&rx.recv().await.unwrap()[0], HidAction::Mouse(e) if e.event_type == MouseEventType::Up)
+            );
+            update(&session, SessionInputEvent::Input(&press), &tx).await;
+            assert!(rx.try_recv().is_err());
+            update(&session, SessionInputEvent::Connected, &tx).await;
+        }
+        update(&session, SessionInputEvent::Input(&press), &tx).await;
+        rx.recv().await.unwrap();
+        update(&session, SessionInputEvent::Close, &tx).await;
+        assert!(
+            matches!(&rx.recv().await.unwrap()[0], HidAction::Mouse(e) if e.event_type == MouseEventType::Up)
+        );
+        open(&session, &tx).await;
+        update(&session, SessionInputEvent::Input(&press), &tx).await;
+        assert!(rx.try_recv().is_err());
+    }
+}
+
 fn integer(v: &Value, name: &str) -> Option<i32> {
     v.get(name)?.as_i64().and_then(|n| i32::try_from(n).ok())
 }
