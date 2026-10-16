@@ -219,4 +219,4 @@ vim4-manager 在 80 端口选择 One-KVM、NanoKVM 或 JetKVM，应用共用 808
 不能并发启动。USB 虚拟介质挂载会重新枚举 USB，测试前应协调独占板子。
 
 软件测试不代表硬件验证；当前板子上的实测证据记录在公共工作区
-`docs/bringup-log.md`。
+`docs/bringup/README.md`（上板记录索引）。
