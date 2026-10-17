@@ -1,6 +1,7 @@
 //! Mux existing encoded packets; never open another capture device or encoder.
 use std::{fs::File, os::fd::AsRawFd, time::Duration};
 
+use super::{failure, RecordingErrorCode};
 use anyhow::{bail, Context, Result};
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_app::AppSrc;
@@ -14,7 +15,14 @@ pub(super) struct Mux {
 }
 
 impl Mux {
+    pub fn bytes(&self) -> std::io::Result<u64> {
+        Ok(self._file.metadata()?.len())
+    }
     pub fn new(file: File, hevc: bool) -> Result<Self> {
+        Self::new_inner(file, hevc).map_err(|e| failure(RecordingErrorCode::Internal, e))
+    }
+
+    fn new_inner(file: File, hevc: bool) -> Result<Self> {
         gst::init()?;
         let codec = if hevc { "h265" } else { "h264" };
         let pipeline = gst::parse::launch(&format!(
@@ -74,7 +82,10 @@ impl Mux {
         if source.current_level_bytes() > 16 * 1024 * 1024
             || source.property::<u64>("current-level-time") > 2_000_000_000
         {
-            bail!("Recording storage cannot keep up");
+            return Err(failure(
+                RecordingErrorCode::StorageError,
+                "Recording storage cannot keep up",
+            ));
         }
         let mut buffer = gst::Buffer::from_mut_slice(data.to_vec());
         let writable = buffer.get_mut().unwrap();
@@ -84,7 +95,9 @@ impl Mux {
         if !audio && !key {
             writable.set_flags(gst::BufferFlags::DELTA_UNIT);
         }
-        source.push_buffer(buffer)?;
+        source
+            .push_buffer(buffer)
+            .map_err(|e| failure(RecordingErrorCode::PipelineStopped, e))?;
         self.check()
     }
 
@@ -96,13 +109,22 @@ impl Mux {
             .pop_filtered(&[gst::MessageType::Error])
         {
             if let gst::MessageView::Error(error) = message.view() {
-                bail!("Recording mux failed: {}", error.error());
+                return Err(failure(
+                    RecordingErrorCode::StorageError,
+                    format!("Recording mux failed: {}", error.error()),
+                ));
             }
         }
         Ok(())
     }
 
     pub async fn finish(&self) -> Result<()> {
+        self.finish_inner()
+            .await
+            .map_err(|e| failure(RecordingErrorCode::SaveFailed, e))
+    }
+
+    async fn finish_inner(&self) -> Result<()> {
         self.video.end_of_stream()?;
         self.audio.end_of_stream()?;
         let bus = self.pipeline.bus().unwrap();
@@ -141,6 +163,31 @@ mod tests {
         atomic::{AtomicU64, Ordering},
         Arc,
     };
+
+    #[tokio::test]
+    async fn stopped_mux_reports_pipeline_and_finalization_codes() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mux = Mux::new(file.reopen().unwrap(), false).unwrap();
+        mux.pipeline.set_state(gst::State::Null).unwrap();
+        let error = mux
+            .push(
+                false,
+                &[0, 0, 0, 1],
+                Duration::ZERO,
+                Duration::from_millis(40),
+                true,
+            )
+            .unwrap_err();
+        assert_eq!(
+            super::super::error_code(&error),
+            RecordingErrorCode::PipelineStopped
+        );
+        let error = mux.finish().await.unwrap_err();
+        assert_eq!(
+            super::super::error_code(&error),
+            RecordingErrorCode::SaveFailed
+        );
+    }
 
     fn encoded_samples(description: &str) -> Vec<gst::Sample> {
         let pipeline = gst::parse::launch(description)

@@ -45,6 +45,8 @@ import {
   Scaling,
 } from 'lucide-vue-next'
 import PasteModal from '@/components/PasteModal.vue'
+import RecordingPanel from '@/components/RecordingPanel.vue'
+import { useDeviceRecording } from '@/composables/useDeviceRecording'
 import AtxPopover from '@/components/AtxPopover.vue'
 import VideoConfigPopover, { type VideoMode } from '@/components/VideoConfigPopover.vue'
 import HidConfigPopover from '@/components/HidConfigPopover.vue'
@@ -75,6 +77,7 @@ const props = defineProps<{
   showTerminal?: boolean
   showComputerUse?: boolean
   showPasteText?: boolean
+  showRecording?: boolean
   showMic?: boolean
   scaleMode?: VideoScaleMode
   sourceSizeAvailable?: boolean
@@ -95,6 +98,9 @@ const showAtx = computed(() => props.showPower !== false)
 const atxEnabled = computed(() => props.atxEnabled === true)
 const showStats = computed(() => (props.videoMode ?? 'mjpeg') !== 'mjpeg')
 const showPasteText = computed(() => props.showPasteText !== false)
+const showRecording = computed(() => props.showRecording === true)
+const deviceRecording = useDeviceRecording()
+const isRecording = computed(() => !!deviceRecording.status.value?.recording)
 const showMic = computed(() => props.showMic === true)
 
 
@@ -115,6 +121,9 @@ const emit = defineEmits<{
 }>()
 
 const pasteOpen = ref(false)
+const recordOpen = ref(false)
+const mobileRecordOpen = ref(false)
+const mobileRecordOpenTime = ref(0)
 const atxOpen = ref(false)
 const videoPopoverOpen = ref(false)
 const hidPopoverOpen = ref(false)
@@ -145,6 +154,17 @@ const openMobileAtx = () => openFromOverflow(() => {
   mobileAtxOpenTime.value = Date.now()
 })
 
+const openMobileRecord = () => openFromOverflow(() => {
+  mobileRecordOpen.value = true
+  mobileRecordOpenTime.value = Date.now()
+})
+
+// Confirmation dialogs are portaled outside the popover; interacting with them must not close it.
+const keepOpenForDialogs = (e: Event) => {
+  const target = (e as CustomEvent<{ originalEvent?: Event }>).detail?.originalEvent?.target ?? e.target
+  if (target instanceof Element && target.closest('[role="alertdialog"]')) e.preventDefault()
+}
+
 const openMobilePaste = () => openFromOverflow(() => {
   if (!showPasteText.value) return
   mobilePasteOpen.value = true
@@ -165,7 +185,7 @@ const alwaysRightWidth = ref(152)
 let layoutResizeObserver: ResizeObserver | null = null
 
 type CollapsibleItem =
-  | 'msd' | 'atx' | 'paste'
+  | 'msd' | 'atx' | 'paste' | 'record'
   | 'stats' | 'terminal' | 'settings' | 'ai'
 
 interface ItemSpec {
@@ -177,6 +197,7 @@ const ITEM_SPECS: ItemSpec[] = [
   { id: 'msd',       side: 'left' },
   { id: 'atx',       side: 'left' },
   { id: 'paste',     side: 'left' },
+  { id: 'record',    side: 'left' },
   { id: 'stats',     side: 'right' },
   { id: 'terminal',  side: 'right' },
   { id: 'settings',  side: 'right' },
@@ -262,6 +283,8 @@ watch([() => props.layout, () => props.showComputerUse, floatingCollapsed, minim
   // the document after the new layout is painted.
   overflowMenuOpen.value = false
   pasteOpen.value = false
+  recordOpen.value = false
+  mobileRecordOpen.value = false
   atxOpen.value = false
   videoPopoverOpen.value = false
   hidPopoverOpen.value = false
@@ -286,6 +309,19 @@ watch(showPasteText, (visible) => {
   }
 })
 
+watch(deviceRecording.openRequests, async () => {
+  if (!showRecording.value) return
+  if (isFloatingLayout.value && floatingCollapsed.value) {
+    await setFloatingCollapsed(false)
+    await measureLayout()
+  }
+  if (isVisible('record')) recordOpen.value = true
+  else {
+    mobileRecordOpen.value = true
+    mobileRecordOpenTime.value = Date.now()
+  }
+})
+
 const OVERFLOW_BUTTON_BUDGET_PX = 36
 
 const collapsibleItems = computed(() => {
@@ -294,6 +330,7 @@ const collapsibleItems = computed(() => {
     if (item.id === 'msd' && !showMsd.value) return false
     if (item.id === 'atx' && !showAtx.value) return false
     if (item.id === 'paste' && !showPasteText.value) return false
+    if (item.id === 'record' && !showRecording.value) return false
     if (item.id === 'stats' && !showStats.value) return false
     if (item.id === 'terminal' && props.showTerminal === false) return false
     if (item.id === 'ai' && props.showComputerUse === false) return false
@@ -309,7 +346,7 @@ const visibleSet = computed(() => {
   if (isSidebarLayout.value) {
     // Reserve More and a gap between the two groups before assigning vertical slots.
     let available = barHeight.value - coreHeight.value - fixedHeight.value - actionHeight.value - 16
-    const priority: CollapsibleItem[] = ['paste', 'settings', 'msd', 'atx', 'stats', 'terminal', 'ai']
+    const priority: CollapsibleItem[] = ['paste', 'record', 'settings', 'msd', 'atx', 'stats', 'terminal', 'ai']
     for (const id of priority) {
       if (!collapsibleItems.value.some(item => item.id === id)) continue
       if (available < actionHeight.value) break
@@ -506,6 +543,37 @@ const hasRightOverflow = computed(() => {
           </Popover>
         </div>
 
+        <!-- Device Recording - Adaptive -->
+        <div v-if="showRecording && isVisible('record')">
+          <Popover v-model:open="recordOpen">
+            <PopoverTrigger as-child>
+              <Button
+                variant="ghost"
+                size="sm"
+                :class="['h-8 gap-1.5 text-xs', isRecording && 'text-red-600 dark:text-red-400']"
+                :aria-label="t('recording.title')"
+                :title="t('recording.title')"
+              >
+                <i class="relative flex size-4 items-center justify-center not-italic" aria-hidden="true">
+                  <span v-if="isRecording" class="absolute inline-flex size-2.5 animate-ping rounded-full bg-red-500/60" />
+                  <span :class="['relative inline-flex size-2.5 rounded-full', isRecording ? 'bg-red-500' : 'border-[1.5px] border-current']" />
+                </i>
+                <span v-if="visibleSet.get('record') === 'label'">{{ t('recording.short') }}</span>
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              :class="isSidebarLayout
+                ? 'w-[min(420px,calc(100vw-4.5rem))] p-0'
+                : 'w-[min(420px,92vw)] p-0'"
+              align="start"
+              :side="isSidebarLayout ? 'right' : 'bottom'"
+              @interact-outside="keepOpenForDialogs"
+            >
+              <RecordingPanel v-if="recordOpen" :video-mode="props.videoMode" @switch-codec="emit('update:videoMode', $event)" />
+            </PopoverContent>
+          </Popover>
+        </div>
+
       </ButtonGroup>
 
       <!-- Right side buttons -->
@@ -643,6 +711,12 @@ const hasRightOverflow = computed(() => {
               {{ t('actionbar.paste') }}
             </DropdownMenuItem>
 
+            <!-- Recording -->
+            <DropdownMenuItem v-if="showRecording && !isVisible('record')" @click="openMobileRecord">
+              <span class="mr-2 inline-flex size-4 items-center justify-center"><span :class="['inline-flex size-2.5 rounded-full', isRecording ? 'bg-red-500' : 'border-[1.5px] border-current']" /></span>
+              {{ t('recording.title') }}
+            </DropdownMenuItem>
+
             <DropdownMenuSeparator v-if="hasLeftOverflow && hasRightOverflow" />
 
             <!-- Stats -->
@@ -730,6 +804,20 @@ const hasRightOverflow = computed(() => {
     </SheetContent>
   </Sheet>
 
+  <Sheet v-if="showRecording" v-model:open="mobileRecordOpen">
+    <SheetContent
+      side="bottom"
+      class="max-h-[90dvh] overflow-y-auto p-0"
+      @pointer-down-outside="(e) => guardOutside(mobileRecordOpenTime, e)"
+      @interact-outside="(e) => { guardOutside(mobileRecordOpenTime, e); keepOpenForDialogs(e) }"
+    >
+      <SheetHeader class="sr-only">
+        <SheetTitle>{{ t('recording.title') }}</SheetTitle>
+      </SheetHeader>
+      <RecordingPanel v-if="mobileRecordOpen" :video-mode="props.videoMode" @switch-codec="emit('update:videoMode', $event)" />
+    </SheetContent>
+  </Sheet>
+
   <!-- Hidden measurement container: renders each collapsible button in both
        icon-only and with-label forms so we can read their real offsetWidth. -->
   <div ref="measureRef" aria-hidden="true" class="fixed pointer-events-none" style="visibility: hidden; top: -9999px; left: -9999px; white-space: nowrap;">
@@ -743,6 +831,8 @@ const hasRightOverflow = computed(() => {
       <!-- Paste -->
       <Button data-measure="paste-icon" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><ClipboardPaste class="size-4" /></Button>
       <Button data-measure="paste-label" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><ClipboardPaste class="size-4" />{{ t('actionbar.paste') }}</Button>
+      <Button data-measure="record-icon" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><i class="size-4" /></Button>
+      <Button data-measure="record-label" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><i class="size-4" />{{ t('recording.short') }}</Button>
       <!-- Stats -->
       <Button data-measure="stats-icon" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><BarChart3 class="size-4" /></Button>
       <Button data-measure="stats-label" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><BarChart3 class="size-4" />{{ t('actionbar.stats') }}</Button>
