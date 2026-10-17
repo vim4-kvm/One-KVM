@@ -6,7 +6,7 @@ use crate::{
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::header,
     response::{IntoResponse, Response},
     Json,
 };
@@ -33,9 +33,9 @@ pub async fn files(State(state): State<Arc<AppState>>) -> Result<Json<Vec<Record
 pub async fn delete(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-) -> Result<StatusCode> {
+) -> Result<Json<serde_json::Value>> {
     state.recording.delete(&name).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(serde_json::json!({ "success": true })))
 }
 pub async fn download(
     State(state): State<Arc<AppState>>,
