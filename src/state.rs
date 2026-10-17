@@ -64,6 +64,8 @@ impl ConfigApplyLocks {
 
 /// Shared Axum/App state: video flows through [`VideoStreamManager`]; WebRTC SDP/ICE/sessions on [`WebRtcStreamer`].
 pub struct AppState {
+    #[cfg(feature = "vim4")]
+    pub recording: Arc<crate::recording::Recorder>,
     pub db: DatabasePool,
     pub config: ConfigStore,
     pub sessions: SessionStore,
@@ -142,6 +144,8 @@ impl AppState {
         );
 
         Arc::new(Self {
+            #[cfg(feature = "vim4")]
+            recording: Arc::new(crate::recording::Recorder::new(data_dir.join("recordings"))),
             db,
             config,
             sessions,

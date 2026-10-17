@@ -181,6 +181,8 @@ fn spawn_device_info_broadcaster(
 }
 
 async fn cleanup(state: &Arc<AppState>) {
+    #[cfg(feature = "vim4")]
+    state.recording.stop().await;
     state.extensions.stop_all().await;
     tracing::info!("Extensions stopped");
 

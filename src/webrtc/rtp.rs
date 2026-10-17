@@ -86,6 +86,7 @@ mod tests {
     #[test]
     fn dropped_audio_keeps_its_place_in_media_time() {
         let frame = OpusFrame {
+            encoded_at: std::time::Instant::now(),
             data: Bytes::from_static(&[0xf8, 0xff, 0xfe]),
             duration_ms: 20,
             sequence: 105,

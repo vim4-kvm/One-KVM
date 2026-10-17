@@ -81,6 +81,8 @@ pub enum OpusApplication {
 
 #[derive(Debug, Clone)]
 pub struct OpusFrame {
+    /// Monotonic output time, retained across subscriber queues for recording sync.
+    pub encoded_at: std::time::Instant,
     pub data: Bytes,
     pub duration_ms: u32,
     pub sequence: u64,
@@ -147,6 +149,7 @@ impl OpusEncoder {
         self.frame_count += 1;
 
         Ok(OpusFrame {
+            encoded_at: std::time::Instant::now(),
             data: Bytes::copy_from_slice(&self.output_buffer[..encoded_len]),
             duration_ms,
             sequence: self.frame_count - 1,

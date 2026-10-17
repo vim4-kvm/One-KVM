@@ -4,6 +4,8 @@ pub mod extensions;
 pub mod terminal;
 #[cfg(feature = "vim4")]
 pub mod vim4;
+#[cfg(feature = "vim4")]
+pub mod recording;
 
 mod account;
 mod atx_api;

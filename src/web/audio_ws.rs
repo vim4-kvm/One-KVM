@@ -152,6 +152,7 @@ mod tests {
     #[test]
     fn test_encode_decode_packet() {
         let frame = OpusFrame {
+            encoded_at: std::time::Instant::now(),
             data: Bytes::from(vec![1, 2, 3, 4, 5]),
             duration_ms: 20,
             sequence: 42,

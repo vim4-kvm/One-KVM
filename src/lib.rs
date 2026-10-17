@@ -33,6 +33,8 @@ pub mod otg;
 pub mod platform;
 #[cfg(feature = "desktop")]
 pub mod redfish;
+#[cfg(all(feature = "desktop", feature = "vim4"))]
+pub mod recording;
 #[cfg(feature = "desktop")]
 pub mod rtsp;
 #[cfg(feature = "desktop")]

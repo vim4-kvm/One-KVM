@@ -497,6 +497,7 @@ mod tests {
             AudioStreamer::fanout_opus(
                 &streamer.opus_subscribers,
                 Arc::new(OpusFrame {
+                    encoded_at: std::time::Instant::now(),
                     data: Bytes::from_static(&[1]),
                     duration_ms: 20,
                     sequence,
@@ -519,6 +520,7 @@ mod tests {
         AudioStreamer::fanout_opus(
             &streamer.opus_subscribers,
             Arc::new(OpusFrame {
+                encoded_at: std::time::Instant::now(),
                 data: Bytes::from_static(&[1]),
                 duration_ms: 20,
                 sequence: 0,

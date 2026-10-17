@@ -1,4 +1,11 @@
 export default {
+  recording: {
+    title: 'Device recording', start: 'Start recording', stop: 'Stop and save', active: 'Recording',
+    hint: 'Video and HDMI audio are saved on the device, even after closing this page. Open downloaded MKV files with a player such as VLC.',
+    requirements: 'Use H.264/H.265 and enable audio capture. Playback mute does not mute recordings. Recording stops on video format changes, capture interruption, or less than 256 MiB free storage.',
+    processing: 'Processing…', empty: 'No recordings yet', download: 'Download', delete: 'Delete',
+    partial: 'Not finalized; playback may be incomplete', confirmDelete: 'Permanently delete this device recording?',
+  },
   vim4Usb: {
     endpoints: 'Endpoint budget: {count} / 5 (reserving one when virtual media is enabled). Disable some functions before saving if over the limit.',
     hint: 'Saving re-enumerates USB devices. Safely eject virtual media on the target first. Each HID, microphone and mounted disk uses one IN endpoint; networking uses two. VIM4 supports up to five. Stopping One-KVM restores the previous USB configuration. Keyboard LEDs controls feedback. One virtual drive is supported, using application-managed storage.',
