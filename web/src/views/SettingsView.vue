@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import HidDeviceSettings from '@/components/HidDeviceSettings.vue'
+import UuVideoStats from '@/components/UuVideoStats.vue'
 import ConsoleLayoutPreview from '@/components/ConsoleLayoutPreview.vue'
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import QrcodeVue from 'qrcode.vue'
@@ -5258,6 +5259,7 @@ watch(isWindows, () => {
                       </div>
                     </div>
                     <p v-if="!session.link" class="px-4 pt-3 text-xs text-muted-foreground">{{ t('extensions.uuRemote.noLink') }}</p>
+                    <UuVideoStats :stats="session.video_stats" :stale="uuStatusStale" />
                     <details class="group px-4">
                       <summary class="flex cursor-pointer list-none items-center gap-1.5 py-3 text-xs text-muted-foreground transition-colors hover:text-foreground [&::-webkit-details-marker]:hidden">
                         <ChevronRight class="size-3.5 transition-transform group-open:rotate-90" />

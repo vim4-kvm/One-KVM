@@ -1268,6 +1268,14 @@ export default {
     },
     uuRemote: {
       sessions: 'Current sessions and links',
+      metrics: {
+        receiver: 'Client reception feedback', sender: 'Server sending statistics', unavailable: 'No data yet',
+        age: 'Updated {seconds}s ago', stale: 'Stale data', rtt: 'Estimated RTT', loss: 'Interval packet loss',
+        lost: 'Cumulative packets lost', jitter: 'Reception jitter', requests: 'Total NACK / PLI / FIR requests',
+        fps: 'Sending frame rate', meanQueue: 'Mean queue after encoding', maxQueue: 'Max queue after encoding', maxAge: 'Max age at send completion',
+        window: '{seconds}s window · {cached} frames cached before subscription',
+        hint: 'RTT estimates round-trip time. Frame age runs from obtaining encoded output to send completion; it excludes capture, encoding and client display delay. Request counts include repeats.',
+      },
       noSessions: 'No active sessions',
       statusStale: 'Status refresh failed. Data may be stale; please refresh to retry.',
       clientId: 'Client ID',

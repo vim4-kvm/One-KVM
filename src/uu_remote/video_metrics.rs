@@ -2,6 +2,7 @@
 use std::any::Any;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use super::status::{UuVideoReceiver, UuVideoSender, UuVideoStats};
 use tracing::info;
 use webrtc::rtcp::{
     payload_feedbacks::{
@@ -64,6 +65,35 @@ pub(super) struct VideoFeedback {
     receiver_reports: u64,
     latest: Option<ReceiverSample>,
     last_log: Option<Instant>,
+}
+
+/// Owned by one peer; snapshots keep independent receiver/sender sample ages.
+#[derive(Default)]
+pub(super) struct VideoDiagnostics {
+    pub feedback: VideoFeedback,
+    pub sender: Option<(Instant, UuVideoSender)>,
+}
+
+impl VideoDiagnostics {
+    pub fn snapshot(&self, now: Instant) -> UuVideoStats {
+        UuVideoStats {
+            nack_packet_requests: self.feedback.nack_requests as f64,
+            pli: self.feedback.pli as f64,
+            fir: self.feedback.fir as f64,
+            receiver: self.feedback.latest.as_ref().map(|report| UuVideoReceiver {
+                age_ms: now.duration_since(report.received_at).as_secs_f64() * 1000.0,
+                loss_percent: report.loss_percent,
+                total_lost: report.lost,
+                jitter_ms: report.jitter_ms,
+                rtt_ms: report.rtt_ms,
+            }),
+            sender: self.sender.as_ref().map(|(sampled_at, sample)| {
+                let mut sample = sample.clone();
+                sample.age_ms = now.duration_since(*sampled_at).as_secs_f64() * 1000.0;
+                sample
+            }),
+        }
+    }
 }
 
 impl VideoFeedback {
@@ -148,6 +178,46 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use webrtc::rtcp::transport_feedbacks::transport_layer_nack::NackPair;
+
+    #[test]
+    fn session_snapshot_preserves_unknown_values_and_independent_sample_ages() {
+        let now = Instant::now();
+        let mut diagnostics = VideoDiagnostics::default();
+        let empty = serde_json::to_value(diagnostics.snapshot(now)).unwrap();
+        assert!(empty["receiver"].is_null());
+        assert!(empty["sender"].is_null());
+        diagnostics.feedback.observe(
+            &ReceiverReport {
+                reports: vec![ReceptionReport {
+                    fraction_lost: 32,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            UNIX_EPOCH,
+            now,
+        );
+        diagnostics.sender = Some((
+            now + Duration::from_secs(2),
+            UuVideoSender {
+                age_ms: 0.0,
+                window_ms: 5000.0,
+                fps: 60.0,
+                mean_queue_ms: 0.25,
+                max_queue_ms: 0.75,
+                max_encoded_to_send_ms: 5.0,
+                cached_frames: 0.0,
+            },
+        ));
+        let snapshot = diagnostics.snapshot(now + Duration::from_secs(12));
+        let receiver = snapshot.receiver.unwrap();
+        assert_eq!(receiver.age_ms, 12000.0);
+        assert_eq!(receiver.loss_percent, 12.5);
+        assert!(receiver.rtt_ms.is_none());
+        assert_eq!(snapshot.sender.unwrap().age_ms, 10000.0);
+        // A new peer never inherits the previous peer's measurements.
+        assert!(VideoDiagnostics::default().snapshot(now).receiver.is_none());
+    }
 
     #[test]
     fn receiver_units_and_negative_loss_are_not_misreported() {

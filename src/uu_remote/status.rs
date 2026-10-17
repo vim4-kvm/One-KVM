@@ -16,6 +16,39 @@ pub struct UuSessionStatus {
     pub ice_state: String,
     pub video_codec: String,
     pub link: Option<UuSessionLink>,
+    pub video_stats: Option<UuVideoStats>,
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize)]
+pub struct UuVideoStats {
+    pub nack_packet_requests: f64,
+    pub pli: f64,
+    pub fir: f64,
+    pub receiver: Option<UuVideoReceiver>,
+    pub sender: Option<UuVideoSender>,
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize)]
+pub struct UuVideoReceiver {
+    pub age_ms: f64,
+    pub loss_percent: f64,
+    pub total_lost: i32,
+    pub jitter_ms: f64,
+    pub rtt_ms: Option<f64>,
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize)]
+pub struct UuVideoSender {
+    pub age_ms: f64,
+    pub window_ms: f64,
+    pub fps: f64,
+    pub mean_queue_ms: f64,
+    pub max_queue_ms: f64,
+    pub max_encoded_to_send_ms: f64,
+    pub cached_frames: f64,
 }
 
 #[typeshare]

@@ -35,7 +35,8 @@ use webrtc::track::track_local::TrackLocal;
 use super::ice::SessionIce;
 use super::input::{self, HidAction, SessionInput, SessionInputEvent};
 use super::signaling::{SignalingClient, SoacMessage};
-use super::video_metrics::{FrameAgeStats, VideoFeedback};
+use super::status::UuVideoSender;
+use super::video_metrics::{FrameAgeStats, VideoDiagnostics};
 use super::wire::{self, Rect};
 use crate::audio::AudioController;
 use crate::hid::{CanonicalKey, HidController};
@@ -348,6 +349,7 @@ struct Shared {
     settings_lock: Mutex<()>,
     input: SessionInput,
     codec: VideoCodecType,
+    video_diagnostics: Mutex<VideoDiagnostics>,
 }
 
 impl Shared {
@@ -574,6 +576,7 @@ impl Peer {
             quality: AtomicU64::new(wire::quality::AUTO),
             input: SessionInput::new(deps.system, deps.reverse_scroll),
             codec,
+            video_diagnostics: Mutex::new(VideoDiagnostics::default()),
         });
 
         let (ice_context, ice_signal) = (context.clone(), deps.signaling.clone());
@@ -608,7 +611,7 @@ impl Peer {
             .add_track(video_track.local())
             .await
             .map_err(|e| format!("Add video track failed: {e}"))?;
-        tokio::spawn(read_video_feedback(video_sender, deps.video.clone()));
+        tokio::spawn(read_video_feedback(video_sender, shared.clone()));
         // The viewer always offers an Opus m-line.
         let audio_track = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
@@ -840,6 +843,17 @@ impl Peer {
             }
             .into(),
             link,
+            video_stats: if state == PcState::Connected {
+                Some(
+                    self.shared
+                        .video_diagnostics
+                        .lock()
+                        .await
+                        .snapshot(Instant::now()),
+                )
+            } else {
+                None
+            },
         }
     }
 
@@ -914,20 +928,23 @@ fn device_capability(
 }
 
 /// Keyframe requests (PLI/FIR) from the viewer, rate-limited for the shared encoder.
-async fn read_video_feedback(sender: Arc<RTCRtpSender>, video: Arc<VideoStreamManager>) {
+async fn read_video_feedback(sender: Arc<RTCRtpSender>, shared: Arc<Shared>) {
     use webrtc::rtcp::payload_feedbacks::{
         full_intra_request::FullIntraRequest, picture_loss_indication::PictureLossIndication,
     };
     let mut buffer = [0u8; 1500];
-    let mut feedback = VideoFeedback::default();
+    let video = &shared.deps.video;
     let mut last_request = Instant::now() - Duration::from_secs(1);
     while let Ok((packets, _)) = sender.read(&mut buffer).await {
         let received_at = Instant::now();
         let wall_time = SystemTime::now();
+        let mut diagnostics = shared.video_diagnostics.lock().await;
+        let feedback = &mut diagnostics.feedback;
         for packet in &packets {
             feedback.observe(packet.as_any(), wall_time, received_at);
         }
         feedback.log_if_due(received_at);
+        drop(diagnostics);
         let wants_keyframe = packets.iter().any(|p| {
             p.as_any().is::<PictureLossIndication>() || p.as_any().is::<FullIntraRequest>()
         });
@@ -969,6 +986,7 @@ async fn stream_video(
     let mut sent = 0u64;
     let mut hevc = HevcPackets::new();
     'subscribe: while !closed(pc.connection_state()) {
+        shared.video_diagnostics.lock().await.sender = None;
         let subscribed_at = Instant::now();
         let Some(mut frames) = video.subscribe_encoded_frames().await else {
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1069,6 +1087,20 @@ async fn stream_video(
             report_frames += 1;
             if report_at.elapsed() >= Duration::from_secs(5) {
                 let fps = report_frames as f64 / report_at.elapsed().as_secs_f64();
+                shared.video_diagnostics.lock().await.sender = Some((
+                    Instant::now(),
+                    UuVideoSender {
+                        age_ms: 0.0,
+                        window_ms: report_at.elapsed().as_secs_f64() * 1000.0,
+                        fps,
+                        mean_queue_ms: frame_ages.total_queue_us as f64
+                            / frame_ages.frames as f64
+                            / 1000.0,
+                        max_queue_ms: frame_ages.max_queue_us as f64 / 1000.0,
+                        max_encoded_to_send_ms: frame_ages.max_encoded_to_send_us as f64 / 1000.0,
+                        cached_frames: frame_ages.cached_frames as f64,
+                    },
+                ));
                 // Relative growth only: PTS has no shared absolute epoch with Instant.
                 let pts_lag_growth_ms = arrived.duration_since(pts_origin).as_millis() as i128
                     - i128::from(frame.pts_ms.saturating_sub(pts_start));

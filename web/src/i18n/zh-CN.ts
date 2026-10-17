@@ -1267,6 +1267,14 @@ export default {
     },
     uuRemote: {
       sessions: '当前会话与链路',
+      metrics: {
+        receiver: '客户端接收反馈', sender: '服务端发送统计', unavailable: '暂无数据',
+        age: '{seconds} 秒前更新', stale: '数据已过期', rtt: '估算 RTT', loss: '区间丢包率',
+        lost: '累计丢包数', jitter: '接收抖动', requests: '累计 NACK / PLI / FIR 请求',
+        fps: '发送帧率', meanQueue: '平均编码后排队', maxQueue: '最大编码后排队', maxAge: '最大发送完成帧龄',
+        window: '统计窗口 {seconds} 秒 · 含 {cached} 帧订阅前缓存',
+        hint: 'RTT 为往返估算；帧龄从取得编码输出计到发送返回，不含采集、编码和客户端显示延迟。请求数包含重复请求。',
+      },
       noSessions: '暂无活动会话',
       statusStale: '状态刷新失败，以下可能是旧数据，请刷新重试。',
       clientId: '客户端 ID',

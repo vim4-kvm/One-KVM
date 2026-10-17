@@ -384,6 +384,14 @@ export interface UuIceEndpoint {
   address_family: string | null
 }
 
+export interface UuVideoStats {
+  nack_packet_requests: number
+  pli: number
+  fir: number
+  receiver: { age_ms: number; loss_percent: number; total_lost: number; jitter_ms: number; rtt_ms: number | null } | null
+  sender: { age_ms: number; window_ms: number; fps: number; mean_queue_ms: number; max_queue_ms: number; max_encoded_to_send_ms: number; cached_frames: number } | null
+}
+
 export interface UuSessionStatus {
   id: string
   client_id: string | null
@@ -391,6 +399,7 @@ export interface UuSessionStatus {
   ice_state: string
   video_codec: string
   link: { relayed: boolean; local: UuIceEndpoint; remote: UuIceEndpoint } | null
+  video_stats?: UuVideoStats | null
 }
 
 export interface UuRemoteStatusResponse {
