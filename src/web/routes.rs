@@ -377,15 +377,24 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     // Combine API routes
     #[cfg(feature = "vim4")]
-    let protected_routes = protected_routes.route(
-        "/vim4/video",
-        get(handlers::vim4::status).post(handlers::vim4::update),
-    )
-    .route("/recording", get(handlers::recording::status))
-    .route("/recording/start", post(handlers::recording::start))
-    .route("/recording/stop", post(handlers::recording::stop))
-    .route("/recording/files", get(handlers::recording::files))
-    .route("/recording/files/{name}", get(handlers::recording::download).delete(handlers::recording::delete));
+    let protected_routes = protected_routes
+        .route(
+            "/vim4/video",
+            get(handlers::vim4::status).post(handlers::vim4::update),
+        )
+        .route("/recording", get(handlers::recording::status))
+        .route("/recording/locations", get(handlers::recording::locations))
+        .route(
+            "/recording/location",
+            axum::routing::put(handlers::recording::location).patch(handlers::recording::location),
+        )
+        .route("/recording/start", post(handlers::recording::start))
+        .route("/recording/stop", post(handlers::recording::stop))
+        .route("/recording/files", get(handlers::recording::files))
+        .route(
+            "/recording/files/{name}",
+            get(handlers::recording::download).delete(handlers::recording::delete),
+        );
 
     let api_routes = Router::new()
         .merge(public_routes)

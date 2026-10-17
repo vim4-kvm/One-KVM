@@ -29,6 +29,7 @@ pub use web::*;
 #[serde(default)]
 #[derive(Default)]
 pub struct AppConfig {
+    pub recording: RecordingConfig,
     pub initialized: bool,
     pub auth: AuthConfig,
     pub video: VideoConfig,
@@ -48,6 +49,24 @@ pub struct AppConfig {
     pub redfish: RedfishConfig,
     pub watchdog: WatchdogConfig,
     pub uac: UacConfig,
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecordingConfig {
+    pub location: String,
+    /// Remember one recording folder per NAS, including when another target is selected.
+    pub folders: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for RecordingConfig {
+    fn default() -> Self {
+        Self {
+            location: "local".into(),
+            folders: Default::default(),
+        }
+    }
 }
 
 impl AppConfig {

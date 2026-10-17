@@ -145,7 +145,10 @@ impl AppState {
 
         Arc::new(Self {
             #[cfg(feature = "vim4")]
-            recording: Arc::new(crate::recording::Recorder::new(data_dir.join("recordings"))),
+            recording: Arc::new(crate::recording::Recorder::with_config(
+                data_dir.join("recordings"),
+                config.clone(),
+            )),
             db,
             config,
             sessions,

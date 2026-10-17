@@ -1,5 +1,10 @@
 //! Mux existing encoded packets; never open another capture device or encoder.
-use std::{fs::File, os::fd::AsRawFd, time::Duration};
+use std::{
+    fs::File,
+    os::fd::AsRawFd,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use super::{failure, RecordingErrorCode};
 use anyhow::{bail, Context, Result};
@@ -11,18 +16,30 @@ pub(super) struct Mux {
     video: AppSrc,
     audio: AppSrc,
     // fdsink borrows this descriptor until the pipeline reaches NULL.
-    _file: File,
+    _file: Option<File>,
+    bytes: AtomicU64,
+    permit: Option<tokio::sync::SemaphorePermit<'static>>,
 }
+static PIPELINES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 impl Mux {
-    pub fn bytes(&self) -> std::io::Result<u64> {
-        Ok(self._file.metadata()?.len())
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
     }
     pub fn new(file: File, hevc: bool) -> Result<Self> {
-        Self::new_inner(file, hevc).map_err(|e| failure(RecordingErrorCode::Internal, e))
+        Self::new_inner(file, hevc).map_err(|e| {
+            let code = super::error_code(&e);
+            failure(code, e)
+        })
     }
 
     fn new_inner(file: File, hevc: bool) -> Result<Self> {
+        let permit = PIPELINES.try_acquire().map_err(|_| {
+            failure(
+                RecordingErrorCode::StorageUnavailable,
+                "Storage cleanup is still pending",
+            )
+        })?;
         gst::init()?;
         let codec = if hevc { "h265" } else { "h264" };
         let pipeline = gst::parse::launch(&format!(
@@ -63,7 +80,9 @@ impl Mux {
             pipeline,
             video,
             audio,
-            _file: file,
+            _file: Some(file),
+            bytes: AtomicU64::new(0),
+            permit: Some(permit),
         };
         mux.pipeline.set_state(gst::State::Playing)?;
         Ok(mux)
@@ -79,7 +98,10 @@ impl Mux {
     ) -> Result<()> {
         let source = if audio { &self.audio } else { &self.video };
         // Never block shared capture on a slow disk or silently lose part of a GOP.
-        if source.current_level_bytes() > 16 * 1024 * 1024
+        if source
+            .current_level_bytes()
+            .saturating_add(data.len() as u64)
+            > 16 * 1024 * 1024
             || source.property::<u64>("current-level-time") > 2_000_000_000
         {
             return Err(failure(
@@ -98,6 +120,7 @@ impl Mux {
         source
             .push_buffer(buffer)
             .map_err(|e| failure(RecordingErrorCode::PipelineStopped, e))?;
+        self.bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
         self.check()
     }
 
@@ -151,13 +174,58 @@ impl Mux {
 
 impl Drop for Mux {
     fn drop(&mut self) {
-        let _ = self.pipeline.set_state(gst::State::Null);
+        let pipeline = self.pipeline.clone();
+        let file = self._file.take();
+        let permit = self.permit.take();
+        // NULL waits for fdsink's write; keep its borrowed fd alive off-runtime.
+        std::thread::spawn(move || {
+            let _ = pipeline.set_state(gst::State::Null);
+            drop(pipeline);
+            drop(file);
+            drop(permit);
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stalled_sink_cannot_accumulate_unbounded_appsrc_data() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mux = Mux::new(file.reopen().unwrap(), false).unwrap();
+        // Block the source pad before any packet reaches the parser. The source
+        // remains running, unlike a state transition which may flush its queue.
+        let pad = mux.video.static_pad("src").unwrap();
+        let probe = pad
+            .add_probe(gst::PadProbeType::BLOCK_DOWNSTREAM, |_, _| {
+                gst::PadProbeReturn::Ok
+            })
+            .unwrap();
+        let packet = vec![0; 8 * 1024 * 1024];
+        let mut rejected = false;
+        for i in 0..4 {
+            if let Err(error) = mux.push(
+                false,
+                &packet,
+                Duration::from_secs(i),
+                Duration::from_secs(1),
+                true,
+            ) {
+                assert_eq!(
+                    super::super::error_code(&error),
+                    RecordingErrorCode::StorageError
+                );
+                rejected = true;
+                break;
+            }
+        }
+        let queued = mux.video.current_level_bytes();
+        pad.remove_probe(probe);
+        assert!(rejected);
+        assert!(queued <= 16 * 1024 * 1024);
+    }
     use gstreamer_app::{AppSink, AppSinkCallbacks};
     use std::sync::{
         atomic::{AtomicU64, Ordering},

@@ -1,5 +1,8 @@
 export default {
   recording: {
+    saveTo: 'Save to', local: 'Local', folder: 'Subfolder', applyLocation: 'Apply',
+    addNas: 'Add a NAS on the management panel’s Network Storage page', nasOmitted: '{name} NAS is temporarily unavailable; its recordings are not listed',
+    locationReasons: { not_mounted: 'Disconnected', unresponsive: 'Unresponsive', not_writable: 'No write permission' },
     title: 'Device recording', short: 'Record', indicator: 'Recording in progress; click to view', start: 'Start recording', stop: 'Stop and save', saving: 'Saving…',
     active: 'Recording', activeBadge: 'Live', inProgress: 'Writing…', withAudio: 'HDMI audio',
     hint: 'Video and HDMI audio are recorded on the device and continue after this page is closed.',
@@ -9,7 +12,7 @@ export default {
     unreachable: 'Recording status unavailable', unreachableHint: 'Lost connection to the device. This refreshes automatically.',
     remainingHours: 'About {hours} h of recording space left', remainingMinutes: 'Only about {minutes} min of recording space left',
     remainingDays: 'More than 24 h of recording space left',
-    interruptedTitle: 'The last recording stopped automatically', startFailedTitle: 'Could not start recording', partSaved: '. The recorded part was saved.',
+    interruptedTitle: 'The last recording stopped automatically', startFailedTitle: 'Could not start recording', partSaved: '. An unfinished recording may remain; check the file list.',
     dismiss: 'Dismiss', library: 'Recordings', totalSize: '{size} total', today: 'Today {time}',
     empty: 'No recordings yet', emptyHint: 'Recordings are stored on the device and can be downloaded any time.',
     partialBadge: 'Incomplete', partial: 'Not finalized; playback may be incomplete',
@@ -20,11 +23,13 @@ export default {
     footer: 'Saved as MKV; VLC is recommended for playback. Muting this page does not mute recordings. Recording stops when less than 256 MiB of storage is free.',
     toast: { saved: 'Recording saved', interrupted: 'Recording interrupted', deleted: 'Recording deleted' },
     blockers: {
+      storage_unavailable: 'Storage is unavailable. Check the NAS connection and write permissions.',
       video_codec: 'Recording requires H.264 or H.265 video.',
       audio_unavailable: 'Audio capture is disabled or unavailable. Enable it under Audio in the toolbar.',
       low_storage: 'Less than 256 MiB of device storage is free. Delete old recordings first.',
     },
     reasons: {
+      storage_unavailable: 'Recording storage unavailable or NAS write failed',
       already_recording: 'A recording is already running', video_codec: 'Video codec does not support recording', audio_unavailable: 'Audio capture unavailable',
       low_storage: 'Device storage is almost full', storage_error: 'Could not write to the recording folder', video_unavailable: 'Video capture unavailable; check the HDMI input',
       start_timeout: 'Timed out waiting for video or HDMI audio', codec_changed: 'Video codec changed', resolution_changed: 'Input resolution changed',

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AlertTriangle, CircleAlert, Download, Film, Square, Trash2, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
@@ -17,7 +17,23 @@ defineProps<{ videoMode?: string }>()
 const emit = defineEmits<{ (e: 'switchCodec', codec: 'h264'): void }>()
 const { t, locale } = useI18n()
 const recording = useDeviceRecording()
-const { status, files, unreachable, action, elapsedSeconds, bitrateBps, remainingSeconds } = recording
+const { status, files, locations, unavailableLocations, unreachable, action, elapsedSeconds, bitrateBps, remainingSeconds } = recording
+const choosingLocation = ref(false)
+const selectedLocation = ref('local')
+const folder = ref('One-KVM')
+const managerStorageUrl = `http://${window.location.hostname}/#/storage`
+watch(() => status.value?.location, location => {
+  if (location && !choosingLocation.value) { selectedLocation.value = location.id; folder.value = location.folder || 'One-KVM' }
+})
+function selectLocation(id: string) {
+  selectedLocation.value = id
+  folder.value = locations.value.find(l => l.id === id)?.folder || 'One-KVM'
+}
+async function saveLocation() {
+  await recording.setLocation(selectedLocation.value, folder.value)
+  if (status.value?.location.id === selectedLocation.value && (selectedLocation.value === 'local' || status.value.location.folder === folder.value)) choosingLocation.value = false
+}
+function locationName(location: { id: string; name: string }) { return location.id === 'local' ? t('recording.local') : location.name }
 
 const pendingDelete = ref<RecordingFile | null>(null)
 const dismissedError = ref<string | null>(null)
@@ -43,7 +59,7 @@ onMounted(() => recording.setPanelOpen(true))
 onUnmounted(() => recording.setPanelOpen(false))
 
 function isActive(file: RecordingFile) {
-  return isRecording.value && status.value?.file === file.name
+  return isRecording.value && status.value?.file === file.name && status.value.location.id === file.location.id
 }
 function codecLabel(codec: string | null | undefined) {
   return codec === 'h265' ? 'H.265' : codec === 'h264' ? 'H.264' : null
@@ -88,6 +104,23 @@ function confirmDelete() {
       ]"
       :aria-busy="!!action"
     >
+      <div class="mb-3 min-w-0 border-b pb-3 text-xs">
+        <button type="button" class="w-full break-words text-left disabled:opacity-60" :disabled="isRecording || !!action" :aria-expanded="choosingLocation" @click="choosingLocation = !choosingLocation">
+          {{ t('recording.saveTo') }} · {{ status?.location ? locationName(status.location) : t('recording.local') }}<template v-if="status?.location.id !== 'local'"> › {{ status?.location.folder }}</template>
+        </button>
+        <fieldset v-if="choosingLocation" class="mt-2 min-w-0 space-y-2" :disabled="isRecording || !!action">
+          <label v-for="location in locations" :key="location.id" :class="['flex items-start gap-2 break-words', !location.available && 'opacity-50']">
+            <input type="radio" name="recording-location" class="mt-0.5 shrink-0" :value="location.id" :checked="selectedLocation === location.id" :disabled="!location.available" @change="selectLocation(location.id)">
+            <span class="min-w-0">{{ locationName(location) }}<template v-if="location.reason"> · {{ t(`recording.locationReasons.${location.reason}`) }}</template></span>
+          </label>
+          <label v-if="selectedLocation !== 'local'" class="block space-y-1">
+            <span>{{ t('recording.folder') }}</span>
+            <input v-model="folder" class="block w-full min-w-0 rounded-md border bg-background px-2 py-1.5" placeholder="One-KVM">
+          </label>
+          <a :href="managerStorageUrl" target="_blank" rel="noopener" class="block break-words text-muted-foreground underline">{{ t('recording.addNas') }}</a>
+          <Button size="sm" variant="outline" :disabled="!!action || isRecording" @click="saveLocation">{{ t('recording.applyLocation') }}</Button>
+        </fieldset>
+      </div>
       <div v-if="isRecording" class="flex flex-wrap items-center gap-x-4 gap-y-3">
         <div class="min-w-48 flex-1">
           <div class="flex items-center gap-2 text-xs font-semibold tracking-wider text-red-600 dark:text-red-400">
@@ -124,6 +157,7 @@ function confirmDelete() {
           <template v-else-if="blocker">
             <p class="flex items-center gap-1.5 text-sm font-medium"><AlertTriangle class="size-4 text-amber-500" />{{ t('recording.blocked') }}</p>
             <p class="mt-1 text-xs text-muted-foreground">{{ t(`recording.blockers.${blocker}`, t('recording.reasons.internal')) }}</p>
+            <p v-if="status?.storage_reason" class="mt-1 text-xs text-muted-foreground">{{ t(`recording.locationReasons.${status.storage_reason}`) }}</p>
             <Button v-if="blocker === 'video_codec'" variant="outline" size="sm" class="mt-2.5" @click="emit('switchCodec', 'h264')">
               {{ t('recording.switchToH264') }}
             </Button>
@@ -163,6 +197,7 @@ function confirmDelete() {
     </div>
 
     <section class="space-y-2">
+      <p v-for="location in unavailableLocations.filter(l => l.id !== 'local')" :key="location.id" class="break-words text-xs text-amber-600 dark:text-amber-400">{{ t('recording.nasOmitted', { name: location.name }) }}</p>
       <div class="flex items-baseline justify-between">
         <h3 class="text-sm font-medium">
           {{ t('recording.library') }}
@@ -180,7 +215,7 @@ function confirmDelete() {
       <ul v-else class="-mx-1 max-h-72 space-y-1 overflow-y-auto px-1">
         <li
           v-for="file in files"
-          :key="file.name"
+          :key="`${file.location.id}:${file.name}`"
           :data-recording="file.name"
           :class="['group flex items-center gap-3 rounded-lg border px-3 py-2.5 transition-colors', isActive(file) ? 'border-red-500/30 bg-red-500/[0.04]' : 'hover:bg-muted/50']"
         >
@@ -194,6 +229,7 @@ function confirmDelete() {
               <Badge v-else-if="!file.complete" variant="warning" class="px-1.5 py-0 text-[10px]">{{ t('recording.partialBadge') }}</Badge>
             </div>
             <p class="truncate text-xs text-muted-foreground tabular-nums">{{ isActive(file) ? t('recording.inProgress') : fileMeta(file) }}</p>
+            <Badge variant="secondary" class="max-w-full truncate px-1.5 py-0 text-[10px]">{{ locationName(file.location) }}</Badge>
             <p v-if="file.stop_reason && !isActive(file)" class="truncate text-xs text-amber-600 dark:text-amber-400" :title="reasonText(file.stop_reason)">
               {{ t('recording.stoppedBecause', { reason: reasonText(file.stop_reason) }) }}
             </p>

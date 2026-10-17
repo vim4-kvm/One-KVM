@@ -1,5 +1,8 @@
 export default {
   recording: {
+    saveTo: '保存到', local: '本机', folder: '子文件夹', applyLocation: '应用',
+    addNas: '在管理面板的网络存储页添加 NAS', nasOmitted: '{name} NAS 暂不可访问，其中的录像未列出',
+    locationReasons: { not_mounted: '未连接', unresponsive: '无响应', not_writable: '无写入权限' },
     title: '设备录屏', short: '录屏', indicator: '正在录屏，点击查看', start: '开始录屏', stop: '停止并保存', saving: '正在保存…',
     active: '正在录制', activeBadge: '录制中', inProgress: '正在写入…', withAudio: '含 HDMI 声音',
     hint: '画面和 HDMI 声音直接录在设备上，关闭网页也不会中断。',
@@ -9,7 +12,7 @@ export default {
     unreachable: '无法获取录屏状态', unreachableHint: '与设备的连接中断，恢复后会自动刷新。',
     remainingHours: '剩余空间约可再录 {hours} 小时', remainingMinutes: '剩余空间仅够再录约 {minutes} 分钟',
     remainingDays: '剩余空间可录超过 24 小时',
-    interruptedTitle: '上一次录屏已自动停止', startFailedTitle: '未能开始录屏', partSaved: '，已录制的部分已保存。',
+    interruptedTitle: '上一次录屏已自动停止', startFailedTitle: '未能开始录屏', partSaved: '，可能留下未完成的录像，请检查文件列表。',
     dismiss: '关闭提示', library: '录像', totalSize: '共 {size}', today: '今天 {time}',
     empty: '还没有录像', emptyHint: '录好的视频保存在设备上，可随时下载。',
     partialBadge: '未完成', partial: '文件未完成封装，可能无法完整播放',
@@ -20,11 +23,13 @@ export default {
     footer: '保存为 MKV 格式，推荐用 VLC 播放。网页静音不影响录音；设备剩余空间低于 256 MiB 时会自动停止。',
     toast: { saved: '录屏已保存', interrupted: '录屏已中断', deleted: '录像已删除' },
     blockers: {
+      storage_unavailable: '保存位置不可用，请检查 NAS 连接和写入权限。',
       video_codec: '录屏需要 H.264 或 H.265 视频，当前编码不支持。',
       audio_unavailable: '音频采集未启用或不可用，请先在工具栏的「音频」中启用。',
       low_storage: '设备剩余空间不足 256 MiB，请先删除旧录像。',
     },
     reasons: {
+      storage_unavailable: '录制存储不可用或 NAS 写入失败',
       already_recording: '已有录屏正在进行', video_codec: '当前视频编码不支持录屏', audio_unavailable: '音频采集不可用',
       low_storage: '设备剩余空间不足', storage_error: '无法写入录像目录', video_unavailable: '视频采集不可用，请检查 HDMI 输入',
       start_timeout: '等待画面或 HDMI 声音超时', codec_changed: '视频编码被切换', resolution_changed: '输入分辨率发生变化',

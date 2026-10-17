@@ -6,9 +6,18 @@ import { request } from '@/api/request'
 export type RecordingCode =
   | 'already_recording' | 'video_codec' | 'audio_unavailable' | 'low_storage' | 'storage_error'
   | 'video_unavailable' | 'start_timeout' | 'codec_changed' | 'resolution_changed' | 'packets_lost'
-  | 'capture_timeout' | 'pipeline_stopped' | 'save_failed' | 'internal'
+  | 'capture_timeout' | 'pipeline_stopped' | 'save_failed' | 'internal' | 'storage_unavailable'
+
+export interface RecordingLocation { id: string; name: string; folder: string }
+export interface LocationAvailability extends RecordingLocation {
+  available: boolean
+  reason?: 'not_mounted' | 'unresponsive' | 'not_writable'
+  free_bytes?: number
+}
 
 export interface RecordingStatus {
+  location: RecordingLocation
+  storage_reason: LocationAvailability['reason'] | null
   recording: boolean
   file: string | null
   elapsed_seconds: number
@@ -22,6 +31,7 @@ export interface RecordingStatus {
 }
 
 export interface RecordingFile {
+  location: RecordingLocation
   name: string
   bytes: number
   modified: number
@@ -38,8 +48,10 @@ const ACTIVE_POLL_MS = 2000
 
 const status = ref<RecordingStatus | null>(null)
 const files = ref<RecordingFile[]>([])
+const locations = ref<LocationAvailability[]>([])
+const unavailableLocations = ref<LocationAvailability[]>([])
 const unreachable = ref(false)
-const action = ref<'starting' | 'stopping' | 'deleting' | null>(null)
+const action = ref<'starting' | 'stopping' | 'deleting' | 'location' | null>(null)
 const panelOpen = ref(false)
 const fetchedAt = ref(0)
 const now = ref(Date.now())
@@ -62,7 +74,7 @@ export function localDownloadName(file: RecordingFile) {
 }
 
 export function recordingDownloadUrl(file: RecordingFile) {
-  return `/api/recording/files/${encodeURIComponent(file.name)}?filename=${localDownloadName(file)}`
+  return `/api/recording/files/${encodeURIComponent(file.name)}?filename=${localDownloadName(file)}&location=${encodeURIComponent(file.location.id)}`
 }
 
 export function downloadRecording(file: RecordingFile) {
@@ -93,14 +105,17 @@ export function reasonText(code: RecordingCode | null | undefined, fallback?: st
 }
 
 async function fetchFiles() {
-  files.value = await request<RecordingFile[]>('/recording/files', {}, { toastOnError: false })
+  const result = await request<{ files: RecordingFile[]; unavailable: LocationAvailability[] }>('/recording/files?details=true', {}, { toastOnError: false })
+  files.value = result.files
+  unavailableLocations.value = result.unavailable
+  locations.value = await request<LocationAvailability[]>('/recording/locations', {}, { toastOnError: false })
 }
 
 function announceTransition(previous: RecordingStatus | null, next: RecordingStatus) {
   if (!previous?.recording || next.recording) return
   const byUser = stopRequested
   stopRequested = false
-  const saved = files.value.find(file => file.name === next.file && file.complete)
+  const saved = files.value.find(file => file.name === next.file && file.location.id === next.location.id && file.complete)
   if (next.error_code || next.error) {
     toast.error(t('recording.toast.interrupted'), {
       description: reasonText(next.error_code, next.error),
@@ -119,9 +134,9 @@ async function refresh() {
     const previous = status.value
     const next = await request<RecordingStatus>('/recording', {}, { toastOnError: false })
     const finished = previous?.recording && !next.recording
-    if (panelOpen.value || finished || !files.value.length) await fetchFiles()
     status.value = next
     fetchedAt.value = Date.now()
+    if (panelOpen.value || finished || !files.value.length) await fetchFiles()
     unreachable.value = false
     announceTransition(previous, next)
   } catch {
@@ -158,7 +173,7 @@ const stop = () => run('stopping', () => {
   return request('/recording/stop', { method: 'POST' })
 })
 const remove = (file: RecordingFile) => run('deleting', async () => {
-  await request(`/recording/files/${encodeURIComponent(file.name)}`, { method: 'DELETE' })
+  await request(`/recording/files/${encodeURIComponent(file.name)}?location=${encodeURIComponent(file.location.id)}`, { method: 'DELETE' })
   toast.success(t('recording.toast.deleted'))
 })
 
@@ -184,6 +199,11 @@ export function useDeviceRecording() {
   return {
     status,
     files,
+    locations,
+    unavailableLocations,
+    setLocation(location: string, folder: string) {
+      return run('location', () => request('/recording/location', { method: 'PUT', body: JSON.stringify({ location, folder }) }))
+    },
     unreachable,
     action,
     panelOpen,

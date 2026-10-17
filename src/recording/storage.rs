@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::{
     fs::{File, OpenOptions},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
@@ -30,7 +30,7 @@ pub(super) fn space(dir: &Path) -> Result<StorageStatus> {
     })
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct Metadata {
     pub started_at: Option<u64>,
     pub codec: Option<RecordingCodec>,
@@ -114,6 +114,7 @@ pub(super) fn download_name(started_at: Option<u64>, modified: u64) -> String {
 
 #[derive(Serialize)]
 pub struct RecordingFile {
+    pub location: super::locations::Location,
     pub name: String,
     pub bytes: u64,
     pub modified: u64,
@@ -125,7 +126,9 @@ pub struct RecordingFile {
     pub download_name: String,
 }
 
+#[cfg(test)]
 pub(super) fn prepare(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir)?;
     let metadata = std::fs::symlink_metadata(dir)?;
     if !metadata.is_dir() {
@@ -205,6 +208,7 @@ pub(super) fn list(dir: &Path) -> Result<Vec<RecordingFile>> {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
         files.push(RecordingFile {
+            location: Default::default(),
             complete: name.ends_with(".mkv"),
             name,
             bytes: metadata.len(),

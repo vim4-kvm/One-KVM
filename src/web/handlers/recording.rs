@@ -1,6 +1,6 @@
 use crate::{
     error::Result,
-    recording::{RecordingErrorCode, RecordingFile, RecordingStatus},
+    recording::{RecordingErrorCode, RecordingStatus},
     state::AppState,
     video::codec::{VideoCodecType, VideoEncoderType},
 };
@@ -12,7 +12,6 @@ use axum::{
     Json,
 };
 use std::sync::Arc;
-use tokio::io::AsyncReadExt;
 
 pub async fn status(State(state): State<Arc<AppState>>) -> Json<RecordingStatus> {
     let mut status = state.recording.status().await;
@@ -20,14 +19,17 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<RecordingStatus>
         let config = state.stream_manager.get_encoding_config().await;
         let current_codec = state.stream_manager.current_video_codec().await;
         let audio = state.audio.status().await;
-        status.blocker = if !state.stream_manager.is_webrtc_enabled().await
+        status.blocker = if status.storage_reason.is_some() {
+            Some(RecordingErrorCode::StorageUnavailable)
+        } else if !state.stream_manager.is_webrtc_enabled().await
             || !matches!(current_codec, VideoCodecType::H264 | VideoCodecType::H265)
             || config.is_some_and(|c| {
                 !matches!(
                     c.output_codec,
                     VideoEncoderType::H264 | VideoEncoderType::H265
                 )
-            }) {
+            })
+        {
             Some(RecordingErrorCode::VideoCodec)
         } else if !state.config.get().audio.enabled || !audio.enabled || audio.error.is_some() {
             Some(RecordingErrorCode::AudioUnavailable)
@@ -68,19 +70,58 @@ pub async fn start(State(state): State<Arc<AppState>>) -> Response {
 pub async fn stop(State(state): State<Arc<AppState>>) -> Json<RecordingStatus> {
     Json(state.recording.stop().await)
 }
-pub async fn files(State(state): State<Arc<AppState>>) -> Result<Json<Vec<RecordingFile>>> {
-    Ok(Json(state.recording.files()?))
+#[derive(Default, serde::Deserialize)]
+pub struct FilesQuery {
+    #[serde(default)]
+    details: bool,
+}
+pub async fn files(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<FilesQuery>,
+) -> Json<serde_json::Value> {
+    let (files, unavailable) = state.recording.files().await;
+    // Preserve the legacy array; clients requesting details also receive omissions.
+    Json(if query.details {
+        serde_json::json!({"files": files, "unavailable": unavailable})
+    } else {
+        serde_json::json!(files)
+    })
+}
+pub async fn locations(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<crate::recording::locations::Availability>> {
+    Json(state.recording.locations().await)
+}
+#[derive(serde::Deserialize)]
+pub struct LocationUpdate {
+    location: String,
+    folder: Option<String>,
+}
+pub async fn location(
+    State(state): State<Arc<AppState>>,
+    Json(update): Json<LocationUpdate>,
+) -> Result<Json<serde_json::Value>> {
+    state
+        .recording
+        .set_location(update.location, update.folder)
+        .await?;
+    Ok(Json(serde_json::json!({"success": true})))
 }
 pub async fn delete(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    Query(query): Query<DownloadQuery>,
 ) -> Result<Json<serde_json::Value>> {
-    state.recording.delete(&name).await?;
+    state
+        .recording
+        .delete_at(query.location.as_deref().unwrap_or("local"), &name)
+        .await?;
     Ok(Json(serde_json::json!({ "success": true })))
 }
 #[derive(serde::Deserialize)]
 pub struct DownloadQuery {
     filename: Option<String>,
+    location: Option<String>,
 }
 
 /// Browsers name files in the viewer's timezone; the device clock is often UTC.
@@ -104,19 +145,30 @@ pub async fn download(
     Path(name): Path<String>,
     Query(query): Query<DownloadQuery>,
 ) -> Result<Response> {
-    let file = state.recording.open(&name).await?;
-    let size = file.metadata()?.len();
+    let (file, size, default_name) = state
+        .recording
+        .open_at(query.location.as_deref().unwrap_or("local"), &name)
+        .await?;
     let download_name = match query.filename {
         Some(requested) if is_download_name(&requested) => requested,
-        _ => state.recording.download_name(&name, &file)?,
+        _ => default_name,
     };
-    let mut file = tokio::fs::File::from_std(file);
+    let mut file = file;
+    let gate = state
+        .recording
+        .download_gate(query.location.as_deref().unwrap_or("local"));
     let stream = async_stream::try_stream! {
-        let mut buffer = vec![0u8; 64 * 1024];
         loop {
-            let len = file.read(&mut buffer).await?;
-            if len == 0 { break; }
-            yield bytes::Bytes::copy_from_slice(&buffer[..len]);
+            let (returned, data) = crate::recording::locations::bounded(gate.clone(), move || {
+                use std::io::Read;
+                let mut buffer = vec![0u8; 64 * 1024];
+                let result = file.read(&mut buffer).map(|len| { buffer.truncate(len); buffer });
+                (file, result)
+            }).await.map_err(std::io::Error::other)?;
+            file = returned;
+            let data = data?;
+            if data.is_empty() { break; }
+            yield bytes::Bytes::from(data);
         }
     };
     let stream: std::pin::Pin<

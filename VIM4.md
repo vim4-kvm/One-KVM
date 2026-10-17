@@ -152,10 +152,27 @@ GE2D 缩放使用私有 `libgst-aml-dma-allocator.so`，仅实现 amlvconv 调�
 并启用音频采集；没有新关键帧或音频包时启动失败，不生成声称带声音的纯视频文件。
 录制沿用当前画质，共享硬件编码及 HDMI Opus 音频，不再次打开采集设备、不转码。
 
-文件位于 `/var/lib/one-kvm/recordings`，采用 MKV（H.264/H.265 + Opus），可下载到
+默认保存到本机 `/var/lib/one-kvm/recordings`，面板“保存到”可选择 NAS 并编辑相对
+子文件夹（默认 `One-KVM`，支持多级）；配置持久化并分别记住各 NAS 的文件夹，录制中
+禁止切换。文件采用 MKV（H.264/H.265 + Opus），可下载到
 VLC 等播放器播放。目录 0700、文件 0600，独立于虚拟介质目录；升级不删除录像。
 `/api/recording`、`/start`、`/stop`、`/files` 和 `/files/{name}` 均要求网页认证。
 正在录制的文件禁止下载、删除；文件名由设备生成，拒绝路径穿越、符号链接与硬链接。
+
+NAS 可选遵循 `vim4-nas-api-1`，不硬依赖管理器包：从 `/etc/vim4-kvm/nas/ID.json`
+读取名称、SMB/NFS 类型，在 `/var/lib/vim4-kvm/nas/ID` 内保存。必须匹配
+`/proc/self/mountinfo` 与已打开目录的 mount ID；拒绝绝对路径、`..`、控制字符，
+逐级 `openat(O_NOFOLLOW)`，后续操作固定目录句柄。未挂载时绝不写入空挂载目录或
+回退本机。SMB 依赖管理器挂载为 khadas 可写，NFS 权限由服务器决定；SMB 的目录
+chmod 可能无实际效果。添加 NAS 的链接指向当前主机 80 端口管理面板 `/#/storage`。
+
+`GET /api/recording/locations` 返回本机与 NAS 的 `id/name/folder/available`、可用空间，
+NAS 含 `type`；不可用原因 `not_mounted/unresponsive/not_writable`。
+`PUT/PATCH /api/recording/location {location, folder}` 校验并保存位置；状态增加
+`location: {id,name,folder}` 和 `storage_reason`，空间查询超时返回 `storage: null`。
+`GET /files` 混合按时间返回各位置录像（每项含 `location`）；`?details=true` 返回
+`{files, unavailable}`，单个 NAS 故障不影响其他位置。下载和删除使用 `?location=nas:ID`，
+省略时仍访问本机。每个 NAS 只列出当前记住的文件夹，改文件夹不会搬移已有录像。
 
 状态新增 `error_code`、`started_at`（Unix 秒）、`codec`、`bytes`、
 `storage: {free_bytes, reserve_bytes}` 和空闲时的 `blocker`；错误码采用 snake_case，
@@ -172,6 +189,15 @@ VLC 等播放器播放。目录 0700、文件 0600，独立于虚拟介质目录
 切换编码、分辨率、采集重启、丢包、持续三秒无音视频、写盘跟不上，或剩余空间不足
 256 MiB 时停止并报告原因。尽可能完成已有内容的封装；封装失败或突然断电留下
 `.mkv.part`，网页明确标记未完成，可下载尝试恢复或删除。应用正常退出先收尾录屏。
+
+NAS 故障使用 `storage_unavailable`；文件系统查询、目录遍历、读写在独立线程执行，
+单次等待上限 1.5 秒，同一操作的超时线程返回前不再增加线程。录制推送侧限制每路
+appsrc 队列不超过 16 MiB，并在积压超过 2 秒时停止；录制中的大小和码率按已推送
+媒体字节估算，文件列表显示实际文件大小。CIFS 内核写入可能约 30 秒才报错，
+EOS 收尾最多等待 8 秒，管线释放留在独立线程，保留 fd 至 fdsink 完全停止；最多
+保留 4 个未释放管线，耗尽时拒绝新录制。停止请求总等待最多 15 秒（服务停止限额
+20 秒），无法收尾保留 `.mkv.part`。超时不强杀内核 I/O，已发起的操作仍可能稍后完成；
+强制退出后无法保证 NAS 缓存中的内容持久化。无响应位置会在列表提示遗漏，恢复后重查。
 
 离线 Rust 测试使用真实 H.264/H.265 和正弦音编码，封装后解码检查视频帧数和非静音
 音频，并覆盖流序号断裂、路径保护、取消停止请求后的资源归属。运行

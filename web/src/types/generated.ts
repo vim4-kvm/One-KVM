@@ -334,6 +334,7 @@ export interface UacConfig {
 }
 
 export interface AppConfig {
+	recording: RecordingConfig;
 	initialized: boolean;
 	auth: AuthConfig;
 	video: VideoConfig;
@@ -353,6 +354,11 @@ export interface AppConfig {
 	redfish: RedfishConfig;
 	watchdog: WatchdogConfig;
 	uac: UacConfig;
+}
+
+export interface RecordingConfig {
+	location: string;
+	folders: Record<string, string>;
 }
 
 /** Update for a single ATX output binding */
