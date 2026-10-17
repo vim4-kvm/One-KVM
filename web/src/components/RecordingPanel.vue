@@ -197,7 +197,7 @@ function confirmDelete() {
     </div>
 
     <section class="space-y-2">
-      <p v-for="location in unavailableLocations.filter(l => l.id !== 'local')" :key="location.id" class="break-words text-xs text-amber-600 dark:text-amber-400">{{ t('recording.nasOmitted', { name: location.name }) }}</p>
+      <p v-for="location in unavailableLocations.filter(l => l.id !== 'local' && l.reason !== 'not_mounted')" :key="location.id" class="break-words text-xs text-amber-600 dark:text-amber-400">{{ t('recording.nasOmitted', { name: location.name }) }}</p>
       <div class="flex items-baseline justify-between">
         <h3 class="text-sm font-medium">
           {{ t('recording.library') }}
