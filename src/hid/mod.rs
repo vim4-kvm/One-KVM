@@ -95,9 +95,9 @@ impl HidRuntimeState {
     }
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -122,16 +122,32 @@ enum QueuedHidEvent {
     Reset,
 }
 
+struct PendingHidEvent {
+    event: QueuedHidEvent,
+    queued_at: Instant,
+}
+
+type HidQueueSlot = Arc<parking_lot::Mutex<Option<PendingHidEvent>>>;
+
+#[derive(Default)]
+struct HidQueueMetrics {
+    received: AtomicU64,
+    coalesced: AtomicU64,
+    overflow: AtomicU64,
+}
+
 pub struct HidController {
     backend_factory: HidBackendFactory,
     backend: Arc<RwLock<Option<Arc<dyn HidBackend>>>>,
     backend_type: Arc<RwLock<HidBackendType>>,
     events: Arc<tokio::sync::RwLock<Option<Arc<EventBus>>>>,
     runtime_state: Arc<RwLock<HidRuntimeState>>,
-    hid_tx: mpsc::Sender<QueuedHidEvent>,
-    hid_rx: Mutex<Option<mpsc::Receiver<QueuedHidEvent>>>,
-    pending_move: Arc<parking_lot::Mutex<Option<MouseEvent>>>,
-    pending_move_flag: Arc<AtomicBool>,
+    hid_tx: mpsc::Sender<HidQueueSlot>,
+    hid_rx: Mutex<Option<mpsc::Receiver<HidQueueSlot>>>,
+    // Serializes producers and points only to the last queued event. Once the
+    // consumer takes a slot, producers can no longer replace its contents.
+    queue_tail: Mutex<Option<HidQueueSlot>>,
+    queue_metrics: Arc<HidQueueMetrics>,
     hid_worker: Mutex<Option<JoinHandle<()>>>,
     runtime_worker: Mutex<Option<JoinHandle<()>>>,
     backend_available: Arc<AtomicBool>,
@@ -153,8 +169,8 @@ impl HidController {
             ))),
             hid_tx,
             hid_rx: Mutex::new(Some(hid_rx)),
-            pending_move: Arc::new(parking_lot::Mutex::new(None)),
-            pending_move_flag: Arc::new(AtomicBool::new(false)),
+            queue_tail: Mutex::new(None),
+            queue_metrics: Arc::new(HidQueueMetrics::default()),
             hid_worker: Mutex::new(None),
             runtime_worker: Mutex::new(None),
             backend_available: Arc::new(AtomicBool::new(false)),
@@ -176,8 +192,8 @@ impl HidController {
             ))),
             hid_tx,
             hid_rx: Mutex::new(Some(hid_rx)),
-            pending_move: Arc::new(parking_lot::Mutex::new(None)),
-            pending_move_flag: Arc::new(AtomicBool::new(false)),
+            queue_tail: Mutex::new(None),
+            queue_metrics: Arc::new(HidQueueMetrics::default()),
             hid_worker: Mutex::new(None),
             runtime_worker: Mutex::new(None),
             backend_available: Arc::new(AtomicBool::new(false)),
@@ -294,14 +310,7 @@ impl HidController {
             ));
         }
 
-        if matches!(
-            event.event_type,
-            MouseEventType::Move | MouseEventType::MoveAbs
-        ) {
-            self.enqueue_mouse_move(event)
-        } else {
-            self.enqueue_event(QueuedHidEvent::Mouse(event)).await
-        }
+        self.enqueue_event(QueuedHidEvent::Mouse(event)).await
     }
 
     pub async fn send_consumer(&self, event: ConsumerEvent) -> Result<()> {
@@ -507,34 +516,52 @@ impl HidController {
         };
 
         let backend = self.backend.clone();
-        let pending_move = self.pending_move.clone();
-        let pending_move_flag = self.pending_move_flag.clone();
+        let metrics = self.queue_metrics.clone();
         let reset_requested = self.reset_requested.clone();
 
         let handle = tokio::spawn(async move {
             let mut rx = rx;
+            let mut report_at = Instant::now();
+            let mut processed = 0u64;
+            let mut max_queue_us = 0u128;
+            let mut max_dispatch_us = 0u128;
             loop {
-                let event = match rx.recv().await {
-                    Some(ev) => ev,
+                let slot = match rx.recv().await {
+                    Some(slot) => slot,
                     None => break,
                 };
+                let pending = slot.lock().take();
+                let Some(pending) = pending else { continue };
 
                 if reset_requested.swap(false, Ordering::AcqRel) {
                     // A full input queue must not lose a key/button release and leave
                     // the host stuck. Discard the obsolete batch and send all-up.
-                    while rx.try_recv().is_ok() {}
-                    *pending_move.lock() = None;
-                    pending_move_flag.store(false, Ordering::Release);
+                    while let Ok(slot) = rx.try_recv() {
+                        slot.lock().take();
+                    }
                     process_hid_event(QueuedHidEvent::Reset, &backend).await;
                     continue;
                 }
-                process_hid_event(event, &backend).await;
-
-                if pending_move_flag.swap(false, Ordering::AcqRel) {
-                    let move_event = { pending_move.lock().take() };
-                    if let Some(move_event) = move_event {
-                        process_hid_event(QueuedHidEvent::Mouse(move_event), &backend).await;
-                    }
+                max_queue_us = max_queue_us.max(pending.queued_at.elapsed().as_micros());
+                let started = Instant::now();
+                process_hid_event(pending.event, &backend).await;
+                max_dispatch_us = max_dispatch_us.max(started.elapsed().as_micros());
+                processed += 1;
+                if report_at.elapsed() >= Duration::from_secs(5) {
+                    info!(
+                        window_ms = report_at.elapsed().as_millis() as u64,
+                        received = metrics.received.swap(0, Ordering::Relaxed),
+                        coalesced = metrics.coalesced.swap(0, Ordering::Relaxed),
+                        overflow = metrics.overflow.swap(0, Ordering::Relaxed),
+                        processed,
+                        max_queue_us = max_queue_us as u64,
+                        max_dispatch_us = max_dispatch_us as u64,
+                        "HID input timing"
+                    );
+                    report_at = Instant::now();
+                    processed = 0;
+                    max_queue_us = 0;
+                    max_dispatch_us = 0;
                 }
             }
         });
@@ -582,23 +609,38 @@ impl HidController {
         }
     }
 
-    fn enqueue_mouse_move(&self, event: MouseEvent) -> Result<()> {
-        match self.hid_tx.try_send(QueuedHidEvent::Mouse(event.clone())) {
-            Ok(_) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                merge_pending_move(&mut self.pending_move.lock(), event);
-                self.pending_move_flag.store(true, Ordering::Release);
-                Ok(())
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Err(AppError::BadRequest("HID event queue closed".to_string()))
+    async fn enqueue_event(&self, event: QueuedHidEvent) -> Result<()> {
+        self.queue_metrics.received.fetch_add(1, Ordering::Relaxed);
+        let mut tail = self.queue_tail.lock().await;
+        if let (Some(slot), QueuedHidEvent::Mouse(next)) = (tail.as_ref(), &event) {
+            let mut pending = slot.lock();
+            if let Some(PendingHidEvent {
+                event: QueuedHidEvent::Mouse(previous),
+                ..
+            }) = pending.as_mut()
+            {
+                // Only consecutive absolute positions are replaceable. Relative
+                // counts retain their original reports and host acceleration cadence;
+                // clicks, releases, scrolling and mode changes are ordering barriers.
+                if previous.event_type == MouseEventType::MoveAbs
+                    && next.event_type == MouseEventType::MoveAbs
+                {
+                    *previous = next.clone();
+                    self.queue_metrics.coalesced.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
             }
         }
-    }
-
-    async fn enqueue_event(&self, event: QueuedHidEvent) -> Result<()> {
-        match self.hid_tx.try_send(event) {
-            Ok(_) => Ok(()),
+        *tail = None;
+        let slot = Arc::new(parking_lot::Mutex::new(Some(PendingHidEvent {
+            event,
+            queued_at: Instant::now(),
+        })));
+        match self.hid_tx.try_send(slot.clone()) {
+            Ok(_) => {
+                *tail = Some(slot);
+                Ok(())
+            }
             Err(mpsc::error::TrySendError::Full(ev)) => {
                 let tx = self.hid_tx.clone();
                 let send_result = tokio::time::timeout(
@@ -607,10 +649,14 @@ impl HidController {
                 )
                 .await;
                 match send_result {
-                    Ok(Ok(())) => Ok(()),
+                    Ok(Ok(())) => {
+                        *tail = Some(slot);
+                        Ok(())
+                    }
                     Ok(Err(_)) => Err(AppError::BadRequest("HID event queue closed".into())),
                     Err(_) => {
                         self.reset_requested.store(true, Ordering::Release);
+                        self.queue_metrics.overflow.fetch_add(1, Ordering::Relaxed);
                         warn!("HID event queue full; scheduling all-input release");
                         Err(AppError::ServiceUnavailable(
                             "HID input queue full; input state will be reset".into(),
@@ -708,17 +754,6 @@ async fn apply_runtime_state(
     }
 }
 
-fn merge_pending_move(pending: &mut Option<MouseEvent>, event: MouseEvent) {
-    if let Some(previous) = pending {
-        if previous.event_type == MouseEventType::Move && event.event_type == MouseEventType::Move {
-            previous.x = previous.x.saturating_add(event.x).clamp(-32767, 32767);
-            previous.y = previous.y.saturating_add(event.y).clamp(-32767, 32767);
-            return;
-        }
-    }
-    *pending = Some(event);
-}
-
 #[cfg(test)]
 mod queue_tests {
     use super::*;
@@ -747,6 +782,8 @@ mod queue_tests {
         pressed: Arc<AtomicBool>,
         reset_done: Arc<tokio::sync::Notify>,
         runtime: tokio::sync::watch::Sender<()>,
+        mouse_reports: Option<mpsc::UnboundedSender<MouseEvent>>,
+        mouse_permits: Option<Arc<tokio::sync::Semaphore>>,
     }
     #[async_trait::async_trait]
     impl HidBackend for TestBackend {
@@ -757,7 +794,13 @@ mod queue_tests {
             self.pressed.store(true, Ordering::Release);
             Ok(())
         }
-        async fn send_mouse(&self, _: MouseEvent) -> Result<()> {
+        async fn send_mouse(&self, event: MouseEvent) -> Result<()> {
+            if let Some(reports) = &self.mouse_reports {
+                reports.send(event).unwrap();
+            }
+            if let Some(permits) = &self.mouse_permits {
+                permits.acquire().await.unwrap().forget();
+            }
             Ok(())
         }
         async fn reset(&self) -> Result<()> {
@@ -788,6 +831,8 @@ mod queue_tests {
             pressed: pressed.clone(),
             reset_done: done.clone(),
             runtime,
+            mouse_reports: None,
+            mouse_permits: None,
         }));
         for _ in 0..HID_EVENT_QUEUE_CAPACITY {
             controller
@@ -809,19 +854,147 @@ mod queue_tests {
         assert!(!pressed.load(Ordering::Acquire));
     }
 
-    #[test]
-    fn relative_motion_is_accumulated_but_absolute_is_replaced() {
-        let mut pending = Some(MouseEvent::move_rel(100, -20));
-        merge_pending_move(&mut pending, MouseEvent::move_rel(80, 30));
+    async fn recording_controller() -> (
+        HidController,
+        mpsc::UnboundedReceiver<MouseEvent>,
+        Arc<tokio::sync::Semaphore>,
+    ) {
+        #[cfg(unix)]
+        let controller = HidController::new(HidBackendType::None, None);
+        #[cfg(not(unix))]
+        let controller = HidController::new(HidBackendType::None);
+        let (reports, received) = mpsc::unbounded_channel();
+        let permits = Arc::new(tokio::sync::Semaphore::new(0));
+        let (runtime, _) = tokio::sync::watch::channel(());
+        *controller.backend.write().await = Some(Arc::new(TestBackend {
+            pressed: Arc::new(AtomicBool::new(false)),
+            reset_done: Arc::new(tokio::sync::Notify::new()),
+            runtime,
+            mouse_reports: Some(reports),
+            mouse_permits: Some(permits.clone()),
+        }));
+        controller.backend_available.store(true, Ordering::Release);
+        controller.start_event_worker().await;
+        (controller, received, permits)
+    }
+
+    async fn next_mouse_report(rx: &mut mpsc::UnboundedReceiver<MouseEvent>) -> MouseEvent {
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn stalled_backend_keeps_latest_positions_in_order_and_all_relative_counts() {
+        let (controller, mut received, permits) = recording_controller().await;
+        controller
+            .send_mouse(MouseEvent::move_abs(1, 1))
+            .await
+            .unwrap();
+        // Receipt proves that the first report was consumed and its USB write
+        // is stalled. Enqueue a burst without relying on scheduler sleeps.
+        let first = next_mouse_report(&mut received).await;
+        assert_eq!(first.x, 1);
+        for x in 2..200 {
+            controller
+                .send_mouse(MouseEvent::move_abs(x, x))
+                .await
+                .unwrap();
+        }
+        controller
+            .send_mouse(MouseEvent::button_down(MouseButton::Left))
+            .await
+            .unwrap();
+        for x in 200..400 {
+            controller
+                .send_mouse(MouseEvent::move_abs(x, x))
+                .await
+                .unwrap();
+        }
+        controller
+            .send_mouse(MouseEvent::move_rel(100, -20))
+            .await
+            .unwrap();
+        controller
+            .send_mouse(MouseEvent::move_rel(80, 30))
+            .await
+            .unwrap();
+        controller
+            .send_mouse(MouseEvent::button_up(MouseButton::Left))
+            .await
+            .unwrap();
+        controller
+            .send_mouse(MouseEvent::move_abs(500, 500))
+            .await
+            .unwrap();
+        controller.send_mouse(MouseEvent::scroll(1)).await.unwrap();
+        controller
+            .send_mouse(MouseEvent::move_abs(600, 600))
+            .await
+            .unwrap();
+        permits.add_permits(10);
+        let expected = [
+            (MouseEventType::MoveAbs, 199, 199),
+            (MouseEventType::Down, 0, 0),
+            (MouseEventType::MoveAbs, 399, 399),
+            (MouseEventType::Move, 100, -20),
+            (MouseEventType::Move, 80, 30),
+            (MouseEventType::Up, 0, 0),
+            (MouseEventType::MoveAbs, 500, 500),
+            (MouseEventType::Scroll, 0, 0),
+            (MouseEventType::MoveAbs, 600, 600),
+        ];
+        for (kind, x, y) in expected {
+            let event = next_mouse_report(&mut received).await;
+            assert_eq!((event.event_type, event.x, event.y), (kind, x, y));
+        }
+        assert!(received.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn full_relative_queue_applies_backpressure_without_clipping_or_overtaking_release() {
+        let (controller, mut received, permits) = recording_controller().await;
+        controller
+            .send_mouse(MouseEvent::move_rel(1, 1))
+            .await
+            .unwrap();
+        next_mouse_report(&mut received).await;
+        for _ in 0..HID_EVENT_QUEUE_CAPACITY {
+            controller
+                .send_mouse(MouseEvent::move_rel(100, -80))
+                .await
+                .unwrap();
+        }
+        let blocked = controller.send_mouse(MouseEvent::move_rel(90, -70));
+        tokio::pin!(blocked);
+        assert!(futures::poll!(&mut blocked).is_pending());
+        // Resume the backend only after the producer demonstrably hit capacity.
+        permits.add_permits(HID_EVENT_QUEUE_CAPACITY + 3);
+        blocked.await.unwrap();
+        controller
+            .send_mouse(MouseEvent::button_up(MouseButton::Left))
+            .await
+            .unwrap();
+        let mut total = (0, 0);
+        for _ in 0..=HID_EVENT_QUEUE_CAPACITY {
+            let event = next_mouse_report(&mut received).await;
+            assert_eq!(event.event_type, MouseEventType::Move);
+            assert!(event.x.abs() <= 127 && event.y.abs() <= 127);
+            total.0 += event.x;
+            total.1 += event.y;
+        }
         assert_eq!(
-            (pending.as_ref().unwrap().x, pending.as_ref().unwrap().y),
-            (180, 10)
+            total,
+            (
+                HID_EVENT_QUEUE_CAPACITY as i32 * 100 + 90,
+                -(HID_EVENT_QUEUE_CAPACITY as i32) * 80 - 70
+            )
         );
-        merge_pending_move(&mut pending, MouseEvent::move_abs(10, 20));
-        merge_pending_move(&mut pending, MouseEvent::move_abs(30, 40));
         assert_eq!(
-            (pending.as_ref().unwrap().x, pending.as_ref().unwrap().y),
-            (30, 40)
+            next_mouse_report(&mut received).await.event_type,
+            MouseEventType::Up
         );
+        assert!(received.try_recv().is_err());
     }
 }

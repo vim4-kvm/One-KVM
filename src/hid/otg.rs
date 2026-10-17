@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tracing::{debug, info, trace, warn};
 
@@ -94,10 +94,33 @@ pub struct OtgBackend {
     runtime_notify_tx: watch::Sender<()>,
     runtime_worker_stop: Arc<AtomicBool>,
     runtime_worker: Mutex<Option<thread::JoinHandle<()>>>,
+    write_timing: Mutex<WriteTiming>,
 }
 
 const HID_WRITE_TIMEOUT_MS: i32 = 20;
 const OTG_RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+struct WriteTiming {
+    since: Instant,
+    writes: u64,
+    total_us: u64,
+    max_us: u64,
+    timeouts: u64,
+    errors: u64,
+}
+
+impl Default for WriteTiming {
+    fn default() -> Self {
+        Self {
+            since: Instant::now(),
+            writes: 0,
+            total_us: 0,
+            max_us: 0,
+            timeouts: 0,
+            errors: 0,
+        }
+    }
+}
 
 impl OtgBackend {
     /// Gadget must already exist; paths come from `OtgService`.
@@ -138,6 +161,7 @@ impl OtgBackend {
             runtime_notify_tx,
             runtime_worker_stop: Arc::new(AtomicBool::new(false)),
             runtime_worker: Mutex::new(None),
+            write_timing: Mutex::new(WriteTiming::default()),
         })
     }
 
@@ -198,7 +222,30 @@ impl OtgBackend {
 
     /// Poll-based write with `HID_WRITE_TIMEOUT_MS`; timeout → drop (JetKVM-style).
     fn write_with_timeout(&self, file: &mut File, data: &[u8]) -> std::io::Result<bool> {
-        OtgDeviceIo::write_with_timeout(file, data, HID_WRITE_TIMEOUT_MS)
+        let started = Instant::now();
+        let result = OtgDeviceIo::write_with_timeout(file, data, HID_WRITE_TIMEOUT_MS);
+        let elapsed_us = started.elapsed().as_micros() as u64;
+        let mut timing = self.write_timing.lock();
+        timing.writes += 1;
+        timing.total_us += elapsed_us;
+        timing.max_us = timing.max_us.max(elapsed_us);
+        timing.timeouts += u64::from(matches!(result, Ok(false)));
+        timing.errors += u64::from(result.is_err());
+        if timing.since.elapsed() >= Duration::from_secs(5) {
+            // Aggregate only: per-report logs perturb the input/video workload.
+            // Write completion means gadget acceptance, not host event delivery.
+            info!(
+                window_ms = timing.since.elapsed().as_millis() as u64,
+                writes = timing.writes,
+                mean_write_us = timing.total_us / timing.writes,
+                max_write_us = timing.max_us,
+                timeouts = timing.timeouts,
+                errors = timing.errors,
+                "HID USB write timing"
+            );
+            *timing = WriteTiming::default();
+        }
+        result
     }
 
     pub fn set_udc_name(&self, udc: &str) {
