@@ -1,7 +1,5 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import RecordingDialog from '@/components/RecordingDialog.vue'
-import { useSystemStore } from '@/stores/system'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { BarChart3, Bot, Settings, Terminal, MoreHorizontal } from 'lucide-vue-next'
@@ -20,7 +18,6 @@ const emit = defineEmits<{
   (e: 'openComputerUse'): void
 }>()
 const router = useRouter()
-const systemStore = useSystemStore()
 const { t } = useI18n()
 const menuOpen = ref(false)
 function openFromMenu(action: () => void) {
@@ -31,7 +28,6 @@ function openFromMenu(action: () => void) {
 
 <template>
   <div class="console-header-actions flex shrink-0 items-center gap-1">
-    <RecordingDialog v-if="systemStore.platform?.mode_label === 'VIM4 Ubuntu'" />
     <div class="hidden items-center gap-1 md:flex">
       <Button v-if="showStats" variant="ghost" size="sm" class="gap-1.5 rounded-lg text-xs" :aria-label="t('actionbar.stats')" :title="t('actionbar.stats')" @click="emit('openStats')">
         <BarChart3 class="size-4" /><span class="hidden lg:inline">{{ t('actionbar.stats') }}</span>

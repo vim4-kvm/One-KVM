@@ -35,6 +35,7 @@ import type { VideoMode } from '@/components/VideoConfigPopover.vue'
 import StatusCard, { type StatusDetail, type ConnectionStatus } from '@/components/StatusCard.vue'
 import ActionBar from '@/components/ActionBar.vue'
 import ConsoleHeaderActions from '@/components/ConsoleHeaderActions.vue'
+import RecordingDialog from '@/components/RecordingDialog.vue'
 import { provideConsoleAppearance } from '@/composables/useConsoleAppearance'
 import ConsoleStatusSummary, { type ConsoleStatusItem } from '@/components/ConsoleStatusSummary.vue'
 import InfoBar from '@/components/InfoBar.vue'
@@ -3317,6 +3318,7 @@ onUnmounted(() => {
               <Moon v-else class="size-4" />
             </Button>
             <LanguageToggleButton class="size-8 hidden md:flex" />
+            <RecordingDialog v-if="systemStore.platform?.mode_label === 'VIM4 Ubuntu'" />
             <DropdownMenu>
               <DropdownMenuTrigger as-child>
                 <Button variant="outline" size="sm" class="gap-1 sm:gap-1.5 px-2 sm:px-3">
