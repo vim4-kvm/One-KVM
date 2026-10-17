@@ -35,6 +35,7 @@ use webrtc::track::track_local::TrackLocal;
 use super::ice::SessionIce;
 use super::input::{self, HidAction, SessionInput, SessionInputEvent};
 use super::signaling::{SignalingClient, SoacMessage};
+use super::video_metrics::{FrameAgeStats, VideoFeedback};
 use super::wire::{self, Rect};
 use crate::audio::AudioController;
 use crate::hid::{CanonicalKey, HidController};
@@ -918,8 +919,15 @@ async fn read_video_feedback(sender: Arc<RTCRtpSender>, video: Arc<VideoStreamMa
         full_intra_request::FullIntraRequest, picture_loss_indication::PictureLossIndication,
     };
     let mut buffer = [0u8; 1500];
+    let mut feedback = VideoFeedback::default();
     let mut last_request = Instant::now() - Duration::from_secs(1);
     while let Ok((packets, _)) = sender.read(&mut buffer).await {
+        let received_at = Instant::now();
+        let wall_time = SystemTime::now();
+        for packet in &packets {
+            feedback.observe(packet.as_any(), wall_time, received_at);
+        }
+        feedback.log_if_due(received_at);
         let wants_keyframe = packets.iter().any(|p| {
             p.as_any().is::<PictureLossIndication>() || p.as_any().is::<FullIntraRequest>()
         });
@@ -961,6 +969,7 @@ async fn stream_video(
     let mut sent = 0u64;
     let mut hevc = HevcPackets::new();
     'subscribe: while !closed(pc.connection_state()) {
+        let subscribed_at = Instant::now();
         let Some(mut frames) = video.subscribe_encoded_frames().await else {
             tokio::time::sleep(Duration::from_millis(200)).await;
             continue;
@@ -994,6 +1003,7 @@ async fn stream_video(
         let mut previous_arrival: Option<Instant> = None;
         let mut first_pts: Option<(Instant, i64)> = None;
         let mut sequence_gaps = 0u64;
+        let mut frame_ages = FrameAgeStats::default();
         loop {
             let frame = tokio::select! {
                 frame = frames.recv() => frame,
@@ -1052,6 +1062,7 @@ async fn stream_video(
                 }
             }
             sent += 1;
+            frame_ages.observe(frame.encoded_at, arrived, Instant::now(), subscribed_at);
             let elapsed_us = arrived.elapsed().as_micros();
             send_us += elapsed_us;
             max_send_us = max_send_us.max(elapsed_us);
@@ -1068,6 +1079,10 @@ async fn stream_video(
                     max_gap_us,
                     pts_lag_growth_ms,
                     sequence_gaps,
+                    mean_encoded_queue_us = frame_ages.total_queue_us / frame_ages.frames,
+                    max_encoded_queue_us = frame_ages.max_queue_us,
+                    max_encoded_to_send_us = frame_ages.max_encoded_to_send_us,
+                    cached_frames = frame_ages.cached_frames,
                     "UU sender timing"
                 );
                 report_at = Instant::now();
@@ -1076,6 +1091,7 @@ async fn stream_video(
                 max_send_us = 0;
                 max_gap_us = 0;
                 sequence_gaps = 0;
+                frame_ages = FrameAgeStats::default();
             }
         }
     }

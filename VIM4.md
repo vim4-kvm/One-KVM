@@ -158,6 +158,22 @@ received 包括所有输入类型；window_ms 含期间空闲时间，不能直�
 鼠标回报率。排队时间从合并段首次入队计算，分派耗时含线程调度和后端处理；
 USB 写入完成只表示 gadget 接收报告，不代表被控机已处理或画面已显示。
 
+UU 视频日志补充两类观测，均不改变发送节奏或关键帧恢复策略：
+
+- `UU sender timing` 的 mean/max_encoded_queue_us 从应用取得编码输出计到
+  开始准备发送；max_encoded_to_send_us 计到发送调用返回。单调时间戳跨队列和缓存
+  保留，cached_frames 标识生成于本次订阅之前的帧，首次缓存关键帧可能很旧。
+  这些统计只覆盖成功发送调用的帧，不含采集/编码耗时、编码器内部输出缓冲、
+  网络交付和客户端解码/显示延迟；原 mean/max_send_us 含准备发送及发送调用耗时。
+- `UU video feedback totals` 为会话累计 RR、NACK 请求包数、PLI/FIR 消息数；
+  重复 NACK 会重复计数，不等于唯一丢包数或已完成重传数。
+  `UU video receiver report` 给出最近 RR 的 SSRC、累计丢包（可为负）、
+  区间丢包百分比、90kHz 时钟换算的 jitter_ms 和估算 RTT；report_age_ms
+  标识样本新鲜度。按 [RFC 3550 §6.4.1](https://www.rfc-editor.org/rfc/rfc3550.html#section-6.4.1)
+  处理 NTP 回绕，没有 SR、负差值或估算超过等于 30 秒时 RTT 显示 None；
+  小幅系统时钟跳变仍可能影响估算。无 RR 时不伪造接收质量为零丢包。
+  反馈日志在收到 RTCP 时触发，最多每 5 秒一组，不记录 SDP 或凭据。
+
 UU 滚轮保留小增量余数；一条控制消息换算出多格时，使用单份 HID 报告承载总格数，
 避免拆成连续的单格报告而改变输入节奏。当前仍按 120 单位转换一格；官方 Mac UU
 使用精确像素滚动，普通 USB 滚轮还会经过被控系统加速，因此两者并非像素等价。

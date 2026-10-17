@@ -9,6 +9,7 @@ mod metrics;
 mod peer;
 mod signaling;
 mod status;
+mod video_metrics;
 mod wire;
 
 pub use status::UuSessionStatus;

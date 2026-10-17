@@ -286,6 +286,7 @@ fn run(
                         .map(|(_, packet)| {
                             packet
                                 .map(|packet| {
+                                    let encoded_at = Instant::now();
                                     let data = Bytes::from(packet);
                                     let is_keyframe = match config.output_codec {
                                         VideoEncoderType::H264 => {
@@ -303,6 +304,7 @@ fn run(
                                             is_keyframe,
                                         );
                                     vec![EncodedVideoFrame {
+                                        encoded_at,
                                         data,
                                         pts_ms: pts,
                                         is_keyframe,

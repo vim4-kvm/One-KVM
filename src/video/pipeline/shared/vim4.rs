@@ -249,6 +249,7 @@ impl SharedVideoPipeline {
                 }
             });
             let frame = Arc::new(EncodedVideoFrame {
+                encoded_at: last_frame,
                 data,
                 is_keyframe,
                 pts_ms: self.pts_ms(),
