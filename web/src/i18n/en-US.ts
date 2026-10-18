@@ -1221,7 +1221,7 @@ export default {
       },
       copyCommand: 'Copy command',
       copyConfig: 'Copy config',
-      codexHint: 'Add to ~/.codex/config.toml and restart Codex. For non-interactive codex exec, also add default_tools_approval_mode = "approve" or input tools are rejected.',
+      codexHint: 'Run in a terminal, then restart Codex. For non-interactive codex exec, also add default_tools_approval_mode = "approve" to this section or input tools are rejected.',
       detail: {
         characters: '{count} characters',
         up: 'up {count}',
