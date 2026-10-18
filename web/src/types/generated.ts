@@ -301,6 +301,40 @@ export interface UuRemoteConfig {
 	device_name: string;
 	reverse_scroll?: boolean;
 	video_codec: 'auto' | 'h264' | 'h265';
+	terminal: UuTerminalConfig;
+}
+
+export interface UuTerminalConfig {
+	board: { enabled: boolean };
+	serial: { enabled: boolean; device: string; baud: number };
+	ssh: { enabled: boolean; host: string; port: number; user: string };
+}
+
+export interface UuTerminalSession {
+	id: number;
+	name: string;
+	target: 'picker' | 'board' | 'serial' | 'ssh';
+	detail: string;
+	attached: boolean;
+	created_at_ms: number;
+}
+
+export interface UuTerminalStatus {
+	peers: number;
+	sessions: UuTerminalSession[];
+	serial: {
+		usb_gadget_enabled: boolean;
+		devices: { id: string; label: string; present: boolean }[];
+		busy_session: number | null;
+	};
+	ssh: { public_key: string | null };
+}
+
+export interface UuSshTestResponse {
+	result: 'ok' | 'password_required' | 'unknown_host' | 'host_key_changed' | 'refused' | 'timeout' | 'dns' | 'unreachable' | 'not_configured' | 'error';
+	fingerprint?: string;
+	key_type?: string;
+	message?: string;
 }
 
 export enum RtspCodec {
@@ -632,6 +666,7 @@ export interface OtgNetworkStatus {
 }
 
 export interface OtgConfigResponse {
+	serial: { enabled: boolean };
 	hid: HidConfig;
 	msd: MsdConfig;
 	network: OtgNetworkConfig;
@@ -647,6 +682,7 @@ export interface OtgNetworkConfigUpdate {
 }
 
 export interface OtgConfigUpdate {
+	serial?: { enabled: boolean };
 	hid?: HidConfigUpdate;
 	msd?: MsdConfigUpdate;
 	network?: OtgNetworkConfigUpdate;

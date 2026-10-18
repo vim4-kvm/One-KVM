@@ -16,6 +16,9 @@ import type {
   OtgNetworkStatus,
   OtgConfigUpdate,
   OtgConfigResponse,
+  UuTerminalConfig,
+  UuTerminalStatus,
+  UuSshTestResponse,
   AtxConfig,
   AtxConfigUpdate,
   AtxDevices,
@@ -130,6 +133,7 @@ export const uacApi = {
 }
 
 export const otgConfigApi = {
+  get: () => request<OtgConfigResponse>('/config/otg'),
   update: (config: OtgConfigUpdate) =>
     request<OtgConfigResponse>('/config/otg', {
       method: 'PATCH',
@@ -403,9 +407,10 @@ export interface UuSessionStatus {
 }
 
 export interface UuRemoteStatusResponse {
-  config: { enabled: boolean; system: 'windows' | 'macos'; device_name: string; reverse_scroll: boolean | null; video_codec: 'auto' | 'h264' | 'h265' }
+  config: { enabled: boolean; system: 'windows' | 'macos'; device_name: string; reverse_scroll: boolean | null; video_codec: 'auto' | 'h264' | 'h265'; terminal: UuTerminalConfig }
   video?: { height: number; fps: number; bitrate_kbps: number } | null
   status: {
+    terminal: UuTerminalStatus
     state: UuRemoteServiceState
     error?: string | null
     logged_in: boolean
@@ -442,6 +447,12 @@ export const uuRemoteApi = {
   cancelLogin: () => request<UuLoginState>('/config/uu-remote/login', { method: 'DELETE' }),
 
   logout: () => request<UuRemoteStatusResponse>('/config/uu-remote/logout', { method: 'POST' }),
+  endSession: (id: number) => request<void>(`/config/uu-remote/terminal/sessions/${id}`, { method: 'DELETE' }),
+  testSsh: () => request<UuSshTestResponse>('/config/uu-remote/terminal/ssh/test', { method: 'POST' }),
+  trustSsh: (fingerprint: string) => request<void>('/config/uu-remote/terminal/ssh/trust', {
+    method: 'POST', body: JSON.stringify({ fingerprint }),
+  }),
+  removeSshHost: () => request<void>('/config/uu-remote/terminal/ssh/known-host', { method: 'DELETE' }),
 }
 
 export type WebConfig = WebConfigResponse
