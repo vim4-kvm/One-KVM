@@ -32,11 +32,11 @@ fn description(config: &SharedVideoPipelineConfig, source: Resolution, fps: u32)
         3
     };
     let filter = config.output.filter(source, fps);
-    Ok(format!("vfmcapsrc ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! {filter}\
+    Ok(format!("vfmcapsrc ! {}queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! {filter}\
         amlvenc name=encoder bitrate={} gop=0 framerate={} intra-refresh-rows={refresh_rows} min-force-key-unit-interval=250000000 ! \
         video/x-{codec} ! {codec}parse config-interval=-1 ! \
         video/x-{codec},stream-format=byte-stream,alignment=au ! appsink name=frames sync=false max-buffers=2",
-        config.bitrate_kbps().clamp(1000, 60000), fps))
+        crate::video::snapshot::vim4::BRANCH, config.bitrate_kbps().clamp(1000, 60000), fps))
 }
 
 impl SharedVideoPipeline {
@@ -109,7 +109,11 @@ impl SharedVideoPipeline {
     }
 
     fn run_vim4(&self, mut config: SharedVideoPipelineConfig) {
+        let mut idle_since = None;
         while self.running_flag.load(Ordering::Acquire) {
+            if self.snapshot_idle_expired(&mut idle_since) {
+                break;
+            }
             let Some(source) = crate::platform::vim4::signal() else {
                 self.notify_state(PipelineStateNotification::no_signal(
                     SignalStatus::NoSignal,
@@ -171,11 +175,20 @@ impl SharedVideoPipeline {
             .set_state(gst::State::Playing)
             .map_err(|e| error(&e))?;
         let mut last_frame = Instant::now();
+        let _snapshot = self
+            .snapshot_tap
+            .attach(&capture.0)
+            .map_err(|e| error(&e))?;
         let mut check = Instant::now();
         let mut rate_changes = 0;
         let mut frames = 0;
         let mut stats_time = Instant::now();
+        let mut idle_since = None;
         while self.running_flag.load(Ordering::Acquire) {
+            if self.snapshot_idle_expired(&mut idle_since) {
+                self.running_flag.store(false, Ordering::Release);
+                break;
+            }
             if self.keyframe_requested.swap(false, Ordering::AcqRel) {
                 sink.send_event(
                     gstreamer_video::UpstreamForceKeyUnitEvent::builder()
@@ -270,5 +283,14 @@ impl SharedVideoPipeline {
             }
         }
         Ok(())
+    }
+
+    fn snapshot_idle_expired(&self, since: &mut Option<Instant>) -> bool {
+        if self.subscriber_count() != 0 || self.snapshot_tap.active() != 0 {
+            *since = None;
+            return false;
+        }
+        since.get_or_insert_with(Instant::now).elapsed()
+            >= Duration::from_secs(AUTO_STOP_GRACE_PERIOD_SECS)
     }
 }

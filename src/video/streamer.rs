@@ -170,6 +170,8 @@ impl StreamerState {
 
 /// Video streamer service
 pub struct Streamer {
+    #[cfg(feature = "vim4")]
+    pub(crate) snapshot_tap: Arc<super::snapshot::vim4::RawTap>,
     config: RwLock<StreamerConfig>,
     mjpeg_handler: Arc<MjpegStreamHandler>,
     current_device: RwLock<Option<VideoDeviceInfo>>,
@@ -202,6 +204,8 @@ impl Streamer {
     /// Create a new streamer
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            #[cfg(feature = "vim4")]
+            snapshot_tap: Arc::new(Default::default()),
             config: RwLock::new(StreamerConfig::default()),
             mjpeg_handler: Arc::new(MjpegStreamHandler::new()),
             current_device: RwLock::new(None),
@@ -226,6 +230,8 @@ impl Streamer {
     /// Create with specific config
     pub fn with_config(config: StreamerConfig) -> Arc<Self> {
         Arc::new(Self {
+            #[cfg(feature = "vim4")]
+            snapshot_tap: Arc::new(Default::default()),
             config: RwLock::new(config),
             mjpeg_handler: Arc::new(MjpegStreamHandler::new()),
             current_device: RwLock::new(None),
@@ -302,6 +308,11 @@ impl Streamer {
     pub async fn current_video_config(&self) -> (PixelFormat, Resolution, u32) {
         let config = self.config.read().await;
         (config.format, config.resolution, config.fps)
+    }
+
+    #[cfg(feature = "vim4")]
+    pub(crate) async fn snapshot_output(&self) -> crate::platform::vim4::OutputSettings {
+        self.config.read().await.output
     }
 
     #[cfg(feature = "vim4")]
@@ -1555,6 +1566,8 @@ impl Streamer {
 impl Default for Streamer {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "vim4")]
+            snapshot_tap: Arc::new(Default::default()),
             config: RwLock::new(StreamerConfig::default()),
             mjpeg_handler: Arc::new(MjpegStreamHandler::new()),
             current_device: RwLock::new(None),
