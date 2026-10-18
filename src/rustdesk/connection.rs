@@ -1339,10 +1339,26 @@ impl Connection {
                     key: CanonicalKey::CapsLock,
                     modifiers: KeyboardModifiers::default(),
                 };
-                if let Err(e) = hid.send_keyboard(caps_down).await {
+                if let Err(e) = hid
+                    .send_keyboard_from(
+                        crate::hid::control::InputSource::Manual(
+                            crate::hid::control::ManualKind::RustDesk,
+                        ),
+                        caps_down,
+                    )
+                    .await
+                {
                     warn!("Failed to send CapsLock down: {}", e);
                 }
-                if let Err(e) = hid.send_keyboard(caps_up).await {
+                if let Err(e) = hid
+                    .send_keyboard_from(
+                        crate::hid::control::InputSource::Manual(
+                            crate::hid::control::ManualKind::RustDesk,
+                        ),
+                        caps_up,
+                    )
+                    .await
+                {
                     warn!("Failed to send CapsLock up: {}", e);
                 }
             }
@@ -1366,7 +1382,15 @@ impl Connection {
                         "Converted RustDesk key event"
                     );
 
-                    if let Err(e) = hid.send_keyboard(kb_event).await {
+                    if let Err(e) = hid
+                        .send_keyboard_from(
+                            crate::hid::control::InputSource::Manual(
+                                crate::hid::control::ManualKind::RustDesk,
+                            ),
+                            kb_event,
+                        )
+                        .await
+                    {
                         warn!("Failed to send keyboard event: {}", e);
                     }
                 }
@@ -1435,7 +1459,15 @@ impl Connection {
         let mouse_events = convert_mouse_event(event, self.screen_width, self.screen_height);
         if let Some(ref hid) = self.hid {
             for mouse_event in mouse_events {
-                if let Err(error) = hid.send_mouse(mouse_event).await {
+                if let Err(error) = hid
+                    .send_mouse_from(
+                        crate::hid::control::InputSource::Manual(
+                            crate::hid::control::ManualKind::RustDesk,
+                        ),
+                        mouse_event,
+                    )
+                    .await
+                {
                     warn!("Failed to send mouse event: {}", error);
                 }
             }

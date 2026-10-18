@@ -63,6 +63,24 @@ pub struct HidBackendRuntimeSnapshot {
 
 #[async_trait]
 pub trait HidBackend: Send + Sync {
+    /// Strict report writes used by MCP. Success means the backend accepted the
+    /// complete report; unlike manual input, timeout must not be treated as OK.
+    async fn write_keyboard_report(&self, _report: super::types::KeyboardReport) -> Result<()> {
+        Err(crate::error::AppError::BadRequest(
+            "Atomic keyboard reports are unavailable on this backend".into(),
+        ))
+    }
+    async fn write_absolute_report(
+        &self,
+        _buttons: u8,
+        _x: u16,
+        _y: u16,
+        _wheel: i8,
+    ) -> Result<()> {
+        Err(crate::error::AppError::BadRequest(
+            "Absolute reports are unavailable on this backend".into(),
+        ))
+    }
     async fn init(&self) -> Result<()>;
 
     async fn send_keyboard(&self, event: KeyboardEvent) -> Result<()>;

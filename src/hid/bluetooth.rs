@@ -91,6 +91,16 @@ impl HidBackend for BluetoothBackend {
         }));
         Ok(())
     }
+    async fn write_keyboard_report(&self, report: super::types::KeyboardReport) -> Result<()> {
+        let mut input = self.input.lock().await;
+        self.check(&mut input)?;
+        self.peripheral
+            .send(Report::Keyboard, report.to_bytes().to_vec())
+            .await
+            .map_err(error)?;
+        input.keyboard = report;
+        Ok(())
+    }
     async fn send_keyboard(&self, event: KeyboardEvent) -> Result<()> {
         let mut input = self.input.lock().await;
         self.check(&mut input)?;

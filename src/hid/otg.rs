@@ -875,6 +875,53 @@ impl HidBackend for OtgBackend {
         Ok(())
     }
 
+    async fn write_keyboard_report(&self, report: KeyboardReport) -> Result<()> {
+        if self.keyboard_path.is_none() {
+            return Err(AppError::BadRequest(
+                "USB keyboard is not enabled in One-KVM USB settings.".into(),
+            ));
+        }
+        self.ensure_device(DeviceType::Keyboard)?;
+        let mut dev = self.keyboard_dev.lock();
+        let file = dev
+            .as_mut()
+            .ok_or_else(|| AppError::BadRequest("Keyboard device not opened".into()))?;
+        if !self.write_with_timeout(file, &report.to_bytes())? {
+            return Err(AppError::BadRequest("Keyboard write timed out".into()));
+        }
+        *self.keyboard_state.lock() = report;
+        Ok(())
+    }
+
+    async fn write_absolute_report(&self, buttons: u8, x: u16, y: u16, wheel: i8) -> Result<()> {
+        if self.mouse_abs_path.is_none() {
+            return Err(AppError::BadRequest(
+                "Absolute mouse is not enabled in One-KVM USB settings.".into(),
+            ));
+        }
+        self.ensure_device(DeviceType::MouseAbsolute)?;
+        let mut dev = self.mouse_abs_dev.lock();
+        let file = dev
+            .as_mut()
+            .ok_or_else(|| AppError::BadRequest("Absolute mouse device not opened".into()))?;
+        let data = [
+            buttons,
+            x as u8,
+            (x >> 8) as u8,
+            y as u8,
+            (y >> 8) as u8,
+            wheel as u8,
+        ];
+        if !self.write_with_timeout(file, &data)? {
+            return Err(AppError::BadRequest(
+                "Absolute mouse write timed out".into(),
+            ));
+        }
+        *self.absolute_position.lock() = (x, y);
+        self.mouse_buttons.store(buttons, Ordering::Relaxed);
+        Ok(())
+    }
+
     async fn send_keyboard(&self, event: KeyboardEvent) -> Result<()> {
         let usb_key = event.key.to_hid_usage();
 

@@ -8,6 +8,7 @@ mod atx;
 mod common;
 mod computer_use;
 mod hid;
+mod mcp;
 mod otg_network;
 mod stream;
 mod terminal;
@@ -19,6 +20,7 @@ pub use atx::*;
 pub use common::*;
 pub use computer_use::*;
 pub use hid::*;
+pub use mcp::*;
 pub use otg_network::*;
 pub use stream::*;
 pub use terminal::*;
@@ -31,6 +33,7 @@ pub use web::*;
 #[serde(default)]
 #[derive(Default)]
 pub struct AppConfig {
+    pub mcp: McpConfig,
     pub recording: RecordingConfig,
     pub initialized: bool,
     pub auth: AuthConfig,

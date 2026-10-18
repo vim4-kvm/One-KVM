@@ -1,6 +1,7 @@
 pub mod config;
 pub mod devices;
 pub mod extensions;
+pub mod mcp;
 pub mod terminal;
 #[cfg(feature = "vim4")]
 pub mod vim4;

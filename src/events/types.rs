@@ -105,6 +105,8 @@ pub enum StreamKind {
 #[serde(tag = "event", content = "data")]
 #[allow(clippy::large_enum_variant)]
 pub enum SystemEvent {
+    #[serde(rename = "mcp.activity")]
+    McpActivity(crate::mcp::types::McpActivity),
     #[serde(rename = "stream.mode_switching")]
     StreamModeSwitching {
         transition_id: String,
@@ -225,6 +227,7 @@ pub enum SystemEvent {
 
 /// One entry per [`SystemEvent::event_name`]. `EventBus` builds `*.`-wildcard channels from the first segment; names without `.` (e.g. `error`) have no wildcard channel.
 pub(crate) const EXACT_EVENT_TOPICS: &[&str] = &[
+    "mcp.activity",
     "stream.mode_switching",
     "stream.state_changed",
     "stream.config_changing",
@@ -247,6 +250,7 @@ pub(crate) const EXACT_EVENT_TOPICS: &[&str] = &[
 impl SystemEvent {
     pub fn event_name(&self) -> &'static str {
         match self {
+            Self::McpActivity(_) => "mcp.activity",
             Self::StreamModeSwitching { .. } => "stream.mode_switching",
             Self::StreamStateChanged { .. } => "stream.state_changed",
             Self::StreamConfigChanging { .. } => "stream.config_changing",
@@ -302,6 +306,12 @@ mod tests {
         use std::collections::HashSet;
 
         let samples = vec![
+            SystemEvent::McpActivity(crate::mcp::types::McpActivity {
+                state: "idle".into(),
+                client: None,
+                tool: None,
+                since: String::new(),
+            }),
             SystemEvent::StreamModeSwitching {
                 transition_id: String::new(),
                 to_mode: String::new(),

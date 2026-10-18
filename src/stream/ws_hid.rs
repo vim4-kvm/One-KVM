@@ -202,17 +202,34 @@ impl WsHidHandler {
 
         match event {
             HidChannelEvent::Keyboard(kb_event) => {
-                hid.send_keyboard(kb_event)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                hid.send_keyboard_from(
+                    crate::hid::control::InputSource::Manual(
+                        crate::hid::control::ManualKind::WebSocket,
+                    ),
+                    kb_event,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
             }
             HidChannelEvent::Mouse(ms_event) => {
-                hid.send_mouse(ms_event).await.map_err(|e| e.to_string())?;
+                hid.send_mouse_from(
+                    crate::hid::control::InputSource::Manual(
+                        crate::hid::control::ManualKind::WebSocket,
+                    ),
+                    ms_event,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
             }
             HidChannelEvent::Consumer(consumer_event) => {
-                hid.send_consumer(consumer_event)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                hid.send_consumer_from(
+                    crate::hid::control::InputSource::Manual(
+                        crate::hid::control::ManualKind::WebSocket,
+                    ),
+                    consumer_event,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
             }
         }
 

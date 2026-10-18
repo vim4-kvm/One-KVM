@@ -6,10 +6,13 @@ mod bluetooth;
 pub mod ch9329;
 mod ch9329_proto;
 pub mod consumer;
+pub mod control;
 pub mod datachannel;
 mod factory;
 pub mod keyboard;
 mod macos_drag;
+#[cfg(test)]
+mod mcp_tests;
 #[cfg(unix)]
 pub mod otg;
 #[cfg(unix)]
@@ -116,6 +119,15 @@ const HID_EVENT_SEND_TIMEOUT_MS: u64 = 30;
 
 #[derive(Debug)]
 enum QueuedHidEvent {
+    EndManual(control::ManualKind),
+    Barrier,
+    Report(types::KeyboardReport),
+    Absolute {
+        buttons: u8,
+        x: u16,
+        y: u16,
+        wheel: i8,
+    },
     Keyboard(KeyboardEvent),
     Mouse(MouseEvent),
     Consumer(ConsumerEvent),
@@ -124,6 +136,8 @@ enum QueuedHidEvent {
 
 struct PendingHidEvent {
     event: QueuedHidEvent,
+    source: control::InputSource,
+    receipt: Option<tokio::sync::oneshot::Sender<std::result::Result<(), String>>>,
     queued_at: Instant,
 }
 
@@ -137,6 +151,7 @@ struct HidQueueMetrics {
 }
 
 pub struct HidController {
+    pub input_control: Arc<control::InputControl>,
     backend_factory: HidBackendFactory,
     backend: Arc<RwLock<Option<Arc<dyn HidBackend>>>>,
     backend_type: Arc<RwLock<HidBackendType>>,
@@ -160,6 +175,7 @@ impl HidController {
     pub fn new(backend_type: HidBackendType, otg_service: Option<Arc<OtgService>>) -> Self {
         let (hid_tx, hid_rx) = mpsc::channel(HID_EVENT_QUEUE_CAPACITY);
         Self {
+            input_control: Arc::new(control::InputControl::default()),
             backend: Arc::new(RwLock::new(None)),
             backend_factory: HidBackendFactory::new(otg_service),
             backend_type: Arc::new(RwLock::new(backend_type.clone())),
@@ -183,6 +199,7 @@ impl HidController {
     pub fn new(backend_type: HidBackendType) -> Self {
         let (hid_tx, hid_rx) = mpsc::channel(HID_EVENT_QUEUE_CAPACITY);
         Self {
+            input_control: Arc::new(control::InputControl::default()),
             backend: Arc::new(RwLock::new(None)),
             backend_factory: HidBackendFactory::new(),
             backend_type: Arc::new(RwLock::new(backend_type.clone())),
@@ -247,6 +264,7 @@ impl HidController {
 
     pub async fn shutdown(&self) -> Result<()> {
         info!("Shutting down HID controller");
+        self.cancel_mcp().await?;
         self.stop_runtime_worker().await;
 
         if let Some(backend) = self.backend.write().await.take() {
@@ -295,31 +313,67 @@ impl HidController {
     }
 
     pub async fn send_keyboard(&self, event: KeyboardEvent) -> Result<()> {
+        self.send_keyboard_from(
+            control::InputSource::Manual(control::ManualKind::WebSocket),
+            event,
+        )
+        .await
+    }
+    pub async fn send_keyboard_from(
+        &self,
+        source: control::InputSource,
+        event: KeyboardEvent,
+    ) -> Result<()> {
         if !self.backend_available.load(Ordering::Acquire) {
             return Err(AppError::BadRequest(
                 "HID backend not available".to_string(),
             ));
         }
-        self.enqueue_event(QueuedHidEvent::Keyboard(event)).await
+        self.enqueue_from(QueuedHidEvent::Keyboard(event), source, None)
+            .await
     }
 
     pub async fn send_mouse(&self, event: MouseEvent) -> Result<()> {
+        self.send_mouse_from(
+            control::InputSource::Manual(control::ManualKind::WebSocket),
+            event,
+        )
+        .await
+    }
+    pub async fn send_mouse_from(
+        &self,
+        source: control::InputSource,
+        event: MouseEvent,
+    ) -> Result<()> {
         if !self.backend_available.load(Ordering::Acquire) {
             return Err(AppError::BadRequest(
                 "HID backend not available".to_string(),
             ));
         }
 
-        self.enqueue_event(QueuedHidEvent::Mouse(event)).await
+        self.enqueue_from(QueuedHidEvent::Mouse(event), source, None)
+            .await
     }
 
     pub async fn send_consumer(&self, event: ConsumerEvent) -> Result<()> {
+        self.send_consumer_from(
+            control::InputSource::Manual(control::ManualKind::WebSocket),
+            event,
+        )
+        .await
+    }
+    pub async fn send_consumer_from(
+        &self,
+        source: control::InputSource,
+        event: ConsumerEvent,
+    ) -> Result<()> {
         if !self.backend_available.load(Ordering::Acquire) {
             return Err(AppError::BadRequest(
                 "HID backend not available".to_string(),
             ));
         }
-        self.enqueue_event(QueuedHidEvent::Consumer(event)).await
+        self.enqueue_from(QueuedHidEvent::Consumer(event), source, None)
+            .await
     }
 
     pub async fn bluetooth_status(&self) -> Result<serde_json::Value> {
@@ -346,6 +400,9 @@ impl HidController {
             return Ok(());
         }
         self.enqueue_event(QueuedHidEvent::Reset).await
+    }
+    pub async fn end_manual_input(&self, kind: control::ManualKind) -> Result<()> {
+        self.enqueue_event(QueuedHidEvent::EndManual(kind)).await
     }
 
     pub async fn is_available(&self) -> bool {
@@ -518,6 +575,7 @@ impl HidController {
         let backend = self.backend.clone();
         let metrics = self.queue_metrics.clone();
         let reset_requested = self.reset_requested.clone();
+        let control = self.input_control.clone();
 
         let handle = tokio::spawn(async move {
             let mut rx = rx;
@@ -525,8 +583,18 @@ impl HidController {
             let mut processed = 0u64;
             let mut max_queue_us = 0u128;
             let mut max_dispatch_us = 0u128;
+            let mut owned = McpHeld::default();
             loop {
-                let slot = match rx.recv().await {
+                let slot = match tokio::select! {
+                    biased;
+                    _ = control.wake.notified() => { owned.release_if_cancelled(&control, &backend).await; continue; }
+                    _ = tokio::time::sleep_until(owned.deadline), if owned.buttons != 0 => {
+                        control.cancel(control::HOLD_TIMEOUT);
+                        owned.release_if_cancelled(&control, &backend).await;
+                        continue;
+                    }
+                    slot = rx.recv() => slot,
+                } {
                     Some(slot) => slot,
                     None => break,
                 };
@@ -539,12 +607,85 @@ impl HidController {
                     while let Ok(slot) = rx.try_recv() {
                         slot.lock().take();
                     }
-                    process_hid_event(QueuedHidEvent::Reset, &backend).await;
+                    control.reset();
+                    owned = McpHeld::default();
+                    let _ = process_hid_event(QueuedHidEvent::Reset, &backend).await;
                     continue;
                 }
                 max_queue_us = max_queue_us.max(pending.queued_at.elapsed().as_micros());
                 let started = Instant::now();
-                process_hid_event(pending.event, &backend).await;
+                if let control::InputSource::Manual(kind) = pending.source {
+                    match &pending.event {
+                        QueuedHidEvent::Keyboard(e) => control.manual_keyboard(kind, e),
+                        QueuedHidEvent::Mouse(e) => control.manual_mouse(kind, e),
+                        QueuedHidEvent::Consumer(_) => control.manual_consumer(),
+                        _ => {}
+                    }
+                }
+                owned.release_if_cancelled(&control, &backend).await;
+                if let control::InputSource::Mcp(generation) = pending.source {
+                    if !control.valid(generation) {
+                        if let Some(tx) = pending.receipt {
+                            let _ = tx.send(Err(control.error()));
+                        }
+                        continue;
+                    }
+                    owned.generation = generation;
+                    // Track attempted reports too: a failed write can be partially
+                    // delivered and still needs an all-up before relinquishing MCP.
+                    match &pending.event {
+                        QueuedHidEvent::Report(r) => {
+                            owned.keyboard |= r.keys != [0; 6] || r.modifiers != 0
+                        }
+                        QueuedHidEvent::Absolute { buttons, x, y, .. } => {
+                            if owned.buttons == 0 && *buttons != 0 {
+                                owned.deadline =
+                                    tokio::time::Instant::now() + Duration::from_secs(30);
+                            }
+                            owned.buttons |= *buttons;
+                            owned.position = (*x, *y);
+                        }
+                        _ => {}
+                    }
+                }
+                let position = match &pending.event {
+                    QueuedHidEvent::Mouse(e) if e.event_type == MouseEventType::MoveAbs => {
+                        Some((e.x.clamp(0, 32767), e.y.clamp(0, 32767)))
+                    }
+                    QueuedHidEvent::Absolute { x, y, .. } => Some((*x as i32, *y as i32)),
+                    QueuedHidEvent::Reset => {
+                        control.reset();
+                        None
+                    }
+                    QueuedHidEvent::EndManual(kind) => {
+                        control.end_manual(*kind);
+                        None
+                    }
+                    _ => None,
+                };
+                let released_keyboard = matches!(&pending.event, QueuedHidEvent::Report(r) if r.keys == [0;6] && r.modifiers == 0);
+                let sent_buttons = match &pending.event {
+                    QueuedHidEvent::Absolute { buttons, .. } => Some(*buttons),
+                    _ => None,
+                };
+                let result = process_hid_event(pending.event, &backend).await;
+                if result.is_ok() {
+                    if released_keyboard {
+                        owned.keyboard = false;
+                    }
+                    if let Some(buttons) = sent_buttons {
+                        owned.buttons = buttons;
+                        control.set_mcp_buttons(owned.generation, buttons);
+                    }
+                }
+                if result.is_ok() {
+                    if let Some((x, y)) = position {
+                        control.sent_cursor(x, y);
+                    }
+                }
+                if let Some(tx) = pending.receipt {
+                    let _ = tx.send(result.map_err(|e| format!("USB HID write failed: {e}")));
+                }
                 max_dispatch_us = max_dispatch_us.max(started.elapsed().as_micros());
                 processed += 1;
                 if report_at.elapsed() >= Duration::from_secs(5) {
@@ -610,12 +751,26 @@ impl HidController {
     }
 
     async fn enqueue_event(&self, event: QueuedHidEvent) -> Result<()> {
+        self.enqueue_from(event, control::InputSource::System, None)
+            .await
+    }
+
+    async fn enqueue_from(
+        &self,
+        event: QueuedHidEvent,
+        source: control::InputSource,
+        receipt: Option<tokio::sync::oneshot::Sender<std::result::Result<(), String>>>,
+    ) -> Result<()> {
+        let mcp_owned = matches!(source, control::InputSource::Mcp(_))
+            || matches!(&event, QueuedHidEvent::Barrier);
         self.queue_metrics.received.fetch_add(1, Ordering::Relaxed);
         let mut tail = self.queue_tail.lock().await;
         if let (Some(slot), QueuedHidEvent::Mouse(next)) = (tail.as_ref(), &event) {
             let mut pending = slot.lock();
             if let Some(PendingHidEvent {
                 event: QueuedHidEvent::Mouse(previous),
+                source: previous_source,
+                receipt: previous_receipt,
                 ..
             }) = pending.as_mut()
             {
@@ -624,6 +779,9 @@ impl HidController {
                 // clicks, releases, scrolling and mode changes are ordering barriers.
                 if previous.event_type == MouseEventType::MoveAbs
                     && next.event_type == MouseEventType::MoveAbs
+                    && *previous_source == source
+                    && previous_receipt.is_none()
+                    && receipt.is_none()
                 {
                     *previous = next.clone();
                     self.queue_metrics.coalesced.fetch_add(1, Ordering::Relaxed);
@@ -634,6 +792,8 @@ impl HidController {
         *tail = None;
         let slot = Arc::new(parking_lot::Mutex::new(Some(PendingHidEvent {
             event,
+            source,
+            receipt,
             queued_at: Instant::now(),
         })));
         match self.hid_tx.try_send(slot.clone()) {
@@ -655,9 +815,13 @@ impl HidController {
                     }
                     Ok(Err(_)) => Err(AppError::BadRequest("HID event queue closed".into())),
                     Err(_) => {
-                        self.reset_requested.store(true, Ordering::Release);
+                        if mcp_owned {
+                            self.input_control.cancel(control::PREEMPTED);
+                        } else {
+                            self.reset_requested.store(true, Ordering::Release);
+                        }
                         self.queue_metrics.overflow.fetch_add(1, Ordering::Relaxed);
-                        warn!("HID event queue full; scheduling all-input release");
+                        warn!("HID event queue full; scheduling input release");
                         Err(AppError::ServiceUnavailable(
                             "HID input queue full; input state will be reset".into(),
                         ))
@@ -668,6 +832,75 @@ impl HidController {
                 Err(AppError::BadRequest("HID event queue closed".to_string()))
             }
         }
+    }
+
+    pub async fn mcp_keyboard(
+        &self,
+        generation: u64,
+        report: types::KeyboardReport,
+    ) -> std::result::Result<(), String> {
+        self.mcp_report(generation, QueuedHidEvent::Report(report))
+            .await
+    }
+    pub async fn mcp_mouse(
+        &self,
+        generation: u64,
+        buttons: u8,
+        x: u16,
+        y: u16,
+        wheel: i8,
+    ) -> std::result::Result<(), String> {
+        self.mcp_report(
+            generation,
+            QueuedHidEvent::Absolute {
+                buttons,
+                x,
+                y,
+                wheel,
+            },
+        )
+        .await
+    }
+    async fn mcp_report(
+        &self,
+        generation: u64,
+        event: QueuedHidEvent,
+    ) -> std::result::Result<(), String> {
+        if !self.input_control.valid(generation) {
+            return Err(self.input_control.error());
+        }
+        if !self.backend_available.load(Ordering::Acquire) {
+            return Err("USB HID write failed: HID backend not available".into());
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.enqueue_from(event, control::InputSource::Mcp(generation), Some(tx))
+            .await
+            .map_err(|e| format!("USB HID write failed: {e}"))?;
+        let result = rx
+            .await
+            .map_err(|_| "USB HID write failed: report discarded".to_owned())?;
+        if !self.input_control.valid(generation) {
+            return Err(self.input_control.error());
+        }
+        result
+    }
+    /// Wait for the worker to release MCP ownership before returning to settings
+    /// or shutting down the backend. Manual state never participates in cleanup.
+    pub async fn cancel_mcp(&self) -> Result<()> {
+        self.input_control.cancel(control::DISABLED);
+        if !self.backend_available.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.enqueue_from(
+            QueuedHidEvent::Barrier,
+            control::InputSource::System,
+            Some(tx),
+        )
+        .await?;
+        rx.await
+            .map_err(|_| AppError::Internal("HID cleanup worker stopped".into()))?
+            .map_err(AppError::Internal)
     }
 }
 
@@ -690,17 +923,32 @@ async fn apply_backend_runtime_state(
 async fn process_hid_event(
     event: QueuedHidEvent,
     backend: &Arc<RwLock<Option<Arc<dyn HidBackend>>>>,
-) {
+) -> Result<()> {
     let backend_opt = backend.read().await.clone();
     let backend = match backend_opt {
         Some(b) => b,
-        None => return,
+        None => return Err(AppError::BadRequest("HID backend not available".into())),
     };
 
     let backend_for_send = backend.clone();
     let result = tokio::task::spawn_blocking(move || {
         futures::executor::block_on(async move {
             match event {
+                QueuedHidEvent::Barrier => Ok(()),
+                QueuedHidEvent::EndManual(_) => Ok(()),
+                QueuedHidEvent::Report(report) => {
+                    backend_for_send.write_keyboard_report(report).await
+                }
+                QueuedHidEvent::Absolute {
+                    buttons,
+                    x,
+                    y,
+                    wheel,
+                } => {
+                    backend_for_send
+                        .write_absolute_report(buttons, x, y, wheel)
+                        .await
+                }
                 QueuedHidEvent::Keyboard(ev) => backend_for_send.send_keyboard(ev).await,
                 QueuedHidEvent::Mouse(ev) => backend_for_send.send_mouse(ev).await,
                 QueuedHidEvent::Consumer(ev) => backend_for_send.send_consumer(ev).await,
@@ -712,13 +960,58 @@ async fn process_hid_event(
 
     let result = match result {
         Ok(r) => r,
-        Err(_) => return,
+        Err(_) => return Err(AppError::Internal("HID worker failed".into())),
     };
 
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            warn!("HID event processing failed: {}", e);
+    if let Err(e) = &result {
+        warn!("HID event processing failed: {}", e);
+    }
+    result
+}
+
+struct McpHeld {
+    generation: u64,
+    keyboard: bool,
+    buttons: u8,
+    position: (u16, u16),
+    deadline: tokio::time::Instant,
+}
+impl Default for McpHeld {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            keyboard: false,
+            buttons: 0,
+            position: (0, 0),
+            deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+        }
+    }
+}
+impl McpHeld {
+    async fn release_if_cancelled(
+        &mut self,
+        control: &control::InputControl,
+        backend: &Arc<RwLock<Option<Arc<dyn HidBackend>>>>,
+    ) {
+        if control.valid(self.generation) {
+            return;
+        }
+        if self.keyboard {
+            let _ = process_hid_event(QueuedHidEvent::Report(Default::default()), backend).await;
+            self.keyboard = false;
+        }
+        if self.buttons != 0 {
+            let _ = process_hid_event(
+                QueuedHidEvent::Absolute {
+                    buttons: 0,
+                    x: self.position.0,
+                    y: self.position.1,
+                    wheel: 0,
+                },
+                backend,
+            )
+            .await;
+            self.buttons = 0;
         }
     }
 }

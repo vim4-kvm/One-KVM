@@ -400,6 +400,29 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             get(handlers::recording::download).delete(handlers::recording::delete),
         );
 
+    let mcp_management = Router::new()
+        .route("/mcp/status", get(handlers::mcp::status))
+        .route("/mcp/config", axum::routing::patch(handlers::mcp::config))
+        .route("/mcp/key", get(handlers::mcp::key))
+        .route("/mcp/key/regenerate", post(handlers::mcp::regenerate))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        ));
+    let mcp_transport = Router::new()
+        .route(
+            "/api/mcp",
+            axum::routing::any(crate::mcp::server::transport),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::mcp::auth::authenticate,
+        ))
+        .with_state(state.clone());
     let api_routes = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
@@ -409,7 +432,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
-        ));
+        ))
+        .merge(mcp_management);
 
     // Static file serving
     let static_routes = super::static_files::static_file_router();
@@ -420,7 +444,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .merge(static_routes)
         .layer(TraceLayer::new_for_http())
         .layer(cors)
-        .with_state(state);
+        .with_state(state)
+        .merge(mcp_transport);
 
     match redfish_router {
         Some(rf) => main_router.merge(rf),

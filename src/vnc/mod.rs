@@ -283,13 +283,13 @@ async fn handle_client(
                     RfbInputEvent::Disconnected => break,
                     RfbInputEvent::Key(key) => {
                         if let Some(event) = client.key_event_to_hid(key) {
-                            hid.send_keyboard(event).await?;
+                            hid.send_keyboard_from(crate::hid::control::InputSource::Manual(crate::hid::control::ManualKind::Vnc), event).await?;
                         }
                     }
                     RfbInputEvent::Pointer(pointer) => {
                         let (width, height) = client.framebuffer_size();
                         for event in rfb::pointer_event_to_hid(pointer, width, height) {
-                            hid.send_mouse(event).await?;
+                            hid.send_mouse_from(crate::hid::control::InputSource::Manual(crate::hid::control::ManualKind::Vnc), event).await?;
                         }
                     }
                     RfbInputEvent::SetEncodings { encoding_enabled, resumed } => {

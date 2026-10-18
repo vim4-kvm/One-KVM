@@ -1243,6 +1243,22 @@ impl HidBackend for Ch9329Backend {
         }
     }
 
+    async fn write_keyboard_report(&self, report: KeyboardReport) -> Result<()> {
+        self.send_keyboard_report(&report)?;
+        *self.keyboard_state.lock() = report;
+        Ok(())
+    }
+    async fn write_absolute_report(&self, buttons: u8, x: u16, y: u16, wheel: i8) -> Result<()> {
+        // CH9329 uses 0..4095 on the wire; the controller contract is 0..32767.
+        let x = ((x as u32 * 4095 + 16383) / 32767) as u16;
+        let y = ((y as u32 * 4095 + 16383) / 32767) as u16;
+        self.send_mouse_absolute(buttons, x, y, wheel)?;
+        self.last_abs_x.store(x, Ordering::Relaxed);
+        self.last_abs_y.store(y, Ordering::Relaxed);
+        self.relative_mouse_active.store(false, Ordering::Relaxed);
+        self.mouse_buttons.store(buttons, Ordering::Relaxed);
+        Ok(())
+    }
     async fn send_keyboard(&self, event: KeyboardEvent) -> Result<()> {
         let usb_key = event.key.to_hid_usage();
 

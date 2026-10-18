@@ -187,6 +187,11 @@ impl ComputerUseManager {
             ));
         }
 
+        let input_guard = self
+            .hid
+            .input_control
+            .start_cua()
+            .map_err(AppError::BadRequest)?;
         if let Some(handle) = state.task.take() {
             handle.abort();
         }
@@ -221,6 +226,7 @@ impl ComputerUseManager {
         let prompt = req.prompt.trim().to_string();
         let model = config.model.clone();
         let handle = tokio::spawn(async move {
+            let _input_guard = input_guard;
             manager
                 .run_loop(
                     prompt,
@@ -574,7 +580,10 @@ impl ComputerUseManager {
                             return Err(stopped_error());
                         }
                         self.hid
-                            .send_mouse(MouseEvent::scroll(if ticks > 0 { 1 } else { -1 }))
+                            .send_mouse_from(
+                                crate::hid::control::InputSource::ComputerUse,
+                                MouseEvent::scroll(if ticks > 0 { 1 } else { -1 }),
+                            )
                             .await?;
                     }
                 }
@@ -596,7 +605,10 @@ impl ComputerUseManager {
         let hid_y = ((y.min(height.saturating_sub(1)) as f64 / height.max(1) as f64) * 32767.0)
             .round() as i32;
         self.hid
-            .send_mouse(MouseEvent::move_abs(hid_x, hid_y))
+            .send_mouse_from(
+                crate::hid::control::InputSource::ComputerUse,
+                MouseEvent::move_abs(hid_x, hid_y),
+            )
             .await
     }
 
@@ -611,7 +623,9 @@ impl ComputerUseManager {
         } else {
             MouseEvent::button_up(button)
         };
-        self.hid.send_mouse(event).await
+        self.hid
+            .send_mouse_from(crate::hid::control::InputSource::ComputerUse, event)
+            .await
     }
 
     async fn type_text(&self, text: &str, cancel_rx: &mut watch::Receiver<bool>) -> Result<()> {
@@ -654,19 +668,25 @@ impl ComputerUseManager {
         cancel_rx: &mut watch::Receiver<bool>,
     ) -> Result<()> {
         self.hid
-            .send_keyboard(KeyboardEvent {
-                event_type: KeyEventType::Down,
-                key,
-                modifiers: mods,
-            })
+            .send_keyboard_from(
+                crate::hid::control::InputSource::ComputerUse,
+                KeyboardEvent {
+                    event_type: KeyEventType::Down,
+                    key,
+                    modifiers: mods,
+                },
+            )
             .await?;
         let key_result = sleep_or_cancel(KEY_DELAY, cancel_rx).await;
         self.hid
-            .send_keyboard(KeyboardEvent {
-                event_type: KeyEventType::Up,
-                key,
-                modifiers: KeyboardModifiers::default(),
-            })
+            .send_keyboard_from(
+                crate::hid::control::InputSource::ComputerUse,
+                KeyboardEvent {
+                    event_type: KeyEventType::Up,
+                    key,
+                    modifiers: KeyboardModifiers::default(),
+                },
+            )
             .await?;
         key_result
     }

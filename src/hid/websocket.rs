@@ -105,21 +105,36 @@ async fn handle_binary_message(data: &[u8], state: &AppState) -> Result<(), Stri
         HidChannelEvent::Keyboard(kb_event) => {
             state
                 .hid
-                .send_keyboard(kb_event)
+                .send_keyboard_from(
+                    crate::hid::control::InputSource::Manual(
+                        crate::hid::control::ManualKind::WebSocket,
+                    ),
+                    kb_event,
+                )
                 .await
                 .map_err(|e| e.to_string())?;
         }
         HidChannelEvent::Mouse(ms_event) => {
             state
                 .hid
-                .send_mouse(ms_event)
+                .send_mouse_from(
+                    crate::hid::control::InputSource::Manual(
+                        crate::hid::control::ManualKind::WebSocket,
+                    ),
+                    ms_event,
+                )
                 .await
                 .map_err(|e| e.to_string())?;
         }
         HidChannelEvent::Consumer(consumer_event) => {
             state
                 .hid
-                .send_consumer(consumer_event)
+                .send_consumer_from(
+                    crate::hid::control::InputSource::Manual(
+                        crate::hid::control::ManualKind::WebSocket,
+                    ),
+                    consumer_event,
+                )
                 .await
                 .map_err(|e| e.to_string())?;
         }

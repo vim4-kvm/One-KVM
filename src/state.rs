@@ -64,6 +64,8 @@ impl ConfigApplyLocks {
 
 /// Shared Axum/App state: video flows through [`VideoStreamManager`]; WebRTC SDP/ICE/sessions on [`WebRtcStreamer`].
 pub struct AppState {
+    pub mcp: Arc<crate::mcp::McpService>,
+    pub snapshot: Arc<crate::video::snapshot::SnapshotService>,
     #[cfg(feature = "vim4")]
     pub recording: Arc<crate::recording::Recorder>,
     pub db: DatabasePool,
@@ -144,6 +146,15 @@ impl AppState {
         );
 
         Arc::new(Self {
+            mcp: crate::mcp::McpService::new(
+                config.clone(),
+                hid.clone(),
+                &data_dir,
+                events.clone(),
+            ),
+            snapshot: Arc::new(crate::video::snapshot::SnapshotService::new(
+                stream_manager.clone(),
+            )),
             #[cfg(feature = "vim4")]
             recording: Arc::new(crate::recording::Recorder::with_config(
                 data_dir.join("recordings"),

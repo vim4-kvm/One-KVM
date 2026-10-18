@@ -217,7 +217,9 @@ impl ApplicationRuntime {
     }
 
     pub fn router(&self) -> axum::Router {
-        crate::web::create_router(self.state.clone())
+        crate::web::create_router(self.state.clone()).layer(axum::Extension(
+            crate::mcp::auth::ListenerHttps(self.config.web.https_enabled),
+        ))
     }
 
     pub async fn shutdown(&mut self) {

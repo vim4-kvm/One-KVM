@@ -508,17 +508,41 @@ impl UniversalSession {
                             if let Some(event) = parse_hid_message(&msg.data) {
                                 match event {
                                     HidChannelEvent::Keyboard(kb_event) => {
-                                        if let Err(e) = hid.send_keyboard(kb_event).await {
+                                        if let Err(e) = hid
+                                            .send_keyboard_from(
+                                                crate::hid::control::InputSource::Manual(
+                                                    crate::hid::control::ManualKind::DataChannel,
+                                                ),
+                                                kb_event,
+                                            )
+                                            .await
+                                        {
                                             debug!("Failed to send keyboard event: {}", e);
                                         }
                                     }
                                     HidChannelEvent::Mouse(ms_event) => {
-                                        if let Err(e) = hid.send_mouse(ms_event).await {
+                                        if let Err(e) = hid
+                                            .send_mouse_from(
+                                                crate::hid::control::InputSource::Manual(
+                                                    crate::hid::control::ManualKind::DataChannel,
+                                                ),
+                                                ms_event,
+                                            )
+                                            .await
+                                        {
                                             debug!("Failed to send mouse event: {}", e);
                                         }
                                     }
                                     HidChannelEvent::Consumer(consumer_event) => {
-                                        if let Err(e) = hid.send_consumer(consumer_event).await {
+                                        if let Err(e) = hid
+                                            .send_consumer_from(
+                                                crate::hid::control::InputSource::Manual(
+                                                    crate::hid::control::ManualKind::DataChannel,
+                                                ),
+                                                consumer_event,
+                                            )
+                                            .await
+                                        {
                                             debug!("Failed to send consumer event: {}", e);
                                         }
                                     }

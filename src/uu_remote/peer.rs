@@ -392,14 +392,24 @@ impl Shared {
         self.sequence.fetch_add(1, Ordering::Relaxed)
     }
 
-    async fn send_hid(&self, actions: Vec<HidAction>) {
+    async fn send_hid(&self, actions: Vec<HidAction>, source: crate::hid::control::InputSource) {
         for action in actions {
             let result = match action {
-                HidAction::Keyboard(event) => self.deps.hid.send_keyboard(event).await,
-                HidAction::Mouse(event) => self.deps.hid.send_mouse(event).await,
+                HidAction::Keyboard(event) => self.deps.hid.send_keyboard_from(source, event).await,
+                HidAction::Mouse(event) => self.deps.hid.send_mouse_from(source, event).await,
             };
             if let Err(e) = result {
                 debug!("UU input not delivered: {e}");
+            }
+        }
+        if source == crate::hid::control::InputSource::System {
+            if let Err(e) = self
+                .deps
+                .hid
+                .end_manual_input(crate::hid::control::ManualKind::Uu)
+                .await
+            {
+                debug!("UU input cleanup not delivered: {e}");
             }
         }
     }
@@ -408,8 +418,16 @@ impl Shared {
         if self.terminal {
             return;
         }
+        let source = if matches!(
+            &event,
+            SessionInputEvent::Disconnected | SessionInputEvent::Close
+        ) {
+            crate::hid::control::InputSource::System
+        } else {
+            crate::hid::control::InputSource::Manual(crate::hid::control::ManualKind::Uu)
+        };
         self.input
-            .update(event, |actions| self.send_hid(actions))
+            .update(event, |actions| self.send_hid(actions, source))
             .await;
     }
 }

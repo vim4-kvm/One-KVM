@@ -1,0 +1,325 @@
+use super::*;
+use axum::http::StatusCode;
+use serde_json::{json, Value};
+
+async fn state(data: &std::path::Path) -> Arc<crate::state::AppState> {
+    use crate::{
+        audio::AudioController,
+        auth::*,
+        computer_use::ComputerUseManager,
+        extensions::ExtensionManager,
+        hid::HidBackendType,
+        otg::OtgService,
+        update::UpdateService,
+        video::{Streamer, VideoStreamManager},
+        webrtc::WebRtcStreamer,
+    };
+    let db = crate::db::open_database_pool(data).await.unwrap();
+    let config = ConfigStore::new(db.clone_pool());
+    config.load().await.unwrap();
+    let hid = Arc::new(HidController::new(HidBackendType::None, None));
+    let webrtc = WebRtcStreamer::new();
+    let stream = VideoStreamManager::with_webrtc_streamer(Streamer::new(), webrtc.clone());
+    crate::state::AppState::new(
+        db.clone(),
+        config.clone(),
+        SessionStore::new(3600),
+        UserStore::new(db.clone_pool()),
+        TwoFactorService::new(db.clone_pool()),
+        Arc::new(OtgService::new()),
+        stream,
+        webrtc,
+        hid.clone(),
+        ComputerUseManager::new(config, hid),
+        None,
+        None,
+        Arc::new(AudioController::default()),
+        Arc::new(ExtensionManager::new()),
+        Arc::new(EventBus::new()),
+        Arc::new(UpdateService::new()),
+        tokio::sync::broadcast::channel(1).0,
+        data.to_owned(),
+    )
+}
+
+#[tokio::test]
+async fn protocol_and_credentials_are_isolated_from_web_sessions() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = state(temp.path()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let base = format!("http://{address}/api");
+    // The listening scheme can differ from persisted settings (CLI overrides).
+    state
+        .config
+        .update(|c| c.web.https_enabled = true)
+        .await
+        .unwrap();
+    let router =
+        crate::web::create_router(state.clone()).layer(axum::Extension(auth::ListenerHttps(false)));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+    let endpoint = format!("{base}/mcp");
+    assert_eq!(
+        client.post(&endpoint).send().await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    let session = state.sessions.create("test-user").await.unwrap();
+    let key_url = format!("{endpoint}/key");
+    let response = client
+        .get(&key_url)
+        .bearer_auth(&session.id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let key = response.json::<Value>().await.unwrap()["api_key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let response = client
+        .patch(format!("{endpoint}/config"))
+        .bearer_auth(&session.id)
+        .json(&json!({"enabled":true}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .bearer_auth(&key)
+            .header("Origin", format!("http://{address}"))
+            .json(&json!({"jsonrpc":"2.0","id":0,"method":"ping"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let status: Value = response.json().await.unwrap();
+    assert!(!status.to_string().contains(&key));
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .header("Cookie", format!("one_kvm_session={}", session.id))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .get(&key_url)
+            .bearer_auth(&key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/config"))
+            .bearer_auth(&key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    for version in ["2025-11-25", "2025-06-18", "2025-03-26", "unknown"] {
+        let response:Value = client.post(&endpoint).bearer_auth(&key).json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":version,"clientInfo":{"name":"test-client"}}})).send().await.unwrap().json().await.unwrap();
+        assert_eq!(
+            response["result"]["protocolVersion"],
+            if version == "unknown" {
+                "2025-11-25"
+            } else {
+                version
+            }
+        );
+        assert_eq!(response["result"]["serverInfo"]["name"], "one-kvm");
+        assert_eq!(response["result"]["instructions"], server::INSTRUCTIONS);
+    }
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .bearer_auth(&key)
+            .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::ACCEPTED
+    );
+    let list: Value = client
+        .post(&endpoint)
+        .bearer_auth(&key)
+        .json(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 17);
+    for tool in list["result"]["tools"].as_array().unwrap() {
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        assert!(tool["title"].is_string());
+        assert!(tool["annotations"]["readOnlyHint"].is_boolean());
+    }
+    for (body, code) in [
+        ("{", -32700),
+        (r#"{"jsonrpc":"2.0","id":1,"method":"missing"}"#, -32601),
+        ("[]", -32600),
+    ] {
+        let response: Value = client
+            .post(&endpoint)
+            .bearer_auth(&key)
+            .body(body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(response["error"]["code"], code);
+    }
+    let call:Value = client.post(&endpoint).bearer_auth(&key).json(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"key","arguments":{"text":"Return"}}})).send().await.unwrap().json().await.unwrap();
+    assert_eq!(call["result"]["isError"], true);
+    assert_eq!(
+        call["result"]["content"][0]["text"],
+        "USB keyboard is not enabled in One-KVM USB settings."
+    );
+    assert_eq!(
+        client
+            .get(&endpoint)
+            .bearer_auth(&key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+    assert_eq!(
+        client
+            .delete(&endpoint)
+            .bearer_auth(&key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .bearer_auth(&key)
+            .header("Origin", "https://attacker.example")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .bearer_auth(&key)
+            .body("x".repeat(1024 * 1024 + 1))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    let rotated = client
+        .post(format!("{endpoint}/key/regenerate"))
+        .bearer_auth(&session.id)
+        .send()
+        .await
+        .unwrap();
+    assert!(rotated.status().is_success());
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .bearer_auth(&key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn readonly_wait_does_not_hold_input_and_disable_cancels_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = state(temp.path()).await;
+    state.config.update(|c| c.mcp.enabled = true).await.unwrap();
+    state.mcp.set_enabled(true);
+    tokio::time::pause();
+    let call = tools::call(state.clone(), "wait", json!({"duration":30}));
+    tokio::pin!(call);
+    assert!(futures::poll!(&mut call).is_pending());
+    let lease = state.hid.input_control.acquire().await.unwrap();
+    state.mcp.set_enabled(false);
+    let result = call.await;
+    assert_eq!(result["isError"], true);
+    assert_eq!(result["content"][0]["text"], crate::hid::control::DISABLED);
+    assert!(lease.token.is_cancelled());
+}
+
+#[tokio::test]
+async fn mouse_without_a_known_position_does_not_jump_to_the_origin() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = state(temp.path()).await;
+    state
+        .config
+        .update(|c| {
+            c.mcp.enabled = true;
+            c.hid.backend = crate::config::HidBackend::Ch9329;
+        })
+        .await
+        .unwrap();
+    state.mcp.set_enabled(true);
+    let result = tools::call(state, "left_click", json!({})).await;
+    assert_eq!(result["isError"], true);
+    assert_eq!(
+        result["content"][0]["text"],
+        "cursor position is unknown: supply a coordinate first."
+    );
+}
+
+#[tokio::test]
+async fn activity_events_follow_lease_cooldown_and_history_excludes_typed_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = state(temp.path()).await;
+    state.config.update(|c| c.mcp.enabled = true).await.unwrap();
+    state.mcp.set_enabled(true);
+    tokio::time::pause();
+    let mut events = state.events.subscribe_topic("mcp.activity").unwrap();
+    let lease = state.hid.input_control.acquire().await.unwrap();
+    state.mcp.begin("key");
+    tokio::time::advance(Duration::from_millis(200)).await;
+    let event = events.recv().await.unwrap();
+    assert!(matches!(event,SystemEvent::McpActivity(ref a) if a.state == "active"));
+    lease.finish();
+    state
+        .mcp
+        .record("key", true, tokio::time::Instant::now(), None, None);
+    tokio::time::advance(Duration::from_secs(3)).await;
+    assert_eq!(state.mcp.activity().state, "idle");
+    let sensitive = "private input value";
+    for _ in 0..22 {
+        tools::call(state.clone(), "type", json!({"text":sensitive})).await;
+    }
+    let status = state.mcp.status(&state.snapshot).await;
+    assert_eq!(status.recent.len(), 20);
+    assert!(!serde_json::to_string(&status).unwrap().contains(sensitive));
+    assert_eq!(status.recent[0].detail.as_deref(), Some("19 chars"));
+}

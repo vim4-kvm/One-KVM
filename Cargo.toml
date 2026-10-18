@@ -213,6 +213,9 @@ windows-sys = { version = "0.61", features = [
 [build-dependencies]
 protobuf-codegen = "3.7"
 
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
 [patch.crates-io]
 dtls = { path = "libs/dtls" }
 
