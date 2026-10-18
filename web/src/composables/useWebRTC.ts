@@ -6,7 +6,8 @@ import {
   encodeKeyboardEvent,
   encodeMouseEvent,
 } from '@/types/hid'
-import { videoDebugLog } from '@/lib/debugLog'
+import { isDebugLogEnabled, videoDebugLog } from '@/lib/debugLog'
+import { startVideoDiagnostics } from '@/lib/videoDiagnostics'
 
 export type { HidKeyboardEvent, HidMouseEvent }
 
@@ -92,6 +93,7 @@ let dataChannel: RTCDataChannel | null = null
 let sessionId: string | null = null
 const sessionIdRef = ref<string | null>(null)
 let statsInterval: number | null = null
+let stopVideoDiagnostics: (() => void) | null = null
 let isConnecting = false
 let connectInFlight: Promise<boolean> | null = null
 let connectAbortController: AbortController | null = null
@@ -297,6 +299,9 @@ async function addRemoteIceCandidate(candidate: IceCandidate): Promise<boolean> 
 
 function startStatsCollection() {
   if (statsInterval) return
+  if (peerConnection && isDebugLogEnabled()) {
+    stopVideoDiagnostics = startVideoDiagnostics(peerConnection)
+  }
 
   statsInterval = window.setInterval(async () => {
     if (!peerConnection) return
@@ -365,6 +370,8 @@ function startStatsCollection() {
 }
 
 function stopStatsCollection() {
+  stopVideoDiagnostics?.()
+  stopVideoDiagnostics = null
   if (statsInterval) {
     clearInterval(statsInterval)
     statsInterval = null

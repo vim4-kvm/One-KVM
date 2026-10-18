@@ -93,6 +93,13 @@ vim4-manager 的 hdr-curve 助手保存、立即重载；SDR 输入不受影响�
 
 ## 构建与安装
 
+浏览器卡顿诊断：打开控制台页面 `/?log=debug`，保持视频可见并显示运动画面。
+每次 WebRTC 连接后自动采样 30 秒，在浏览器 Console 输出 `[VideoCadence]` JSON，
+包含实际 codec/解码器、逐秒接收/解码/缓冲增量、视频呈现与页面动画间隔。
+`reason=complete` 且 `hiddenDuringSample=false` 才是完整前台窗口；流切换会结束采样，
+断开连接会取消。该诊断不读取像素或上传数据，关闭调试参数即停用；回调漏采不等于
+视频丢帧，呈现提交时间也不是物理屏幕发光时间。
+
 在工作区固定的 ARM64 Ubuntu 构建环境运行：
 
 ```sh
