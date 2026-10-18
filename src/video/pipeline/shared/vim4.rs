@@ -21,18 +21,19 @@ fn description(config: &SharedVideoPipelineConfig, source: Resolution, fps: u32)
             ))
         }
     };
-    // A full HEVC I-frame stalls both encoding and delivery at 4K60. Refresh
-    // one CTU row per frame instead of producing periodic I-frame bursts.
+    // Full I-frames stall encoding and delivery at 4K60 even when the average
+    // frame rate stays at 60. Spread refresh across frames for both codecs;
+    // H.264 uses 16-pixel MB rows, while HEVC uses larger CTU rows.
     // GOP 0 still emits the initial I-frame and honors force-key-unit events:
     // UU/WebRTC/RTSP request one on subscription; PLI/FIR recover lost references.
-    let (gop, keyframe_options) = if config.output_codec == VideoEncoderType::H265 {
-        (0, "intra-refresh-rows=1")
+    let refresh_rows = if config.output_codec == VideoEncoderType::H265 {
+        1
     } else {
-        (config.bitrate_preset.gop_size(fps), "")
+        3
     };
     let filter = config.output.filter(source, fps);
     Ok(format!("vfmcapsrc ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! {filter}\
-        amlvenc name=encoder bitrate={} gop={gop} framerate={} {keyframe_options} min-force-key-unit-interval=250000000 ! \
+        amlvenc name=encoder bitrate={} gop=0 framerate={} intra-refresh-rows={refresh_rows} min-force-key-unit-interval=250000000 ! \
         video/x-{codec} ! {codec}parse config-interval=-1 ! \
         video/x-{codec},stream-format=byte-stream,alignment=au ! appsink name=frames sync=false max-buffers=2",
         config.bitrate_kbps().clamp(1000, 60000), fps))
