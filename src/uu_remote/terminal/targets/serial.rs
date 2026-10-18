@@ -153,6 +153,10 @@ impl Serial {
     pub fn connected(&self) -> bool {
         self.file.is_some()
     }
+    pub fn fd(&self) -> Option<i32> {
+        use std::os::fd::AsRawFd;
+        self.file.as_ref().map(AsRawFd::as_raw_fd)
+    }
     pub fn reconnect(&mut self) -> bool {
         if self.file.is_none() {
             self.file = open_device(&self.path, self.baud).ok();
@@ -176,6 +180,20 @@ impl Serial {
     }
     pub fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         let result = self.file.as_mut().map_or(Ok(0), |f| f.read(bytes));
+        if matches!(result, Ok(0)) {
+            if let Some(fd) = self.fd() {
+                let mut poll = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                if unsafe { libc::poll(&mut poll, 1, 0) } > 0
+                    && poll.revents & (libc::POLLHUP | libc::POLLERR) != 0
+                {
+                    self.disconnect();
+                }
+            }
+        }
         // Raw tty reads may return zero with VMIN=0; POLLHUP/EIO or path loss signals unplug.
         if result.as_ref().is_err_and(|e| {
             !matches!(
@@ -306,6 +324,16 @@ fn configure(_: &File, _: u32) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::os::fd::AsRawFd;
+    #[test]
+    fn hangup_disconnects_instead_of_spinning_on_readable_eof() {
+        let pair = nix::pty::openpty(None, None).unwrap();
+        let path = std::fs::read_link(format!("/proc/self/fd/{}", pair.slave.as_raw_fd())).unwrap();
+        let mut serial = Serial::open(&path, 115200).unwrap();
+        drop(pair.master);
+        let _ = serial.read(&mut [0; 64]);
+        assert!(!serial.connected());
+        assert!(serial.fd().is_none());
+    }
     #[test]
     fn raw_menu_and_disconnect_recover_same_baud() {
         let pty = nix::pty::openpty(None, None).unwrap();

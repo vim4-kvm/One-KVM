@@ -716,11 +716,7 @@ impl Peer {
                 let shared = closing.clone();
                 Box::pin(async move {
                     if let Some(conn) = shared.terminal_conn.lock().as_ref() {
-                        if matches!(state, PcState::Closed | PcState::Failed) {
-                            conn.close();
-                        } else if state == PcState::Disconnected {
-                            conn.detach();
-                        }
+                        terminal_connection_state(conn, state);
                     }
                 })
             }));
@@ -1242,14 +1238,11 @@ fn attach_terminal(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
                 _ = sending.cancelled() => break,
                 frame = frames.recv() => match frame { Some(frame) => frame, None => break },
             };
+            sending.output_ready();
             let Some(channel) = sender.upgrade() else {
                 break;
             };
-            if !matches!(
-                tokio::time::timeout(Duration::from_secs(5), channel.send(&Bytes::from(frame)))
-                    .await,
-                Ok(Ok(_))
-            ) {
+            if !terminal_send(&sending, channel.send(&Bytes::from(frame))).await {
                 break;
             }
         }
@@ -1276,6 +1269,24 @@ fn attach_terminal(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
             }
         })
     }));
+}
+
+fn terminal_connection_state(conn: &super::terminal::TerminalConn, state: PcState) {
+    if matches!(state, PcState::Closed | PcState::Failed) {
+        conn.close();
+    }
+}
+
+async fn terminal_send<T, E>(
+    conn: &super::terminal::TerminalConn,
+    send: impl std::future::Future<Output = Result<T, E>>,
+) -> bool {
+    // SCTP may remain blocked while ICE recovers. Keep the same send future so
+    // a timeout cannot discard or duplicate a partially accepted terminal frame.
+    tokio::select! {
+        _ = conn.cancelled() => false,
+        result = send => result.is_ok(),
+    }
 }
 
 async fn terminal_rpc(channel: &RTCDataChannel, shared: &Shared, data: &[u8]) -> bool {
@@ -1696,6 +1707,54 @@ async fn apply_capture_setting(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn terminal_survives_ice_disconnect_and_slow_send_until_closed() {
+        use super::super::terminal::{frame::*, Registry, TerminalConn};
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::new(dir.path().join("terminal"));
+        let mut config = crate::config::UuTerminalConfig::default();
+        config.serial.enabled = true;
+        registry.configure(&config, "test").await.unwrap();
+        registry.start();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let conn = TerminalConn::new(registry.clone(), tx);
+        conn.handle(&encode(OPEN, 0, b"{}")).await;
+        let response = rx.recv().await.unwrap();
+        let id = decode(&response).unwrap().session;
+        terminal_connection_state(&conn, PcState::Disconnected);
+        assert!(registry.status(1).await.sessions[0].attached);
+        terminal_connection_state(&conn, PcState::Connected);
+        conn.handle(&encode(RESIZE, id, br#"{"cols":30,"rows":24}"#))
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let bytes = rx.recv().await.unwrap();
+                conn.output_ready();
+                if String::from_utf8_lossy(decode(&bytes).unwrap().payload)
+                    .contains("      未检测到设备")
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        let (release, pending) = tokio::sync::oneshot::channel::<()>();
+        let sending = conn.clone();
+        let task = tokio::spawn(async move { terminal_send(&sending, pending).await });
+        // Cross the old five-second deadline with a deliberately blocked send.
+        tokio::time::sleep(Duration::from_millis(5100)).await;
+        assert!(!task.is_finished());
+        release.send(()).unwrap();
+        assert!(task.await.unwrap());
+        assert!(registry.status(1).await.sessions[0].attached);
+        terminal_connection_state(&conn, PcState::Failed);
+        assert!(!registry.status(0).await.sessions[0].attached);
+        assert!(!terminal_send(&conn, std::future::pending::<Result<(), ()>>()).await);
+        registry.shutdown().await;
+    }
 
     #[cfg(unix)]
     #[tokio::test]

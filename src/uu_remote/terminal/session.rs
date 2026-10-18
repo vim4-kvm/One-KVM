@@ -1,13 +1,16 @@
 use super::{
     frame::*,
     picker::{self, Action, Picker},
-    targets, unique_name, Registry, Target, TerminalConn, TerminalSessionStatus,
+    targets, unique_name, Outbound, Registry, Target, TerminalConn, TerminalSessionStatus,
 };
 use parking_lot::Mutex;
 use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{self, Receiver, SyncSender},
     Arc, Weak,
 };
@@ -18,7 +21,6 @@ pub(super) enum Command {
     Resize((u16, u16)),
     Redraw,
     Signal(i32),
-    Wake,
 }
 pub(super) struct Metadata {
     pub status: TerminalSessionStatus,
@@ -26,12 +28,54 @@ pub(super) struct Metadata {
     pub serial_path: Option<PathBuf>,
 }
 struct Output {
-    sink: Option<(
-        u64,
-        tokio::sync::mpsc::Sender<Vec<u8>>,
-        tokio_util::sync::CancellationToken,
-    )>,
+    sink: Option<(u64, Arc<Outbound>, tokio_util::sync::CancellationToken)>,
     scrollback: VecDeque<u8>,
+    pending: VecDeque<u8>,
+    skipped: u64,
+}
+const INPUT_LIMIT: usize = 1024 * 1024;
+
+struct WakePipe {
+    reader: File,
+    writer: File,
+}
+impl WakePipe {
+    fn new() -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        let (reader, writer) =
+            nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC | nix::fcntl::OFlag::O_NONBLOCK)?;
+        #[cfg(not(target_os = "linux"))]
+        let (reader, writer) = {
+            use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
+            let pair = nix::unistd::pipe()?;
+            for fd in [&pair.0, &pair.1] {
+                fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+                fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))?;
+            }
+            pair
+        };
+        Ok(Self {
+            reader: reader.into(),
+            writer: writer.into(),
+        })
+    }
+    fn notify(&self) {
+        // A full pipe already represents a pending wakeup.
+        while matches!((&self.writer).write(&[1]), Err(error) if error.kind() == io::ErrorKind::Interrupted)
+        {
+        }
+    }
+    fn drain(&self) {
+        let mut buffer = [0; 256];
+        loop {
+            match (&self.reader).read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+    }
 }
 pub(super) struct Session {
     pub meta: Mutex<Metadata>,
@@ -39,14 +83,23 @@ pub(super) struct Session {
     output: Mutex<Output>,
     size: Mutex<(u16, u16)>,
     tx: SyncSender<Command>,
+    resize: Mutex<Option<(u16, u16)>>,
+    wake_pipe: WakePipe,
+    dropped_input: AtomicU64,
+    dropped_commands: AtomicU64,
+    dropped_output: AtomicU64,
     stop: AtomicBool,
     reason: Mutex<Option<&'static str>>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 impl Session {
-    pub fn new(id: u32, name: String, size: (u16, u16)) -> (Arc<Self>, Receiver<Command>) {
+    pub fn new(
+        id: u32,
+        name: String,
+        size: (u16, u16),
+    ) -> io::Result<(Arc<Self>, Receiver<Command>)> {
         let (tx, rx) = mpsc::sync_channel(64);
-        (
+        Ok((
             Arc::new(Self {
                 meta: Mutex::new(Metadata {
                     status: TerminalSessionStatus {
@@ -67,15 +120,22 @@ impl Session {
                 output: Mutex::new(Output {
                     sink: None,
                     scrollback: VecDeque::new(),
+                    pending: VecDeque::new(),
+                    skipped: 0,
                 }),
                 size: Mutex::new(size),
                 tx,
+                resize: Mutex::new(None),
+                wake_pipe: WakePipe::new()?,
+                dropped_input: AtomicU64::new(0),
+                dropped_commands: AtomicU64::new(0),
+                dropped_output: AtomicU64::new(0),
                 stop: AtomicBool::new(false),
                 reason: Mutex::new(None),
                 worker: Mutex::new(None),
             }),
             rx,
-        )
+        ))
     }
     pub fn spawn(
         self: &Arc<Self>,
@@ -91,16 +151,38 @@ impl Session {
         Ok(())
     }
     pub fn command(&self, cmd: Command) {
-        if self.tx.try_send(cmd).is_err() {
-            self.stop(None);
+        if let Command::Resize(size) = cmd {
+            *self.resize.lock() = Some(size);
+        } else if let Err(mpsc::TrySendError::Full(cmd) | mpsc::TrySendError::Disconnected(cmd)) =
+            self.tx.try_send(cmd)
+        {
+            match cmd {
+                Command::Input(bytes) => {
+                    self.dropped_input
+                        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                }
+                _ => {
+                    self.dropped_commands.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
+        self.wake();
+    }
+    pub fn wake(&self) {
+        self.wake_pipe.notify();
+    }
+    fn queue_input(&self, pending: &mut VecDeque<u8>, bytes: &[u8]) {
+        let accepted = bytes.len().min(INPUT_LIMIT.saturating_sub(pending.len()));
+        pending.extend(&bytes[..accepted]);
+        self.dropped_input
+            .fetch_add((bytes.len() - accepted) as u64, Ordering::Relaxed);
     }
     pub fn stop(&self, reason: Option<&'static str>) {
         if let Some(reason) = reason {
             *self.reason.lock() = Some(reason);
         }
         self.stop.store(true, Ordering::Release);
-        let _ = self.tx.try_send(Command::Wake);
+        self.wake();
     }
     pub fn join(&self) {
         let worker = self.worker.lock().take();
@@ -117,7 +199,9 @@ impl Session {
             .lock()
             .sink
             .as_ref()
-            .is_some_and(|(_, tx, cancelled)| !tx.is_closed() && !cancelled.is_cancelled());
+            .is_some_and(|(_, out, cancelled)| {
+                !out.tx.lock().is_closed() && !cancelled.is_cancelled()
+            });
         status
     }
     pub fn attached_to(&self, id: u64) -> bool {
@@ -131,6 +215,9 @@ impl Session {
         let mut out = self.output.lock();
         if out.sink.as_ref().is_some_and(|(owner, _, _)| *owner == id) {
             out.sink = None;
+            out.pending.clear();
+            out.skipped = 0;
+            self.wake();
         }
     }
     pub fn attach(&self, connection: &TerminalConn, size: (u16, u16)) {
@@ -141,36 +228,82 @@ impl Session {
             connection.out.clone(),
             connection.cancelled.clone(),
         ));
-        for chunk in out.scrollback.make_contiguous().chunks(OUTPUT_CHUNK) {
-            connection.send(STDOUT, self.id, chunk);
-        }
+        out.pending = out.scrollback.clone();
+        out.skipped = 0;
+        self.flush(&mut out);
         *self.size.lock() = size;
         self.command(Command::Resize(size));
         self.command(Command::Redraw);
     }
     pub(super) fn output(&self, data: &[u8]) {
         let mut out = self.output.lock();
+        Self::remember(&mut out, data);
+        if out.sink.is_some() {
+            out.pending.extend(data);
+            // Reattachment can enqueue a full history between the worker's
+            // capacity check and read. Keep room for that one in-flight chunk.
+            // Repeated picker redraws and local notices also stay bounded.
+            let excess = out.pending.len().saturating_sub(SCROLLBACK + OUTPUT_CHUNK);
+            out.pending.drain(..excess);
+            self.flush(&mut out);
+        }
+    }
+    fn remember(out: &mut Output, data: &[u8]) {
         out.scrollback.extend(data);
         let excess = out.scrollback.len().saturating_sub(SCROLLBACK);
         out.scrollback.drain(..excess);
+    }
+    fn flush(&self, out: &mut Output) {
+        let Some((_, sink, cancelled)) = &out.sink else {
+            return;
+        };
+        if cancelled.is_cancelled() || sink.tx.lock().is_closed() {
+            out.sink = None;
+            out.pending.clear();
+            out.skipped = 0;
+            return;
+        }
+        while !out.pending.is_empty() {
+            let count = out.pending.len().min(OUTPUT_CHUNK);
+            if !sink.data(self.id, &out.pending.make_contiguous()[..count]) {
+                return;
+            }
+            out.pending.drain(..count);
+        }
+        if out.skipped > 0 {
+            let notice = format!(
+                "\r\n\x1b[2m[已跳过 {} KB 串口输出]\x1b[0m\r\n",
+                out.skipped.div_ceil(1024)
+            );
+            if sink.data(self.id, notice.as_bytes()) {
+                out.skipped = 0;
+            }
+        }
+    }
+    fn output_ready(&self) -> bool {
+        let mut out = self.output.lock();
+        self.flush(&mut out);
+        out.pending.is_empty() && out.sink.as_ref().is_none_or(|(_, sink, _)| sink.ready())
+    }
+    fn serial_output(&self, data: &[u8]) {
+        let mut out = self.output.lock();
+        Self::remember(&mut out, data);
+        self.flush(&mut out);
         for chunk in data.chunks(OUTPUT_CHUNK) {
-            if out.sink.as_ref().is_some_and(|(_, tx, cancelled)| {
-                if tx.try_send(encode(STDOUT, self.id, chunk)).is_err() {
-                    cancelled.cancel();
-                    true
-                } else {
-                    false
+            if let Some((_, sink, _)) = &out.sink {
+                if !out.pending.is_empty() || out.skipped > 0 || !sink.data(self.id, chunk) {
+                    out.skipped += chunk.len() as u64;
+                    self.dropped_output
+                        .fetch_add(chunk.len() as u64, Ordering::Relaxed);
                 }
-            }) {
-                out.sink = None;
             }
         }
     }
     fn finish(&self, code: i32) {
         let payload = serde_json::to_vec(&serde_json::json!({"exit_code":code})).unwrap();
         let mut out = self.output.lock();
-        if let Some((_, tx, _)) = out.sink.take() {
-            let _ = tx.try_send(encode(EXIT, self.id, &payload));
+        if let Some((_, sink, _)) = out.sink.take() {
+            sink.control(EXIT, self.id, &payload);
         }
     }
     fn draw(&self, registry: &Registry, picker: &Picker, items: &[picker::Item]) {
@@ -315,87 +448,86 @@ impl Session {
             let Some(reg) = registry.upgrade() else {
                 break;
             };
-            let command = rx.recv_timeout(Duration::from_millis(20)).ok();
+            self.wake_pipe.drain();
             if self.stop.load(Ordering::Acquire) {
                 break;
             }
-            match command {
-                Some(Command::Input(bytes)) => {
-                    if let Some(target) = running.as_mut() {
-                        match target {
-                            Running::Serial(serial) => self.serial_input(serial, &bytes),
-                            #[cfg(target_os = "linux")]
-                            Running::Pty(_) => {
-                                if pending.len() + bytes.len() > 1024 * 1024 {
-                                    self.stop(None);
-                                } else {
-                                    pending.extend(bytes);
+            let resize = self.resize.lock().take().map(Command::Resize);
+            for command in resize.into_iter().chain(rx.try_iter().take(64)) {
+                match command {
+                    Command::Input(bytes) => {
+                        if let Some(target) = running.as_mut() {
+                            match target {
+                                Running::Serial(serial) => self.serial_input(serial, &bytes),
+                                #[cfg(target_os = "linux")]
+                                Running::Pty(_) => {
+                                    self.queue_input(&mut pending, &bytes);
                                 }
                             }
-                        }
-                    } else {
-                        for byte in bytes {
-                            match picker.key(byte, &items) {
-                                Action::Quit => {
-                                    self.stop(None);
-                                    break;
-                                }
-                                Action::Redraw => {
-                                    if picker.confirm.is_none() && picker.footer.is_some() {
-                                        footer_until =
-                                            Some(Instant::now() + Duration::from_secs(2));
+                        } else {
+                            for byte in bytes {
+                                match picker.key(byte, &items) {
+                                    Action::Quit => {
+                                        self.stop(None);
+                                        break;
                                     }
-                                    self.draw(&reg, &picker, &items);
-                                }
-                                Action::Open(target, takeover) => {
-                                    match self.open_target(&reg, target, takeover) {
-                                        Ok(target) => running = Some(target),
-                                        Err(error) => {
-                                            picker.footer = Some((error, "31"));
-                                            self.draw(&reg, &picker, &items);
+                                    Action::Redraw => {
+                                        if picker.confirm.is_none() && picker.footer.is_some() {
+                                            footer_until =
+                                                Some(Instant::now() + Duration::from_secs(2));
                                         }
+                                        self.draw(&reg, &picker, &items);
                                     }
-                                    break;
+                                    Action::Open(target, takeover) => {
+                                        match self.open_target(&reg, target, takeover) {
+                                            Ok(target) => running = Some(target),
+                                            Err(error) => {
+                                                picker.footer = Some((error, "31"));
+                                                self.draw(&reg, &picker, &items);
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    Action::None => {}
                                 }
-                                Action::None => {}
                             }
                         }
                     }
+                    Command::Resize(size) => {
+                        *self.size.lock() = size;
+                        #[cfg(target_os = "linux")]
+                        if let Some(Running::Pty(pty)) = running.as_mut() {
+                            pty.resize(size);
+                        }
+                        if running.is_none() {
+                            self.draw(&reg, &picker, &items);
+                        }
+                    }
+                    Command::Redraw => {
+                        #[cfg(target_os = "linux")]
+                        if let Some(Running::Pty(pty)) = running.as_mut() {
+                            pty.redraw();
+                        }
+                        if running.is_none() {
+                            self.draw(&reg, &picker, &items);
+                        }
+                    }
+                    Command::Signal(signal) =>
+                    {
+                        #[cfg(target_os = "linux")]
+                        if let Some(Running::Pty(pty)) = &running {
+                            pty.signal(signal);
+                        }
+                    }
                 }
-                Some(Command::Resize(size)) => {
-                    *self.size.lock() = size;
-                    #[cfg(target_os = "linux")]
-                    if let Some(Running::Pty(pty)) = running.as_mut() {
-                        pty.resize(size);
-                    }
-                    if running.is_none() {
-                        self.draw(&reg, &picker, &items);
-                    }
-                }
-                Some(Command::Redraw) => {
-                    #[cfg(target_os = "linux")]
-                    if let Some(Running::Pty(pty)) = running.as_mut() {
-                        pty.redraw();
-                    }
-                    if running.is_none() {
-                        self.draw(&reg, &picker, &items);
-                    }
-                }
-                Some(Command::Signal(signal)) =>
-                {
-                    #[cfg(target_os = "linux")]
-                    if let Some(Running::Pty(pty)) = &running {
-                        pty.signal(signal);
-                    }
-                }
-                _ => {}
             }
+            self.output_ready();
             match running.as_mut() {
                 Some(Running::Serial(serial)) => {
                     for _ in 0..16 {
                         match serial.read(&mut buffer) {
                             Ok(0) | Err(_) => break,
-                            Ok(n) => self.output(&buffer[..n]),
+                            Ok(n) => self.serial_output(&buffer[..n]),
                         }
                     }
                     if !serial.connected() && !disconnected {
@@ -418,13 +550,20 @@ impl Session {
                             }
                         }
                     }
+                    let mut drained = false;
                     for _ in 0..16 {
+                        if !self.output_ready() {
+                            break;
+                        }
                         match pty.read(&mut buffer) {
-                            Ok(0) | Err(_) => break,
+                            Ok(0) | Err(_) => {
+                                drained = true;
+                                break;
+                            }
                             Ok(n) => self.output(&buffer[..n]),
                         }
                     }
-                    if let Some(exit) = pty.tick() {
+                    if let Some(exit) = pty.tick().filter(|_| drained) {
                         code = exit;
                         break;
                     }
@@ -460,6 +599,15 @@ impl Session {
                     self.draw(&reg, &picker, &items);
                 }
             }
+            // Do not retain the registry across poll: dropping the service must
+            // still be able to stop and wake this worker.
+            drop(reg);
+            self.wait_for_io(
+                running.as_ref(),
+                !pending.is_empty(),
+                last_check,
+                footer_until,
+            );
         }
         if let Some(reason) = *self.reason.lock() {
             self.output(reason.as_bytes());
@@ -483,7 +631,82 @@ impl Session {
                 state.sessions.remove(&self.id);
             }
         }
-        tracing::info!(session_id = self.id, exit_code = code, "UU terminal ended");
+        tracing::info!(
+            session_id = self.id,
+            exit_code = code,
+            dropped_input_bytes = self.dropped_input.load(Ordering::Relaxed),
+            dropped_commands = self.dropped_commands.load(Ordering::Relaxed),
+            dropped_output_bytes = self.dropped_output.load(Ordering::Relaxed),
+            "UU terminal ended"
+        );
+    }
+
+    fn wait_for_io(
+        &self,
+        running: Option<&Running>,
+        writing: bool,
+        last_check: Instant,
+        footer: Option<Instant>,
+    ) {
+        if self.stop.load(Ordering::Acquire) {
+            return;
+        }
+        let mut fds = vec![libc::pollfd {
+            fd: self.wake_pipe.reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        let mut deadline = None;
+        match running {
+            #[cfg(target_os = "linux")]
+            Some(Running::Pty(pty)) => {
+                let reading = self.output_ready();
+                if reading || writing {
+                    fds.push(libc::pollfd {
+                        fd: pty.fd(),
+                        events: (if reading { libc::POLLIN } else { 0 })
+                            | (if writing { libc::POLLOUT } else { 0 }),
+                        revents: 0,
+                    });
+                }
+                if reading {
+                    if let Some(fd) = pty.exit_fd() {
+                        fds.push(libc::pollfd {
+                            fd,
+                            events: libc::POLLIN,
+                            revents: 0,
+                        });
+                    } else {
+                        deadline = Some(last_check + Duration::from_secs(1));
+                    }
+                }
+                deadline = deadline.into_iter().chain(pty.redraw_deadline()).min();
+            }
+            Some(Running::Serial(serial)) => {
+                if let Some(fd) = serial.fd() {
+                    fds.push(libc::pollfd {
+                        fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    });
+                }
+                deadline = Some(last_check + Duration::from_secs(1));
+            }
+            None => {
+                deadline = Some(last_check + Duration::from_secs(1))
+                    .into_iter()
+                    .chain(footer)
+                    .min()
+            }
+        }
+        let timeout = deadline.map_or(-1, |at| {
+            at.saturating_duration_since(Instant::now())
+                .as_millis()
+                .min(i32::MAX as u128) as i32
+        });
+        unsafe {
+            libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout);
+        }
     }
 
     fn serial_input(&self, serial: &mut targets::serial::Serial, bytes: &[u8]) {
@@ -526,4 +749,239 @@ enum Running {
     Serial(targets::serial::Serial),
     #[cfg(target_os = "linux")]
     Pty(targets::pty::Pty),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attached() -> (
+        Arc<Session>,
+        Arc<TerminalConn>,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        let registry = Registry::new(PathBuf::new());
+        let (session, _commands) = Session::new(1, "test".into(), (80, 24)).unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let conn = TerminalConn::new(registry.clone(), tx);
+        registry.state.lock().sessions.insert(1, session.clone());
+        session.attach(&conn, (80, 24));
+        (session, conn, rx)
+    }
+
+    #[test]
+    fn input_overload_is_counted_and_latest_resize_survives_full_queue() {
+        let (session, rx) = Session::new(1, "test".into(), (80, 24)).unwrap();
+        for _ in 0..64 {
+            session.command(Command::Input(vec![1; 4]));
+        }
+        session.command(Command::Input(vec![2; 7]));
+        session.command(Command::Signal(libc::SIGINT));
+        session.command(Command::Resize((90, 30)));
+        session.command(Command::Resize((100, 40)));
+        assert_eq!(*session.resize.lock(), Some((100, 40)));
+        assert_eq!(rx.try_iter().count(), 64);
+        assert_eq!(session.dropped_input.load(Ordering::Relaxed), 7);
+        assert_eq!(session.dropped_commands.load(Ordering::Relaxed), 1);
+        let mut pending = VecDeque::from(vec![1; INPUT_LIMIT - 2]);
+        session.queue_input(&mut pending, &[2; 5]);
+        assert_eq!(pending.len(), INPUT_LIMIT);
+        assert_eq!(session.dropped_input.load(Ordering::Relaxed), 10);
+        pending.clear();
+        session.queue_input(&mut pending, b"recovered");
+        assert_eq!(pending.make_contiguous(), b"recovered");
+        assert!(!session.stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn congestion_reserves_control_frames_and_replays_without_cancelling() {
+        let (session, conn, mut rx) = attached();
+        rx.try_recv().unwrap(); // OPEN_RESP
+        while session.output_ready() {
+            session.output(&[42; OUTPUT_CHUNK]);
+        }
+        assert_eq!(conn.out.tx.lock().capacity(), super::super::CONTROL_RESERVE);
+        for kind in [OPEN_RESP, EXIT, LIST_RESP, KILL_RESP, ERROR] {
+            conn.send(kind, 1, b"{}");
+        }
+        let mut controls = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            let frame = decode(&bytes).unwrap();
+            if frame.kind != STDOUT {
+                controls.push(frame.kind);
+            }
+        }
+        assert_eq!(controls, [OPEN_RESP, EXIT, LIST_RESP, KILL_RESP, ERROR]);
+        assert!(session.output_ready());
+        assert!(session.status().attached);
+        assert!(!conn.cancelled.is_cancelled());
+
+        session.detach(conn.id);
+        session.output(&vec![19; SCROLLBACK]);
+        // Reattach with another session's data already occupying the queue.
+        while conn.out.data(2, &[8]) {}
+        session.attach(&conn, (80, 24));
+        assert_eq!(session.output.lock().pending.len(), SCROLLBACK);
+        session.output(&[20; OUTPUT_CHUNK]);
+        assert_eq!(
+            session.output.lock().pending.len(),
+            SCROLLBACK + OUTPUT_CHUNK
+        );
+        let mut replay = Vec::new();
+        while replay.len() < SCROLLBACK + OUTPUT_CHUNK {
+            while let Ok(bytes) = rx.try_recv() {
+                let frame = decode(&bytes).unwrap();
+                if frame.kind == STDOUT && frame.session == 1 {
+                    replay.extend_from_slice(frame.payload);
+                }
+            }
+            session.output_ready();
+        }
+        assert_eq!(&replay[..SCROLLBACK], vec![19; SCROLLBACK]);
+        assert_eq!(&replay[SCROLLBACK..], &[20; OUTPUT_CHUNK]);
+    }
+
+    #[test]
+    fn serial_congestion_keeps_history_and_reports_skips_even_without_new_bytes() {
+        let (session, conn, mut rx) = attached();
+        while conn.out.data(2, b"busy") {}
+        session.serial_output(&vec![3; 2048]);
+        session.serial_output(&vec![4; 1024]);
+        assert_eq!(session.output.lock().skipped, 3072);
+        assert_eq!(session.output.lock().scrollback.len(), 3072);
+        assert!(session.output.lock().pending.is_empty());
+        while rx.try_recv().is_ok() {}
+        session.output_ready();
+        let bytes = rx.try_recv().unwrap();
+        assert_eq!(
+            decode(&bytes).unwrap().payload,
+            "\r\n\x1b[2m[已跳过 3 KB 串口输出]\x1b[0m\r\n".as_bytes()
+        );
+        session.serial_output(b"resumed");
+        let bytes = rx.try_recv().unwrap();
+        assert_eq!(decode(&bytes).unwrap().payload, b"resumed");
+        assert_eq!(session.output.lock().skipped, 0);
+        assert!(session.status().attached);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn serial_worker_reads_during_congestion_and_flushes_on_capacity_wakeup() {
+        let pair = nix::pty::openpty(None, None).unwrap();
+        let path = std::fs::read_link(format!("/proc/self/fd/{}", pair.slave.as_raw_fd())).unwrap();
+        let mut master = File::from(pair.master);
+        let registry = Registry::new(PathBuf::new());
+        let (session, commands) = Session::new(1, "test".into(), (80, 24)).unwrap();
+        {
+            let mut state = registry.state.lock();
+            state.accepting = true;
+            state.config.serial.enabled = true;
+            // A private PTY stands in for USB hardware; production validation
+            // intentionally accepts only configured USB device paths.
+            state.config.serial.device = path.to_string_lossy().into_owned();
+            state.config.serial.baud = 1500000;
+            state.sessions.insert(1, session.clone());
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let conn = TerminalConn::new(registry.clone(), tx);
+        session.attach(&conn, (80, 24));
+        session.spawn(Arc::downgrade(&registry), commands).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let bytes = rx.recv().await.unwrap();
+                if String::from_utf8_lossy(decode(&bytes).unwrap().payload).contains("1500000") {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        while conn.out.data(2, b"busy") {}
+        master.write_all(&vec![7; 3072]).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while session.dropped_output.load(Ordering::Relaxed) < 3072 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            session
+                .output
+                .lock()
+                .scrollback
+                .iter()
+                .filter(|&&byte| byte == 7)
+                .count()
+                == 3072
+        );
+        while rx.try_recv().is_ok() {}
+        conn.output_ready();
+        let bytes = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(decode(&bytes).unwrap().payload)
+            .contains("[已跳过 3 KB 串口输出]"));
+        master.write_all(b"resumed").unwrap();
+        let bytes = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decode(&bytes).unwrap().payload, b"resumed");
+        assert!(session.status().attached);
+        registry.shutdown().await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn poll_wakes_for_commands_capacity_and_pty_output() {
+        let (session, conn, mut rx) = attached();
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "stty -echo; read line; printf ready; read line"]);
+        let pty = targets::pty::Pty::spawn(command, (80, 24)).unwrap();
+        let mut running = Running::Pty(pty);
+        session.wake_pipe.drain();
+        session.command(Command::Resize((100, 40)));
+        session.wait_for_io(Some(&running), false, Instant::now(), None);
+        session.wake_pipe.drain();
+
+        while conn.out.data(2, b"busy") {}
+        rx.try_recv().unwrap();
+        conn.output_ready();
+        session.wait_for_io(Some(&running), false, Instant::now(), None);
+        session.wake_pipe.drain();
+        while rx.try_recv().is_ok() {}
+
+        if let Running::Pty(pty) = &mut running {
+            pty.write(b"go\n").unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        while !output.windows(5).any(|b| b == b"ready") {
+            assert!(Instant::now() < deadline);
+            session.wait_for_io(Some(&running), false, Instant::now(), None);
+            let mut buf = [0; 1024];
+            if let Running::Pty(pty) = &mut running {
+                if let Ok(n) = pty.read(&mut buf) {
+                    output.extend_from_slice(&buf[..n]);
+                }
+            }
+        }
+        // With no data, commands or redraw timer, an idle PTY must stay parked
+        // beyond the former 20 ms polling interval, then stop must wake it.
+        let (done, completed) = mpsc::channel();
+        let waiting = session.clone();
+        let worker = std::thread::spawn(move || {
+            waiting.wait_for_io(Some(&running), false, Instant::now(), None);
+            done.send(()).unwrap();
+        });
+        let idle = completed.recv_timeout(Duration::from_millis(100));
+        session.stop(None);
+        if idle.is_err() {
+            completed.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        worker.join().unwrap();
+        assert!(matches!(idle, Err(mpsc::RecvTimeoutError::Timeout)));
+    }
 }

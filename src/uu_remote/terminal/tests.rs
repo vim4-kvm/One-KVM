@@ -183,3 +183,72 @@ async fn disabling_target_prints_notice_then_exit_and_shutdown_reaps_shell() {
     assert!(reg.snapshots().is_empty());
     reg.shutdown().await;
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn large_pty_output_survives_a_stalled_receiver_without_loss() {
+    let (_dir, reg, original, _rx) = fixture().await;
+    original.close();
+    let mut config = UuTerminalConfig::default();
+    config.board.enabled = true;
+    reg.configure(&config, "test").await.unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let conn = TerminalConn::new(reg.clone(), tx);
+    let id = open(&conn, &mut rx).await;
+    conn.handle(&encode(STDIN, id, b"stty -echo; printf '\\036'\n"))
+        .await;
+    loop {
+        let bytes = receive(&mut rx, STDOUT).await;
+        conn.output_ready();
+        if decode(&bytes).unwrap().payload.contains(&30) {
+            break;
+        }
+    }
+    conn.handle(&encode(
+        STDIN,
+        id,
+        b"head -c 2097152 /dev/zero | tr '\\000' '\\130'; printf '\\037'; exit\n",
+    ))
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while conn.out.tx.lock().capacity() > CONTROL_RESERVE {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(reg.session(id).unwrap().status().attached);
+    // The response must still fit while all data slots are occupied.
+    conn.handle(&encode(LIST_REQ, 77, b"")).await;
+    let mut count = 0;
+    let mut end_seen = false;
+    let mut list_seen = false;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let bytes = rx.recv().await.unwrap();
+            conn.output_ready();
+            let frame = decode(&bytes).unwrap();
+            match frame.kind {
+                STDOUT => {
+                    count += frame.payload.iter().filter(|&&byte| byte == b'X').count();
+                    end_seen |= frame.payload.contains(&31);
+                }
+                LIST_RESP => {
+                    assert_eq!(frame.session, 77);
+                    list_seen = true;
+                }
+                EXIT => {
+                    assert_eq!(json(frame.payload)["exit_code"], 0);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(count, 2097152);
+    assert!(end_seen && list_seen);
+    assert!(!conn.cancelled.is_cancelled());
+    reg.shutdown().await;
+}

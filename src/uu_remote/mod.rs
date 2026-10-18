@@ -399,6 +399,16 @@ async fn close_all(inner: &Inner) {
     inner.terminal.shutdown().await;
 }
 
+async fn login_expired(inner: &Inner, mut credentials: Credentials) {
+    error!("UU login is invalid or expired; a new QR login is required");
+    credentials.logout();
+    if let Err(error) = save(inner, &credentials) {
+        warn!("{error}");
+        *inner.credentials.lock() = credentials;
+    }
+    close_all(inner).await;
+}
+
 fn save(inner: &Inner, credentials: &Credentials) -> Result<(), String> {
     cloud::save_credentials(
         &profile_path(&inner.credentials_path, inner.profile.lock().system),
@@ -646,13 +656,7 @@ async fn run(inner: Arc<Inner>) {
         {
             Ok(room) => room,
             Err(CloudError::LoginExpired) => {
-                error!("UU login is invalid or expired; a new QR login is required");
-                let mut expired = credentials;
-                expired.logout();
-                if let Err(e) = save(&inner, &expired) {
-                    warn!("{e}");
-                    *inner.credentials.lock() = expired;
-                }
+                login_expired(&inner, credentials).await;
                 continue;
             }
             Err(e) => {
@@ -908,6 +912,64 @@ fn replacement_peers(
 #[cfg(test)]
 mod terminal_peer_tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn expired_login_ends_attached_and_detached_sessions_even_if_save_fails() {
+        use terminal::frame::*;
+        for save_fails in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let service = UuRemoteService::new(
+                dir.path().into(),
+                VideoStreamManager::with_webrtc_streamer(
+                    crate::video::streamer::Streamer::new(),
+                    crate::webrtc::WebRtcStreamer::new(),
+                ),
+                Arc::new(HidController::new(crate::hid::HidBackendType::None, None)),
+                Arc::new(AudioController::default()),
+            );
+            let registry = &service.inner.terminal;
+            let mut config = crate::config::UuTerminalConfig::default();
+            config.serial.enabled = true;
+            registry.configure(&config, "test").await.unwrap();
+            registry.start();
+            let (tx, mut rx) = mpsc::channel(64);
+            let conn = terminal::TerminalConn::new(registry.clone(), tx);
+            for detached in [true, false] {
+                conn.handle(&encode(OPEN, 0, b"{}")).await;
+                let id = loop {
+                    let bytes = rx.recv().await.unwrap();
+                    let frame = decode(&bytes).unwrap();
+                    if frame.kind == OPEN_RESP {
+                        break frame.session;
+                    }
+                };
+                if detached {
+                    conn.handle(&encode(DETACH, id, b"")).await;
+                }
+            }
+            assert_eq!(registry.status(0).await.sessions.len(), 2);
+            if save_fails {
+                std::fs::create_dir_all(&service.inner.credentials_path).unwrap();
+            }
+            let credentials = Credentials {
+                user_id: "expired-user".into(),
+                token: "expired-token".into(),
+                ..Default::default()
+            };
+            login_expired(&service.inner, credentials).await;
+            assert!(service.inner.credentials.lock().token.is_empty());
+            assert!(registry.status(0).await.sessions.is_empty());
+            conn.handle(&encode(OPEN, 0, b"{}")).await;
+            loop {
+                let bytes = rx.recv().await.unwrap();
+                let frame = decode(&bytes).unwrap();
+                if frame.kind == OPEN_RESP {
+                    assert_ne!(json(frame.payload)["code"], 0);
+                    break;
+                }
+            }
+        }
+    }
     #[test]
     fn tool_and_desktop_replacement_are_independent() {
         let now = std::time::Instant::now();

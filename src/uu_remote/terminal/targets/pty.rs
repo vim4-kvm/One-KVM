@@ -12,6 +12,7 @@ pub struct Pty {
     size: (u16, u16),
     redraw_at: Option<Instant>,
     reaped: bool,
+    exit_event: Option<OwnedFd>,
 }
 impl Pty {
     pub fn spawn(mut command: Command, size: (u16, u16)) -> io::Result<Self> {
@@ -22,6 +23,11 @@ impl Pty {
             ws_ypixel: 0,
         };
         let pair = nix::pty::openpty(Some(&win), None)?;
+        for fd in [&pair.master, &pair.slave] {
+            if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
         command
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")
@@ -46,12 +52,14 @@ impl Pty {
             return Err(io::Error::last_os_error());
         }
         let child = command.spawn()?;
+        let exit_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) } as i32;
         Ok(Self {
             master: File::from(pair.master),
             child,
             size,
             redraw_at: None,
             reaped: false,
+            exit_event: (exit_fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(exit_fd) }),
         })
     }
     pub fn board(size: (u16, u16)) -> io::Result<Self> {
@@ -72,9 +80,26 @@ impl Pty {
     pub fn signal(&self, signal: i32) {
         if !self.reaped {
             unsafe {
-                libc::kill(-(self.child.id() as i32), signal);
+                let foreground = libc::tcgetpgrp(self.fd());
+                if foreground > 0 {
+                    libc::kill(-foreground, signal);
+                }
             }
         }
+    }
+    fn signal_shell(&self, signal: i32) {
+        unsafe {
+            libc::kill(-(self.child.id() as i32), signal);
+        }
+    }
+    pub fn fd(&self) -> i32 {
+        self.master.as_raw_fd()
+    }
+    pub fn exit_fd(&self) -> Option<i32> {
+        self.exit_event.as_ref().map(AsRawFd::as_raw_fd)
+    }
+    pub fn redraw_deadline(&self) -> Option<Instant> {
+        self.redraw_at
     }
     fn winsize(&self, size: (u16, u16)) {
         let win = libc::winsize {
@@ -133,12 +158,12 @@ impl Drop for Pty {
             // these handles prevents signalling a reused PID during escalation.
             let descendants = descendant_handles(self.child.id());
             signal_handles(&descendants, libc::SIGHUP);
-            self.signal(libc::SIGHUP);
+            self.signal_shell(libc::SIGHUP);
             // Keep the leader unreaped until after signalling the group, avoiding PID reuse.
             std::thread::sleep(Duration::from_millis(300));
             signal_handles(&descendant_handles(self.child.id()), libc::SIGKILL);
             signal_handles(&descendants, libc::SIGKILL);
-            self.signal(libc::SIGKILL);
+            self.signal_shell(libc::SIGKILL);
             let _ = self.child.wait();
             self.reaped = true;
         }
@@ -212,6 +237,69 @@ fn signal_handles(handles: &[OwnedFd], signal: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pty_descriptors_are_not_inherited_by_later_execs() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "printf ready; exec sleep 30"]);
+        let mut first = Pty::spawn(cmd, (80, 24)).unwrap();
+        wait_for_output(&mut first, b"ready");
+        assert_ne!(
+            unsafe { libc::fcntl(first.fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "printf ready; exec sleep 30"]);
+        let mut second = Pty::spawn(cmd, (80, 24)).unwrap();
+        wait_for_output(&mut second, b"ready");
+        assert!(
+            !std::path::Path::new(&format!("/proc/{}/fd/{}", second.child.id(), first.fd()))
+                .exists()
+        );
+        // The slave remains available only through the intended stdio dup2s.
+        let child_fds = format!("/proc/{}/fd", second.child.id());
+        let slave = std::fs::read_link(format!("{child_fds}/0")).unwrap();
+        for entry in std::fs::read_dir(&child_fds)
+            .unwrap()
+            .filter_map(Result::ok)
+        {
+            let fd: i32 = entry.file_name().to_str().unwrap().parse().unwrap();
+            if fd > 2 {
+                assert_ne!(std::fs::read_link(entry.path()).ok().as_ref(), Some(&slave));
+            }
+        }
+    }
+
+    #[test]
+    fn signal_interrupts_foreground_job_and_leaves_shell_alive() {
+        let mut cmd = Command::new("/bin/bash");
+        cmd.args(["--noprofile", "--norc", "-i"]);
+        let mut pty = Pty::spawn(cmd, (80, 24)).unwrap();
+        pty.write(b"stty -echo; printf '\\036'\n").unwrap();
+        wait_for_output(&mut pty, &[30]);
+        pty.write(b"sh -c 'printf foreground-ready; exec sleep 30'; printf '\\037'\n")
+            .unwrap();
+        wait_for_output(&mut pty, b"foreground-ready");
+        let foreground = unsafe { libc::tcgetpgrp(pty.fd()) };
+        assert!(foreground > 0);
+        assert_ne!(foreground, pty.child.id() as i32);
+        let job_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, foreground, 0) } as i32;
+        assert!(job_fd >= 0);
+        let job = unsafe { OwnedFd::from_raw_fd(job_fd) };
+        pty.signal(libc::SIGINT);
+        let mut poll = libc::pollfd {
+            fd: job.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut poll, 1, 3000) },
+            1,
+            "foreground job survived SIGINT"
+        );
+        assert_eq!(pty.tick(), None);
+        pty.write(b"printf shell-survived\n").unwrap();
+        wait_for_output(&mut pty, b"shell-survived");
+    }
     fn wait_for_output(pty: &mut Pty, needle: &[u8]) {
         let mut output = Vec::new();
         let mut buffer = [0; 1024];

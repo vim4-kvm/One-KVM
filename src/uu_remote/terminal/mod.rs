@@ -321,7 +321,7 @@ impl Registry {
             }
         };
         let name = unique_name(&state, Target::Picker.name(), id);
-        let (session, rx) = Session::new(id, name, size);
+        let (session, rx) = Session::new(id, name, size).map_err(|_| "无法创建终端唤醒管道")?;
         state.sessions.insert(id, session.clone());
         if session.spawn(Arc::downgrade(self), rx).is_err() {
             state.sessions.remove(&id);
@@ -390,10 +390,30 @@ fn user() -> String {
     std::env::var("USER").unwrap_or_else(|_| "khadas".into())
 }
 
+// All producers share this lock so concurrent sessions cannot consume the
+// control reserve after independently observing the same available capacity.
+struct Outbound {
+    tx: Mutex<tokio::sync::mpsc::Sender<Vec<u8>>>,
+}
+const CONTROL_RESERVE: usize = 8;
+impl Outbound {
+    fn ready(&self) -> bool {
+        let tx = self.tx.lock();
+        tx.is_closed() || tx.capacity() > CONTROL_RESERVE
+    }
+    fn data(&self, id: u32, data: &[u8]) -> bool {
+        let tx = self.tx.lock();
+        tx.capacity() > CONTROL_RESERVE && tx.try_send(encode(STDOUT, id, data)).is_ok()
+    }
+    fn control(&self, kind: u8, id: u32, data: &[u8]) {
+        let _ = self.tx.lock().try_send(encode(kind, id, data));
+    }
+}
+
 pub struct TerminalConn {
     registry: Arc<Registry>,
     id: u64,
-    out: tokio::sync::mpsc::Sender<Vec<u8>>,
+    out: Arc<Outbound>,
     closed: AtomicBool,
     cancelled: tokio_util::sync::CancellationToken,
 }
@@ -403,14 +423,21 @@ impl TerminalConn {
         Arc::new(Self {
             registry,
             id,
-            out,
+            out: Arc::new(Outbound {
+                tx: Mutex::new(out),
+            }),
             closed: AtomicBool::new(false),
             cancelled: tokio_util::sync::CancellationToken::new(),
         })
     }
     fn send(&self, kind: u8, id: u32, payload: &[u8]) {
-        if self.out.try_send(encode(kind, id, payload)).is_err() {
-            self.cancelled.cancel();
+        self.out.control(kind, id, payload);
+    }
+    pub fn output_ready(&self) {
+        for session in self.registry.state.lock().sessions.values() {
+            if session.attached_to(self.id) {
+                session.wake();
+            }
         }
     }
     pub fn close(&self) {
