@@ -5,6 +5,7 @@ import { AlertTriangle, CircleAlert, Download, Film, Square, Trash2, X } from 'l
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Spinner } from '@/components/ui/spinner'
+import RecordingLocationPicker from '@/components/RecordingLocationPicker.vue'
 import {
   AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
@@ -13,33 +14,18 @@ import {
   formatBytes, formatClock, localDownloadName, reasonText, recordingDownloadUrl, useDeviceRecording, type RecordingFile,
 } from '@/composables/useDeviceRecording'
 
-defineProps<{ videoMode?: string }>()
+defineProps<{ videoMode?: string; inlineLocationPicker?: boolean }>()
 const emit = defineEmits<{ (e: 'switchCodec', codec: 'h264'): void }>()
 const { t, locale } = useI18n()
 const recording = useDeviceRecording()
-const { status, files, locations, unavailableLocations, unreachable, action, elapsedSeconds, bitrateBps, remainingSeconds } = recording
-const choosingLocation = ref(false)
-const selectedLocation = ref('local')
-const folder = ref('One-KVM')
-const managerStorageUrl = `http://${window.location.hostname}/#/storage`
-watch(() => status.value?.location, location => {
-  if (location && !choosingLocation.value) { selectedLocation.value = location.id; folder.value = location.folder || 'One-KVM' }
-})
-function selectLocation(id: string) {
-  selectedLocation.value = id
-  folder.value = locations.value.find(l => l.id === id)?.folder || 'One-KVM'
-}
-async function saveLocation() {
-  await recording.setLocation(selectedLocation.value, folder.value)
-  if (status.value?.location.id === selectedLocation.value && (selectedLocation.value === 'local' || status.value.location.folder === folder.value)) choosingLocation.value = false
-}
+const { status, files, unavailableLocations, unreachable, action, elapsedSeconds, bitrateBps, remainingSeconds, stoppedLocation, dismissedStop } = recording
 function locationName(location: { id: string; name: string }) { return location.id === 'local' ? t('recording.local') : location.name }
 
 const pendingDelete = ref<RecordingFile | null>(null)
-const dismissedError = ref<string | null>(null)
+const fileLocationFilter = ref('all')
 
 const isRecording = computed(() => !!status.value?.recording)
-const blocker = computed(() => isRecording.value ? null : status.value?.blocker ?? null)
+const blocker = computed(() => isRecording.value ? null : status.value?.storage_reason ? 'storage_unavailable' : status.value?.blocker ?? null)
 const canStart = computed(() => !!status.value && !isRecording.value && !blocker.value && !action.value && !unreachable.value)
 const lowRemaining = computed(() => remainingSeconds.value !== null && remainingSeconds.value < 600)
 const freeBytes = computed(() => {
@@ -49,11 +35,29 @@ const freeBytes = computed(() => {
 const lastError = computed(() => {
   const current = status.value
   if (!current || current.recording || !(current.error_code || current.error)) return null
-  const key = `${current.file ?? 'start'}:${current.error_code ?? current.error}`
-  if (dismissedError.value === key) return null
-  return { key, interrupted: !!current.file, reason: reasonText(current.error_code, current.error) }
+  const key = current.started_at !== null ? String(current.started_at) : `start:${current.error_code ?? current.error}`
+  if (dismissedStop.value === key) return null
+  const interrupted = !!current.file
+  const location = files.value.find(file => file.name === current.file)?.location ?? stoppedLocation.value ?? current.location
+  const name = locationName(location)
+  const time = current.started_at === null ? null : new Date((current.started_at + current.elapsed_seconds) * 1000)
+    .toLocaleTimeString(locale.value, { hour: '2-digit', minute: '2-digit', hour12: false })
+  const title = !interrupted ? t('recording.startFailedTitle') : time ? t('recording.stoppedAt', { time }) : t('recording.interruptedTitle')
+  const params = { name, duration: formatClock(current.elapsed_seconds) }
+  const reason = interrupted && current.error_code === 'storage_unavailable' ? t('recording.storageStopped', params)
+    : interrupted && current.error_code === 'low_storage' ? t('recording.spaceStopped', params)
+    : reasonText(current.error_code, current.error)
+  const recovered = interrupted && ['storage_unavailable', 'low_storage'].includes(current.error_code ?? '')
+    && current.location.id === location.id && current.location.folder === location.folder
+    && !!current.storage && !current.storage_reason && !current.blocker && !unreachable.value
+  return { key, title, reason, recovered: recovered ? t('recording.storageRecovered', { name }) : null }
 })
 const totalBytes = computed(() => files.value.reduce((sum, file) => sum + file.bytes, 0))
+const fileLocations = computed(() => [...new Map(files.value.map(file => [file.location.id, file.location])).values()])
+const filteredFiles = computed(() => fileLocationFilter.value === 'all' ? files.value : files.value.filter(file => file.location.id === fileLocationFilter.value))
+watch(fileLocations, locations => {
+  if (locations.length < 2 || !locations.some(location => location.id === fileLocationFilter.value)) fileLocationFilter.value = 'all'
+})
 
 onMounted(() => recording.setPanelOpen(true))
 onUnmounted(() => recording.setPanelOpen(false))
@@ -79,8 +83,7 @@ function fileMeta(file: RecordingFile) {
   ].filter(Boolean).join(' · ')
 }
 function remainingText(seconds: number) {
-  if (seconds >= 86400) return t('recording.remainingDays')
-  if (seconds >= 3600) return t('recording.remainingHours', { hours: (seconds / 3600).toFixed(1) })
+  if (seconds >= 3600) return t('recording.remainingHours', { hours: Math.floor(seconds / 3600) })
   return t('recording.remainingMinutes', { minutes: Math.max(1, Math.floor(seconds / 60)) })
 }
 function confirmDelete() {
@@ -91,7 +94,7 @@ function confirmDelete() {
 </script>
 
 <template>
-  <div class="flex flex-col gap-4 p-4" data-recording-panel>
+  <div class="flex min-w-0 flex-col gap-4 p-4" data-recording-panel>
     <header>
       <h2 class="text-sm font-semibold">{{ t('recording.title') }}</h2>
       <p class="mt-0.5 text-xs text-muted-foreground">{{ t('recording.hint') }}</p>
@@ -104,25 +107,9 @@ function confirmDelete() {
       ]"
       :aria-busy="!!action"
     >
-      <div class="mb-3 min-w-0 border-b pb-3 text-xs">
-        <button type="button" class="w-full break-words text-left disabled:opacity-60" :disabled="isRecording || !!action" :aria-expanded="choosingLocation" @click="choosingLocation = !choosingLocation">
-          {{ t('recording.saveTo') }} · {{ status?.location ? locationName(status.location) : t('recording.local') }}<template v-if="status?.location.id !== 'local'"> › {{ status?.location.folder }}</template>
-        </button>
-        <fieldset v-if="choosingLocation" class="mt-2 min-w-0 space-y-2" :disabled="isRecording || !!action">
-          <label v-for="location in locations" :key="location.id" :class="['flex items-start gap-2 break-words', !location.available && 'opacity-50']">
-            <input type="radio" name="recording-location" class="mt-0.5 shrink-0" :value="location.id" :checked="selectedLocation === location.id" :disabled="!location.available" @change="selectLocation(location.id)">
-            <span class="min-w-0">{{ locationName(location) }}<template v-if="location.reason"> · {{ t(`recording.locationReasons.${location.reason}`) }}</template></span>
-          </label>
-          <label v-if="selectedLocation !== 'local'" class="block space-y-1">
-            <span>{{ t('recording.folder') }}</span>
-            <input v-model="folder" class="block w-full min-w-0 rounded-md border bg-background px-2 py-1.5" placeholder="One-KVM">
-          </label>
-          <a :href="managerStorageUrl" target="_blank" rel="noopener" class="block break-words text-muted-foreground underline">{{ t('recording.addNas') }}</a>
-          <Button size="sm" variant="outline" :disabled="!!action || isRecording" @click="saveLocation">{{ t('recording.applyLocation') }}</Button>
-        </fieldset>
-      </div>
+      <RecordingLocationPicker :inline="inlineLocationPicker" />
       <div v-if="isRecording" class="flex flex-wrap items-center gap-x-4 gap-y-3">
-        <div class="min-w-48 flex-1">
+        <div class="min-w-0 basis-48 flex-1">
           <div class="flex items-center gap-2 text-xs font-semibold tracking-wider text-red-600 dark:text-red-400">
             <span class="relative flex size-2">
               <span class="absolute inline-flex size-full animate-ping rounded-full bg-red-500/60" />
@@ -137,7 +124,7 @@ function confirmDelete() {
             {{ [codecLabel(status?.codec), t('recording.withAudio'), status?.bytes ? formatBytes(status.bytes) : null,
                 bitrateBps ? `${(bitrateBps / 1e6).toFixed(1)} Mbps` : null].filter(Boolean).join(' · ') }}
           </p>
-          <p v-if="remainingSeconds !== null" :class="['mt-1 text-xs', lowRemaining ? 'font-medium text-amber-600 dark:text-amber-400' : 'text-muted-foreground']">
+          <p v-if="remainingSeconds !== null" :class="['mt-1 whitespace-nowrap text-xs', lowRemaining ? 'font-medium text-amber-600 dark:text-amber-400' : 'text-muted-foreground']">
             {{ remainingText(remainingSeconds) }}
           </p>
         </div>
@@ -149,7 +136,7 @@ function confirmDelete() {
       </div>
 
       <div v-else class="flex flex-wrap items-center gap-x-4 gap-y-3">
-        <div class="min-w-48 flex-1">
+        <div class="min-w-0 basis-48 flex-1">
           <template v-if="unreachable">
             <p class="flex items-center gap-1.5 text-sm font-medium"><CircleAlert class="size-4 text-destructive" />{{ t('recording.unreachable') }}</p>
             <p class="mt-1 text-xs text-muted-foreground">{{ t('recording.unreachableHint') }}</p>
@@ -169,7 +156,12 @@ function confirmDelete() {
           <template v-else>
             <p class="text-sm font-medium">{{ status ? t('recording.ready') : t('recording.loading') }}</p>
             <p v-if="status" class="mt-1 text-xs text-muted-foreground">
-              {{ [codecLabel(videoMode), t('recording.withAudio'), freeBytes !== null ? t('recording.free', { size: formatBytes(freeBytes) }) : null].filter(Boolean).join(' · ') }}
+              {{ [codecLabel(videoMode), t('recording.withAudio')].filter(Boolean).join(' · ') }}
+            </p>
+            <p v-if="status && freeBytes !== null" class="mt-1 flex flex-wrap items-baseline gap-x-1 text-xs text-muted-foreground">
+              <span class="max-w-full truncate" :title="locationName(status.location)">{{ locationName(status.location) }}</span>
+              <span class="whitespace-nowrap">{{ t('recording.free', { size: formatBytes(freeBytes) }) }}</span>
+              <span v-if="remainingSeconds !== null" class="whitespace-nowrap">· {{ remainingText(remainingSeconds) }}</span>
             </p>
           </template>
         </div>
@@ -188,22 +180,29 @@ function confirmDelete() {
     >
       <AlertTriangle class="mt-0.5 size-4 shrink-0" />
       <div class="min-w-0 flex-1">
-        <p class="font-medium">{{ lastError.interrupted ? t('recording.interruptedTitle') : t('recording.startFailedTitle') }}</p>
-        <p class="text-xs opacity-90">{{ lastError.reason }}<template v-if="lastError.interrupted">{{ t('recording.partSaved') }}</template></p>
+        <p class="font-medium">{{ lastError.title }}</p>
+        <p class="break-words text-xs opacity-90">{{ lastError.reason }} <span v-if="lastError.recovered" class="text-green-700 dark:text-green-400">{{ lastError.recovered }}</span></p>
       </div>
-      <button type="button" class="rounded p-0.5 opacity-70 hover:opacity-100" :aria-label="t('recording.dismiss')" @click="dismissedError = lastError.key">
+      <button type="button" class="rounded p-0.5 opacity-70 hover:opacity-100" :aria-label="t('recording.dismiss')" @click="recording.dismissStop(lastError.key)">
         <X class="size-4" />
       </button>
     </div>
 
     <section class="space-y-2">
-      <p v-for="location in unavailableLocations.filter(l => l.id !== 'local' && l.reason !== 'not_mounted')" :key="location.id" class="break-words text-xs text-amber-600 dark:text-amber-400">{{ t('recording.nasOmitted', { name: location.name }) }}</p>
+      <p v-for="location in unavailableLocations.filter(l => l.id !== 'local' && l.reason === 'unresponsive')" :key="location.id" class="break-words text-xs text-amber-600 dark:text-amber-400">{{ t('recording.nasOmitted', { name: location.name }) }}</p>
       <div class="flex items-baseline justify-between">
         <h3 class="text-sm font-medium">
           {{ t('recording.library') }}
           <span v-if="files.length" class="ml-1 font-normal text-muted-foreground">{{ files.length }}</span>
         </h3>
-        <span v-if="files.length" class="text-xs text-muted-foreground">{{ t('recording.totalSize', { size: formatBytes(totalBytes) }) }}</span>
+        <span v-if="files.length" class="whitespace-nowrap text-xs text-muted-foreground">{{ t('recording.totalSize', { size: formatBytes(totalBytes) }) }}</span>
+      </div>
+
+      <div v-if="fileLocations.length >= 2" role="group" :aria-label="t('recording.filterLocation')" class="flex flex-wrap gap-1 rounded-lg bg-muted/50 p-1">
+        <Button size="sm" :variant="fileLocationFilter === 'all' ? 'secondary' : 'ghost'" :aria-pressed="fileLocationFilter === 'all'" @click="fileLocationFilter = 'all'">{{ t('recording.allLocations') }}</Button>
+        <Button v-for="location in fileLocations" :key="location.id" size="sm" class="max-w-full min-w-0"
+          :variant="fileLocationFilter === location.id ? 'secondary' : 'ghost'" :aria-pressed="fileLocationFilter === location.id"
+          @click="fileLocationFilter = location.id"><span class="truncate" :title="locationName(location)">{{ locationName(location) }}</span></Button>
       </div>
 
       <div v-if="!files.length" class="flex flex-col items-center rounded-xl border border-dashed px-4 py-8 text-center">
@@ -214,7 +213,7 @@ function confirmDelete() {
 
       <ul v-else class="-mx-1 max-h-72 space-y-1 overflow-y-auto px-1">
         <li
-          v-for="file in files"
+          v-for="file in filteredFiles"
           :key="`${file.location.id}:${file.name}`"
           :data-recording="file.name"
           :class="['group flex items-center gap-3 rounded-lg border px-3 py-2.5 transition-colors', isActive(file) ? 'border-red-500/30 bg-red-500/[0.04]' : 'hover:bg-muted/50']"
@@ -229,11 +228,11 @@ function confirmDelete() {
               <Badge v-else-if="!file.complete" variant="warning" class="px-1.5 py-0 text-[10px]">{{ t('recording.partialBadge') }}</Badge>
             </div>
             <p class="truncate text-xs text-muted-foreground tabular-nums">{{ isActive(file) ? t('recording.inProgress') : fileMeta(file) }}</p>
-            <Badge variant="secondary" class="max-w-full truncate px-1.5 py-0 text-[10px]">{{ locationName(file.location) }}</Badge>
-            <p v-if="file.stop_reason && !isActive(file)" class="truncate text-xs text-amber-600 dark:text-amber-400" :title="reasonText(file.stop_reason)">
+            <Badge v-if="fileLocations.length >= 2" variant="secondary" class="max-w-full truncate px-1.5 py-0 text-[10px]">{{ locationName(file.location) }}</Badge>
+            <p v-if="!file.complete && !isActive(file)" class="truncate text-xs text-muted-foreground" :title="t('recording.partial')">{{ t('recording.partial') }}</p>
+            <p v-else-if="file.stop_reason && !isActive(file)" class="truncate text-xs text-muted-foreground" :title="reasonText(file.stop_reason)">
               {{ t('recording.stoppedBecause', { reason: reasonText(file.stop_reason) }) }}
             </p>
-            <p v-else-if="!file.complete && !isActive(file)" class="text-xs text-amber-600 dark:text-amber-400">{{ t('recording.partial') }}</p>
           </div>
           <div v-if="!isActive(file)" class="flex shrink-0 items-center gap-0.5">
             <Button as-child variant="ghost" size="icon-sm">

@@ -814,7 +814,7 @@ const hasRightOverflow = computed(() => {
       <SheetHeader class="sr-only">
         <SheetTitle>{{ t('recording.title') }}</SheetTitle>
       </SheetHeader>
-      <RecordingPanel v-if="mobileRecordOpen" :video-mode="props.videoMode" @switch-codec="emit('update:videoMode', $event)" />
+      <RecordingPanel v-if="mobileRecordOpen" inline-location-picker :video-mode="props.videoMode" @switch-codec="emit('update:videoMode', $event)" />
     </SheetContent>
   </Sheet>
 

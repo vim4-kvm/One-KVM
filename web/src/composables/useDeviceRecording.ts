@@ -57,11 +57,30 @@ const fetchedAt = ref(0)
 const now = ref(Date.now())
 const openRequests = ref(0)
 const codecSwitchPrompt = ref<((confirmed: boolean) => void) | null>(null)
+const stoppedLocation = ref<RecordingLocation | null>(null)
+const dismissalKey = 'recording.dismissedStop'
+const dismissedStop = ref<string | null>(readDismissedStop())
+
+function readDismissedStop() {
+  try { return localStorage.getItem(dismissalKey) } catch { return null }
+}
+
+function dismissStop(key: string | null) {
+  if (dismissedStop.value === key) return
+  dismissedStop.value = key
+  try {
+    if (key === null) localStorage.removeItem(dismissalKey)
+    else localStorage.setItem(dismissalKey, key)
+  } catch {
+    // Keep dismissal working for this page when browser storage is unavailable.
+  }
+}
 
 let users = 0
 let pollTimer: ReturnType<typeof setTimeout> | undefined
 let clockTimer: ReturnType<typeof setInterval> | undefined
 let stopRequested = false
+let locationRevision = 0
 
 function t(key: string, params?: Record<string, unknown>) {
   return String(i18n.global.t(key, params as never))
@@ -108,6 +127,9 @@ async function fetchFiles() {
   const result = await request<{ files: RecordingFile[]; unavailable: LocationAvailability[] }>('/recording/files?details=true', {}, { toastOnError: false })
   files.value = result.files
   unavailableLocations.value = result.unavailable
+}
+
+async function refreshLocations() {
   locations.value = await request<LocationAvailability[]>('/recording/locations', {}, { toastOnError: false })
 }
 
@@ -132,8 +154,17 @@ function announceTransition(previous: RecordingStatus | null, next: RecordingSta
 async function refresh() {
   try {
     const previous = status.value
+    const revision = locationRevision
     const next = await request<RecordingStatus>('/recording', {}, { toastOnError: false })
+    if (revision !== locationRevision) return
     const finished = previous?.recording && !next.recording
+    if (next.recording) {
+      dismissStop(null)
+      stoppedLocation.value = null
+    } else if (next.file && (next.error_code || next.error) && (!stoppedLocation.value || previous?.started_at !== next.started_at)) {
+      // The status API reports the selected destination, even for an older stopped recording.
+      stoppedLocation.value = previous?.recording ? previous.location : next.location
+    }
     status.value = next
     fetchedAt.value = Date.now()
     if (panelOpen.value || finished || !files.value.length) await fetchFiles()
@@ -201,8 +232,26 @@ export function useDeviceRecording() {
     files,
     locations,
     unavailableLocations,
-    setLocation(location: string, folder: string) {
-      return run('location', () => request('/recording/location', { method: 'PUT', body: JSON.stringify({ location, folder }) }))
+    stoppedLocation,
+    dismissedStop,
+    dismissStop,
+    refreshLocations,
+    async setLocation(location: string, folder: string) {
+      if (action.value || status.value?.recording) throw new Error('Recording is busy')
+      action.value = 'location'
+      locationRevision++
+      try {
+        await request('/recording/location', { method: 'PUT', body: JSON.stringify({ location, folder }) }, { toastOnError: false })
+        const selected = locations.value.find(entry => entry.id === location)
+        if (selected) {
+          if (location !== 'local') selected.folder = folder
+          if (status.value) status.value = { ...status.value, location: { id: selected.id, name: selected.name, folder: selected.folder } }
+        }
+      } finally {
+        await refresh()
+        action.value = null
+        schedule()
+      }
     },
     unreachable,
     action,
