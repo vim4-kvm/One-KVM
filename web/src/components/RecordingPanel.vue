@@ -178,7 +178,7 @@ function confirmDelete() {
             <p v-if="status && freeBytes !== null" class="mt-1 flex flex-wrap items-baseline gap-x-1 text-xs text-muted-foreground">
               <span class="max-w-full truncate" :title="locationName(status.location)">{{ locationName(status.location) }}</span>
               <span class="whitespace-nowrap">{{ t('recording.free', { size: formatBytes(freeBytes) }) }}</span>
-              <span v-if="remainingSeconds !== null" class="whitespace-nowrap">· {{ remainingText(remainingSeconds) }}</span>
+              <span v-if="remainingSeconds !== null" class="basis-full whitespace-nowrap">{{ remainingText(remainingSeconds) }}</span>
             </p>
           </template>
         </div>
