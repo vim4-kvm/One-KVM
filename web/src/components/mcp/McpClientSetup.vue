@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Check, Copy } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import SegmentedChoice from '@/components/SegmentedChoice.vue'
 import { useClipboard } from '@/composables/useClipboard'
 import { codexInstallCommand } from '@/lib/mcpClientSetup'
 
@@ -40,14 +40,7 @@ async function copySnippet() {
 
 <template>
   <section class="min-w-0 space-y-2">
-    <Tabs v-model="tab" class="min-w-0 gap-2 sm:flex-row sm:items-center">
-      <h3 class="text-sm font-medium">{{ t('extensions.mcp.connectClient') }}</h3>
-      <TabsList class="max-w-full">
-        <TabsTrigger value="claude">{{ t('extensions.mcp.clients.claude') }}</TabsTrigger>
-        <TabsTrigger value="codex">{{ t('extensions.mcp.clients.codex') }}</TabsTrigger>
-        <TabsTrigger value="json">{{ t('extensions.mcp.clients.json') }}</TabsTrigger>
-      </TabsList>
-    </Tabs>
+    <SegmentedChoice v-model="tab" :label="t('extensions.mcp.connectClient')" :options="['claude', 'codex', 'json'].map(value => ({ value, label: t(`extensions.mcp.clients.${value}`) }))" />
     <div class="relative min-w-0 rounded-md border bg-muted/30">
       <pre class="overflow-x-auto p-3 pt-11 font-mono text-xs sm:mr-36 sm:pt-3"><code>{{ preview }}</code></pre>
       <Button class="absolute right-1 top-1 h-7 px-2 text-xs" variant="ghost" size="sm" :disabled="disabled || copying" @click="copySnippet">

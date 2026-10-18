@@ -62,7 +62,7 @@ pub fn list() -> Vec<Value> {
         tool(
             "screenshot",
             "Screenshot",
-            "Capture the current screen of the computer behind the KVM. Returns a JPEG and its size. All coordinates for other tools are pixels in this image. Take one before acting and after each group of actions.",
+            "Capture the current screen of the computer behind the KVM. Returns a JPEG and its size, limited by the configured screenshot long edge without upscaling. All coordinates for other tools are pixels in this returned image. Take one before acting and after each group of actions.",
             json!({}),
             &[],
         ),

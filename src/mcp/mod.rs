@@ -173,6 +173,7 @@ impl McpService {
         started: tokio::time::Instant,
         error: Option<String>,
         detail: Option<String>,
+        text: Option<String>,
     ) {
         let mut s = self.status.lock();
         // An older concurrent call must not replace the latest call's summary.
@@ -183,6 +184,7 @@ impl McpService {
             s.last_input = Some(tokio::time::Instant::now());
         }
         let record = McpCallRecord {
+            text,
             at: now(),
             client: s.activity.client.clone(),
             tool: tool.into(),
@@ -192,14 +194,20 @@ impl McpService {
             detail,
         };
         s.recent.push_front(record);
-        s.recent.truncate(20);
+        s.recent.truncate(50);
+    }
+    pub fn clear_activity(&self) {
+        self.status.lock().recent.clear();
     }
     pub async fn status(&self, snapshot: &crate::video::snapshot::SnapshotService) -> McpStatus {
         let cfg = self.config.get();
-        let video_signal = snapshot.source_size().await.is_some();
+        let source_size = snapshot.source_size().await;
+        let video_signal = source_size.is_some();
         let activity = self.activity();
         let credentials = self.credentials.lock();
         McpStatus {
+            screenshot_long_edge: cfg.mcp.screenshot_long_edge,
+            source_size: source_size.map(|(w, h)| [w, h]),
             enabled: cfg.mcp.enabled,
             host_natural_scrolling: cfg.mcp.host_natural_scrolling,
             endpoint_path: "/api/mcp".into(),

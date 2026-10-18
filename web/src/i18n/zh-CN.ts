@@ -693,6 +693,7 @@ export default {
     aboutSubtitle: '在线升级与版本信息',
     extTtydSubtitle: '在浏览器中打开本机 Shell 终端',
     thirdPartyAccessSubtitle: '集中配置 UU 远程、RustDesk、VNC、RTSP 与 Redfish 外部接入',
+    extMcpSubtitle: '让 Claude、Codex 等 AI 客户端查看屏幕、操作键盘鼠标',
     extRemoteAccessSubtitle: '通过内网穿透服务实现远程访问',
     extFrpcSubtitle: '通过 FRP 客户端实现内网穿透',
     watchdog: {
@@ -1186,6 +1187,14 @@ export default {
   },
   extensions: {
     mcp: {
+      service: '服务',
+      preferences: '设置',
+      clear: '清空',
+      noActivity: '还没有调用记录',
+      screenshotSize: '截图尺寸',
+      recommendedSize: '1280 推荐',
+      screenshotSizeHint: 'AI 看到的画面长边像素。越大小字越清楚，但每张截图更耗 token，点击准确度可能下降；小字优先用 zoom 查看。',
+      noUpscale: '当前画面 {width}×{height}，截图不会放大',
       title: 'MCP',
       desc: '让 Claude、Codex 等 AI 客户端通过 MCP 查看屏幕、操作键盘鼠标',
       states: {
@@ -1244,7 +1253,7 @@ export default {
       preempted: '已被接管',
       busy: '忙',
       failed: '失败',
-      showAll: '显示全部 {count} 条',
+      showAll: '显示全部（{count} 条）',
       showLess: '收起',
       stale: '状态未更新（重试中）',
       loading: '加载中',

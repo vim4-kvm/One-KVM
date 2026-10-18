@@ -694,6 +694,7 @@ export default {
     aboutSubtitle: 'Online upgrade and version information',
     extTtydSubtitle: 'Open a host Shell terminal in the browser',
     thirdPartyAccessSubtitle: 'Configure external UU Remote, RustDesk, VNC, RTSP, and Redfish access',
+    extMcpSubtitle: 'Let AI clients such as Claude and Codex see the screen and control the keyboard and mouse',
     extRemoteAccessSubtitle: 'Remote access through NAT-traversal services',
     extFrpcSubtitle: 'NAT traversal through the FRP client',
     watchdog: {
@@ -1187,6 +1188,14 @@ export default {
   },
   extensions: {
     mcp: {
+      service: 'Service',
+      preferences: 'Settings',
+      clear: 'Clear',
+      noActivity: 'No calls yet',
+      screenshotSize: 'Screenshot size',
+      recommendedSize: '1280 Recommended',
+      screenshotSizeHint: 'Long edge of the screenshots the AI sees. Larger is sharper but costs more tokens per screenshot and may reduce click accuracy; zoom is usually better for small text.',
+      noUpscale: 'Current screen {width}×{height}; screenshots will not be upscaled',
       title: 'MCP',
       desc: 'Let AI clients such as Claude and Codex see the screen and control the keyboard and mouse over MCP',
       states: {
@@ -1245,7 +1254,7 @@ export default {
       preempted: 'Taken over',
       busy: 'Busy',
       failed: 'Failed',
-      showAll: 'Show all {count}',
+      showAll: 'Show all ({count})',
       showLess: 'Show less',
       stale: 'Status not updated (retrying)',
       loading: 'Loading',

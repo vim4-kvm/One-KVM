@@ -16,11 +16,23 @@ fn no_store(value: impl serde::Serialize) -> Response {
 pub async fn status(State(state): State<Arc<AppState>>) -> Response {
     no_store(state.mcp.status(&state.snapshot).await)
 }
+pub async fn clear_activity(State(state): State<Arc<AppState>>) -> Response {
+    state.mcp.clear_activity();
+    no_store(state.mcp.status(&state.snapshot).await)
+}
 pub async fn config(
     State(state): State<Arc<AppState>>,
     Json(update): Json<McpConfigUpdate>,
 ) -> Result<Response, AppError> {
     let _guard = state.mcp.mutation.lock().await;
+    if update
+        .screenshot_long_edge
+        .is_some_and(|value| !crate::config::valid_screenshot_long_edge(value))
+    {
+        return Err(AppError::BadRequest(
+            "Screenshot long edge must be 1280, 1568, 1920 or 2560.".into(),
+        ));
+    }
     if let Some(enabled) = update.enabled {
         if enabled {
             state
@@ -34,6 +46,9 @@ pub async fn config(
     state
         .config
         .update(|config| {
+            if let Some(value) = update.screenshot_long_edge {
+                config.mcp.screenshot_long_edge = value;
+            }
             if let Some(enabled) = update.enabled {
                 config.mcp.enabled = enabled;
             }

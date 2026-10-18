@@ -79,8 +79,8 @@ fn validate(name: &str, args: &Value) -> Result<(), String> {
     }
     Ok(())
 }
-pub fn display_size(w: u32, h: u32) -> (u32, u32) {
-    let scale = (1280.0 / w.max(h) as f64).min(1.0);
+pub fn display_size(w: u32, h: u32, long_edge: u32) -> (u32, u32) {
+    let scale = (long_edge as f64 / w.max(h) as f64).min(1.0);
     (
         (w as f64 * scale).round().max(1.0) as u32,
         (h as f64 * scale).round().max(1.0) as u32,
@@ -129,11 +129,25 @@ pub async fn call(state: Arc<AppState>, name: &str, args: Value) -> Value {
         started,
         result.as_ref().err().cloned(),
         detail,
+        if name == "type" {
+            args["text"].as_str().map(activity_text)
+        } else {
+            None
+        },
     );
     match result {
         Ok(value) => value,
         Err(error) => json!({"isError":true,"content":[{"type":"text","text":error}]}),
     }
+}
+// Private session history only: never pass this text to activity events or tracing.
+fn activity_text(text: &str) -> String {
+    let mut chars = text.chars();
+    let mut preview: String = chars.by_ref().take(500).collect();
+    if chars.next().is_some() {
+        preview.push('…');
+    }
+    preview
 }
 /// Arguments have passed schema validation. Typed text is represented only by its length.
 fn argument_detail(name: &str, args: &Value) -> Option<String> {
@@ -173,7 +187,7 @@ async fn execute(
         return screenshot(state, name, args, detail).await;
     }
     let source = state.snapshot.source_size().await;
-    let size = source.map(|(w, h)| display_size(w, h));
+    let size = source.map(|(w, h)| display_size(w, h, state.config.get().mcp.screenshot_long_edge));
     if name == "cursor_position" {
         let (x, y) = state
             .hid
@@ -441,13 +455,14 @@ async fn screenshot(
     args: &Value,
     detail: &mut Option<String>,
 ) -> Result<Value, String> {
+    let long_edge = state.config.get().mcp.screenshot_long_edge;
     let target = if name == "zoom" {
         let (sw, sh) = state
             .snapshot
             .source_size()
             .await
             .ok_or("screen size is unknown: no video signal")?;
-        let (w, h) = display_size(sw, sh);
+        let (w, h) = display_size(sw, sh, long_edge);
         let r = &args["region"];
         let values: Vec<i64> = r
             .as_array()
@@ -466,12 +481,12 @@ async fn screenshot(
             y,
             w: (x1 as u64 * sw as u64 / w as u64) as u32 - x,
             h: (y1 as u64 * sh as u64 / h as u64) as u32 - y,
-            max_long_edge: 1280,
+            max_long_edge: long_edge,
             max_upscale: 4.0,
         }
     } else {
         SnapshotTarget::Fit {
-            max_long_edge: 1280,
+            max_long_edge: long_edge,
         }
     };
     let frame = state
@@ -484,11 +499,11 @@ async fn screenshot(
             SnapshotError::Busy => "Another screenshot is running. Retry after it finishes.".into(),
             SnapshotError::Unavailable(reason) => format!("Screenshot unavailable: {reason}"),
         })?;
-    if frame.jpeg.len() > 1024 * 1024 {
+    if frame.jpeg.len() >= 1024 * 1024 {
         return Err("Screenshot exceeds the 1 MiB response limit.".into());
     }
     let text = if name == "zoom" {
-        let (w, h) = display_size(frame.source_width, frame.source_height);
+        let (w, h) = display_size(frame.source_width, frame.source_height, long_edge);
         format!(
             "Zoomed region {} at {}x{}. Coordinates stay in the {w}x{h} screen space.",
             args["region"], frame.width, frame.height
@@ -516,15 +531,59 @@ mod tests {
     use super::*;
     #[test]
     fn coordinate_contract() {
-        assert_eq!(display_size(3840, 2160), (1280, 720));
-        assert_eq!(display_size(1920, 1080), (1280, 720));
-        assert_eq!(display_size(1024, 768), (1024, 768));
+        for (edge, expected) in [
+            (1280, (1280, 720)),
+            (1568, (1568, 882)),
+            (1920, (1920, 1080)),
+            (2560, (2560, 1440)),
+        ] {
+            for (source, size) in [
+                ((3840, 2160), expected),
+                (
+                    (1920, 1080),
+                    if edge < 1920 { expected } else { (1920, 1080) },
+                ),
+                ((1280, 720), (1280, 720)),
+            ] {
+                assert_eq!(display_size(source.0, source.1, edge), size);
+                assert_eq!(point(&json!([0, 0]), size).unwrap(), (0, 0));
+                assert_eq!(
+                    point(&json!([size.0 - 1, size.1 - 1]), size).unwrap(),
+                    (32767, 32767)
+                );
+                assert!(point(&json!([size.0, size.1]), size).is_err());
+            }
+        }
+        assert_eq!(display_size(1024, 768, 1280), (1024, 768));
         assert_eq!(point(&json!([0, 0]), (1280, 720)).unwrap(), (0, 0));
         assert_eq!(
             point(&json!([1279, 719]), (1280, 720)).unwrap(),
             (32767, 32767)
         );
         assert!(point(&json!([1280, 0]), (1280, 720)).is_err());
+    }
+    #[test]
+    fn private_text_preview_truncates_unicode_characters() {
+        for count in [0, 499, 500, 501, 1000] {
+            let input = "界".repeat(count);
+            let expected = format!(
+                "{}{}",
+                "界".repeat(count.min(500)),
+                if count > 500 { "…" } else { "" }
+            );
+            assert_eq!(activity_text(&input), expected);
+        }
+        // Guard the private record path against accidental log instrumentation.
+        let service = include_str!("mod.rs");
+        let record = service
+            .split("pub fn record(")
+            .nth(1)
+            .unwrap()
+            .split("pub async fn status")
+            .next()
+            .unwrap();
+        assert!(!record.contains("tracing::"));
+        assert!(!record.contains("instrument"));
     }
     #[test]
     fn validates_bounds_and_unknown_arguments() {

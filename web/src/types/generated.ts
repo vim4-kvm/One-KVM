@@ -5,6 +5,7 @@
 export interface McpConfig {
 	enabled: boolean;
 	host_natural_scrolling: boolean;
+	screenshot_long_edge: number;
 }
 
 export interface RecordingConfig {
@@ -661,6 +662,7 @@ export interface McpActivity {
 }
 
 export interface McpCallRecord {
+	text: string | null;
 	at: string;
 	client: string | null;
 	tool: string;
@@ -677,6 +679,7 @@ export interface McpCapabilities {
 }
 
 export interface McpConfigUpdate {
+	screenshot_long_edge?: number;
 	enabled?: boolean;
 	host_natural_scrolling?: boolean;
 }
@@ -686,6 +689,8 @@ export interface McpKey {
 }
 
 export interface McpStatus {
+	screenshot_long_edge: number;
+	source_size: [number, number] | null;
 	enabled: boolean;
 	host_natural_scrolling: boolean;
 	endpoint_path: string;

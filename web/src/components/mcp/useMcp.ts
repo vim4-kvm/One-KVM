@@ -53,7 +53,11 @@ export function useMcp() {
     }
     return key.api_key
   })
-  return { response, busy, stale, refresh, save, regenerate }
+  const clearActivity = () => mutate(async () => {
+    response.value = await mcpApi.clearActivity()
+    stale.value = false
+  })
+  return { response, busy, stale, refresh, save, regenerate, clearActivity }
 }
 export type McpController = ReturnType<typeof useMcp>
 

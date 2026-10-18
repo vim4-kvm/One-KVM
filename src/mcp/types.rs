@@ -16,6 +16,8 @@ pub struct McpActivity {
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpCallRecord {
+    #[typeshare(serialized_as = "String", typescript(type = "string | null"))]
+    pub text: Option<String>,
     pub at: String,
     #[typeshare(serialized_as = "String", typescript(type = "string | null"))]
     pub client: Option<String>,
@@ -37,6 +39,9 @@ pub struct McpCapabilities {
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpStatus {
+    pub screenshot_long_edge: u32,
+    #[typeshare(serialized_as = "String", typescript(type = "[number, number] | null"))]
+    pub source_size: Option<[u32; 2]>,
     pub enabled: bool,
     pub host_natural_scrolling: bool,
     pub endpoint_path: String,
@@ -53,6 +58,7 @@ pub struct McpStatus {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpConfigUpdate {
+    pub screenshot_long_edge: Option<u32>,
     pub enabled: Option<bool>,
     pub host_natural_scrolling: Option<bool>,
 }

@@ -402,6 +402,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     let mcp_management = Router::new()
         .route("/mcp/status", get(handlers::mcp::status))
+        .route(
+            "/mcp/activity",
+            axum::routing::delete(handlers::mcp::clear_activity),
+        )
         .route("/mcp/config", axum::routing::patch(handlers::mcp::config))
         .route("/mcp/key", get(handlers::mcp::key))
         .route("/mcp/key/regenerate", post(handlers::mcp::regenerate))

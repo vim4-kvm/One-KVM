@@ -74,7 +74,7 @@ onBeforeUnmount(() => {
             <p v-if="tool">{{ t('extensions.mcp.current', { tool }) }}</p>
             <p>{{ t('extensions.mcp.takeOverHint') }}</p>
           </template>
-          <RouterLink class="inline-block underline" to="/settings?tab=third-party-access">{{ t('extensions.mcp.settings') }}</RouterLink>
+          <RouterLink class="inline-block underline" to="/settings?tab=ext-mcp">{{ t('extensions.mcp.settings') }}</RouterLink>
         </PopoverContent>
       </Popover>
     </div>

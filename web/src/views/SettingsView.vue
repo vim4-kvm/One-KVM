@@ -194,6 +194,7 @@ const SETTINGS_SECTION_IDS = [
   'environment',
   'other',
   'ext-ttyd',
+  'ext-mcp',
   'third-party-access',
   'ext-remote-access',
   'about',
@@ -225,6 +226,7 @@ const navGroups = computed(() => [
     title: t('settings.extensions'),
     items: [
       { id: 'ext-ttyd', label: t('extensions.ttyd.title'), icon: Terminal },
+      { id: 'ext-mcp', label: t('extensions.mcp.title'), icon: Bot },
       { id: 'third-party-access', label: t('extensions.thirdPartyAccess.title'), icon: ScreenShare },
       { id: 'ext-remote-access', label: t('extensions.remoteAccess.title'), icon: ExternalLink },
     ]
@@ -251,6 +253,7 @@ const sectionMeta = computed(() => {
 function sectionSubtitleKey(id: string): string {
   switch (id) {
     case 'ext-ttyd': return 'extTtydSubtitle'
+    case 'ext-mcp': return 'extMcpSubtitle'
     case 'third-party-access': return 'thirdPartyAccessSubtitle'
     case 'ext-remote-access': return 'extRemoteAccessSubtitle'
     default: return `${id}Subtitle`
@@ -574,12 +577,19 @@ watch(activeSection, (section) => {
     ? setInterval(() => {
       if (!document.hidden) {
         void uu.refresh()
-        void mcp.refresh()
       }
     }, 5000)
     : null
 }, { immediate: true })
 onBeforeUnmount(() => { if (uuStatusTimer) clearInterval(uuStatusTimer) })
+let mcpStatusTimer: ReturnType<typeof setInterval> | null = null
+watch(activeSection, section => {
+  if (mcpStatusTimer) clearInterval(mcpStatusTimer)
+  mcpStatusTimer = section === 'ext-mcp'
+    ? setInterval(() => { if (!document.hidden) void mcp.refresh() }, 5000)
+    : null
+}, { immediate: true })
+onBeforeUnmount(() => { if (mcpStatusTimer) clearInterval(mcpStatusTimer) })
 
 function formatHostForUrl(hostname: string): string {
   if (!hostname) return '127.0.0.1'
@@ -4814,7 +4824,7 @@ watch(isWindows, () => {
 
           <!-- UU Remote Section -->
           <UuRemoteCard v-if="activeSection === 'third-party-access'" :remote="uu" :active="activeSection === 'third-party-access'" :is-vim4="isVim4" @navigate="activeSection = $event" />
-          <McpCard v-if="activeSection === 'third-party-access'" :controller="mcp" @navigate="activeSection = $event" />
+          <McpCard v-if="activeSection === 'ext-mcp'" :controller="mcp" @navigate="activeSection = $event" />
 
           <!-- RTSP Section -->
           <div v-show="activeSection === 'third-party-access'" class="space-y-4">

@@ -3,6 +3,7 @@ import type { McpConfigUpdate, McpKey, McpStatus } from '@/types/generated'
 
 const quiet = { toastOnError: false }
 export const mcpApi = {
+  clearActivity: () => request<McpStatus>('/mcp/activity', { method: 'DELETE' }, quiet),
   status: () => request<McpStatus>('/mcp/status', { cache: 'no-store' }, quiet),
   patchConfig: (patch: McpConfigUpdate) => request<McpStatus>('/mcp/config', {
     method: 'PATCH', body: JSON.stringify(patch),

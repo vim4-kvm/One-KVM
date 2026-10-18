@@ -17,7 +17,7 @@ defineEmits<{ 'update:modelValue': [value: string] }>()
       v-for="option in options"
       :key="option.value"
       :value="option.value"
-      class="rounded-md px-3 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 data-[state=checked]:bg-background data-[state=checked]:shadow-sm"
+      class="min-h-8 rounded-md px-3 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 data-[state=checked]:bg-background data-[state=checked]:shadow-sm"
     >
       {{ option.label }}
     </RadioGroupItem>

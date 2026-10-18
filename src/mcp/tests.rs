@@ -11,6 +11,7 @@ fn natural_scrolling_reverses_both_axes() {
     let legacy: crate::config::McpConfig =
         serde_json::from_value(json!({"enabled": true})).unwrap();
     assert!(!legacy.host_natural_scrolling);
+    assert_eq!(legacy.screenshot_long_edge, 1280);
 }
 
 async fn state(data: &std::path::Path) -> Arc<crate::state::AppState> {
@@ -108,6 +109,7 @@ async fn activity_keeps_the_latest_call_summary_when_calls_finish_out_of_order()
         started,
         None,
         Some("1280x720".into()),
+        None,
     );
     assert_eq!(state.mcp.activity().detail.as_deref(), Some("1280x720"));
 
@@ -120,6 +122,7 @@ async fn activity_keeps_the_latest_call_summary_when_calls_finish_out_of_order()
         started,
         None,
         Some("(1, 2)".into()),
+        None,
     );
     assert_eq!(state.mcp.activity().detail.as_deref(), Some("(640, 360)"));
     state.mcp.record(
@@ -129,6 +132,7 @@ async fn activity_keeps_the_latest_call_summary_when_calls_finish_out_of_order()
         started,
         None,
         Some("(640, 360)".into()),
+        None,
     );
     state.mcp.begin("wait", None);
     assert_eq!(state.mcp.activity().detail, None);
@@ -195,6 +199,48 @@ async fn protocol_and_credentials_are_isolated_from_web_sessions() {
     assert_eq!(status["enabled"], true);
     assert_eq!(status["host_natural_scrolling"], false);
     assert!(!state.config.get().mcp.host_natural_scrolling);
+    for edge in [1280, 1568, 1920, 2560, 0, 720, 1281, u32::MAX] {
+        let response = client
+            .patch(format!("{endpoint}/config"))
+            .bearer_auth(&session.id)
+            .json(&json!({"screenshot_long_edge": edge}))
+            .send()
+            .await
+            .unwrap();
+        if crate::config::valid_screenshot_long_edge(edge) {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["screenshot_long_edge"],
+                edge
+            );
+        } else {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(state.config.get().mcp.screenshot_long_edge, 2560);
+        }
+    }
+    tools::call(state.clone(), "type", json!({"text": "private activity"})).await;
+    for credential in [None, Some(key.as_str())] {
+        let request = client.delete(format!("{endpoint}/activity"));
+        let request = if let Some(value) = credential {
+            request.bearer_auth(value)
+        } else {
+            request
+        };
+        assert_eq!(
+            request.send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert!(!state.mcp.status(&state.snapshot).await.recent.is_empty());
+    let response = client
+        .delete(format!("{endpoint}/activity"))
+        .bearer_auth(&session.id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.json::<Value>().await.unwrap()["recent"], json!([]));
     assert_eq!(
         client
             .post(&endpoint)
@@ -450,7 +496,7 @@ async fn mouse_without_a_known_position_does_not_jump_to_the_origin() {
 }
 
 #[tokio::test]
-async fn activity_events_follow_lease_cooldown_and_history_excludes_typed_text() {
+async fn activity_events_exclude_text_but_private_history_keeps_fifty_and_can_clear() {
     let temp = tempfile::tempdir().unwrap();
     let state = state(temp.path()).await;
     state.config.update(|c| c.mcp.enabled = true).await.unwrap();
@@ -472,16 +518,22 @@ async fn activity_events_follow_lease_cooldown_and_history_excludes_typed_text()
         tokio::time::Instant::now(),
         None,
         Some("ctrl+s".into()),
+        None,
     );
     tokio::time::advance(Duration::from_secs(3)).await;
     assert_eq!(state.mcp.activity().state, "idle");
     assert_eq!(state.mcp.activity().detail.as_deref(), Some("ctrl+s"));
     let sensitive = "private input value";
-    for _ in 0..22 {
+    for _ in 0..52 {
         tools::call(state.clone(), "type", json!({"text":sensitive})).await;
     }
     let status = state.mcp.status(&state.snapshot).await;
-    assert_eq!(status.recent.len(), 20);
-    assert!(!serde_json::to_string(&status).unwrap().contains(sensitive));
+    assert_eq!(status.recent.len(), 50);
+    assert_eq!(status.recent[0].text.as_deref(), Some(sensitive));
+    assert!(!serde_json::to_string(&status.activity)
+        .unwrap()
+        .contains(sensitive));
     assert_eq!(status.recent[0].detail.as_deref(), Some("19 chars"));
+    state.mcp.clear_activity();
+    assert!(state.mcp.status(&state.snapshot).await.recent.is_empty());
 }

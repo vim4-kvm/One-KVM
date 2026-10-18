@@ -5,7 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
-import UuChoice from './UuChoice.vue'
+import SegmentedChoice from '@/components/SegmentedChoice.vue'
 import { useUuRemoteContext } from './useUuRemote'
 import type { UuRemoteStatusResponse } from '@/api'
 import { request } from '@/api/request'
@@ -165,7 +165,7 @@ onBeforeUnmount(() => clearTimeout(savedTimer))
             :disabled="busy || !!pending"
             @update:model-value="change(field, $event)"
           />
-          <UuChoice
+          <SegmentedChoice
             v-else
             :model-value="String(value(field))"
             :label="t(`extensions.uuRemote.${labels[field]}`)"
