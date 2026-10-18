@@ -30,10 +30,19 @@ pub async fn config(
                 .ensure()
                 .map_err(AppError::Internal)?;
         }
-        state
-            .config
-            .update(|config| config.mcp.enabled = enabled)
-            .await?;
+    }
+    state
+        .config
+        .update(|config| {
+            if let Some(enabled) = update.enabled {
+                config.mcp.enabled = enabled;
+            }
+            if let Some(natural) = update.host_natural_scrolling {
+                config.mcp.host_natural_scrolling = natural;
+            }
+        })
+        .await?;
+    if let Some(enabled) = update.enabled {
         state.mcp.set_enabled(enabled);
         if !enabled {
             state.hid.cancel_mcp().await?;

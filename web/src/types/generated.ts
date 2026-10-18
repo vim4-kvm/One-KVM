@@ -4,6 +4,7 @@
 
 export interface McpConfig {
 	enabled: boolean;
+	host_natural_scrolling: boolean;
 }
 
 export interface RecordingConfig {
@@ -677,6 +678,7 @@ export interface McpCapabilities {
 
 export interface McpConfigUpdate {
 	enabled?: boolean;
+	host_natural_scrolling?: boolean;
 }
 
 export interface McpKey {
@@ -685,6 +687,7 @@ export interface McpKey {
 
 export interface McpStatus {
 	enabled: boolean;
+	host_natural_scrolling: boolean;
 	endpoint_path: string;
 	api_key_preview: string | null;
 	credentials_error: string | null;

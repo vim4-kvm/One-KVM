@@ -38,6 +38,7 @@ pub struct McpCapabilities {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpStatus {
     pub enabled: bool,
+    pub host_natural_scrolling: bool,
     pub endpoint_path: String,
     #[typeshare(serialized_as = "String", typescript(type = "string | null"))]
     pub api_key_preview: Option<String>,
@@ -53,6 +54,7 @@ pub struct McpStatus {
 #[serde(deny_unknown_fields)]
 pub struct McpConfigUpdate {
     pub enabled: Option<bool>,
+    pub host_natural_scrolling: Option<bool>,
 }
 #[typeshare]
 #[derive(Serialize)]

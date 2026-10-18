@@ -71,7 +71,11 @@ async function keyAction(action: () => Promise<void>) {
 async function toggle(enabled: boolean) {
   error.value = ''
   if (!enabled) hideKey()
-  try { await save(enabled) } catch (cause) { report(cause) }
+  try { await save({ enabled }) } catch (cause) { report(cause) }
+}
+async function toggleNaturalScrolling(host_natural_scrolling: boolean) {
+  error.value = ''
+  try { await save({ host_natural_scrolling }) } catch (cause) { report(cause) }
 }
 async function reveal() {
   if (revealed.value) { hideKey(); return }
@@ -161,6 +165,13 @@ async function copyEndpoint() {
         <p v-if="http" class="text-xs text-amber-600 sm:col-start-2 dark:text-amber-400">{{ t('extensions.mcp.httpWarning') }}</p>
       </div>
       <McpClientSetup :endpoint="endpoint" :display-key="displayKey" :get-key="getKey" :disabled="busy || keyBusy" @error="error = $event" />
+      <div class="space-y-2">
+        <div class="flex items-center justify-between gap-3">
+          <label for="mcp-natural-scrolling" class="text-sm">{{ t('extensions.mcp.naturalScrolling') }}</label>
+          <Switch id="mcp-natural-scrolling" :model-value="response.host_natural_scrolling" :disabled="busy || keyBusy" @update:model-value="toggleNaturalScrolling" />
+        </div>
+        <p class="text-xs text-muted-foreground">{{ t('extensions.mcp.naturalScrollingHint') }}</p>
+      </div>
       <McpActivityList :records="response.recent" />
     </CardContent>
   </Card>

@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { mcpApi } from '@/api/mcp'
-import type { McpStatus } from '@/types/generated'
+import type { McpConfigUpdate, McpStatus } from '@/types/generated'
 import i18n from '@/i18n'
 
 export function useMcp() {
@@ -38,8 +38,8 @@ export function useMcp() {
     }
   }
 
-  const save = (enabled: boolean) => mutate(async () => {
-    response.value = await mcpApi.patchConfig({ enabled })
+  const save = (patch: McpConfigUpdate) => mutate(async () => {
+    response.value = await mcpApi.patchConfig(patch)
     stale.value = false
   })
   const regenerate = () => mutate(async () => {

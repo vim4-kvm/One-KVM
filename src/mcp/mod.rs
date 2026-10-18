@@ -201,6 +201,7 @@ impl McpService {
         let credentials = self.credentials.lock();
         McpStatus {
             enabled: cfg.mcp.enabled,
+            host_natural_scrolling: cfg.mcp.host_natural_scrolling,
             endpoint_path: "/api/mcp".into(),
             api_key_preview: credentials.preview(),
             credentials_error: credentials.error.clone(),

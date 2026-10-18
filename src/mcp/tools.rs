@@ -251,6 +251,19 @@ async fn execute(
     }
     result
 }
+pub(super) fn scroll_wheel(direction: &str, host_natural_scrolling: bool) -> i8 {
+    let wheel = if matches!(direction, "up" | "left") {
+        1
+    } else {
+        -1
+    };
+    if host_natural_scrolling {
+        -wheel
+    } else {
+        wheel
+    }
+}
+
 struct Input<'a> {
     state: &'a Arc<AppState>,
     lease: &'a InputLease,
@@ -381,11 +394,10 @@ impl Input<'_> {
             }
             "scroll" => {
                 let direction = args["scroll_direction"].as_str().unwrap();
-                let wheel = if matches!(direction, "up" | "left") {
-                    1
-                } else {
-                    -1
-                };
+                let wheel = scroll_wheel(
+                    direction,
+                    self.state.config.get().mcp.host_natural_scrolling,
+                );
                 let amount = args["scroll_amount"].as_u64().unwrap();
                 for n in 0..amount {
                     self.mouse(wheel).await?;

@@ -1234,6 +1234,8 @@ export default {
       noKeyboard: '键盘未启用，AI 无法输入。',
       usbSettings: '到 USB 设置中开启',
       computerUseActive: '内置 Computer Use 正在运行，MCP 暂时只能截图',
+      naturalScrolling: '自然滚动',
+      naturalScrollingHint: '被控机开启了自然滚动时打开（macOS 默认开启），让 AI 的上下滚动方向正确',
       recentActivity: '最近活动',
       justNow: '刚刚',
       secondsAgo: '{count} 秒前',

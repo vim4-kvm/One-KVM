@@ -1235,6 +1235,8 @@ export default {
       noKeyboard: 'Keyboard is disabled. AI cannot type.',
       usbSettings: 'Enable in USB settings',
       computerUseActive: 'Built-in Computer Use is running. MCP can only take screenshots for now.',
+      naturalScrolling: 'Natural scrolling',
+      naturalScrollingHint: 'Turn on if the controlled computer uses natural scrolling (on by default in macOS) so AI scrolling goes the right way',
       recentActivity: 'Recent activity',
       justNow: 'Just now',
       secondsAgo: '{count}s ago',

@@ -2,6 +2,17 @@ use super::*;
 use axum::http::StatusCode;
 use serde_json::{json, Value};
 
+#[test]
+fn natural_scrolling_reverses_both_axes() {
+    for (direction, wheel) in [("up", 1), ("down", -1), ("left", 1), ("right", -1)] {
+        assert_eq!(tools::scroll_wheel(direction, false), wheel);
+        assert_eq!(tools::scroll_wheel(direction, true), -wheel);
+    }
+    let legacy: crate::config::McpConfig =
+        serde_json::from_value(json!({"enabled": true})).unwrap();
+    assert!(!legacy.host_natural_scrolling);
+}
+
 async fn state(data: &std::path::Path) -> Arc<crate::state::AppState> {
     use crate::{
         audio::AudioController,
@@ -163,11 +174,27 @@ async fn protocol_and_credentials_are_isolated_from_web_sessions() {
     let response = client
         .patch(format!("{endpoint}/config"))
         .bearer_auth(&session.id)
-        .json(&json!({"enabled":true}))
+        .json(&json!({"enabled":true, "host_natural_scrolling":true}))
         .send()
         .await
         .unwrap();
     assert!(response.status().is_success());
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["host_natural_scrolling"],
+        true
+    );
+    let response = client
+        .patch(format!("{endpoint}/config"))
+        .bearer_auth(&session.id)
+        .json(&json!({"host_natural_scrolling":false}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let status = response.json::<Value>().await.unwrap();
+    assert_eq!(status["enabled"], true);
+    assert_eq!(status["host_natural_scrolling"], false);
+    assert!(!state.config.get().mcp.host_natural_scrolling);
     assert_eq!(
         client
             .post(&endpoint)
@@ -180,7 +207,6 @@ async fn protocol_and_credentials_are_isolated_from_web_sessions() {
             .status(),
         StatusCode::OK
     );
-    let status: Value = response.json().await.unwrap();
     assert!(!status.to_string().contains(&key));
     assert_eq!(
         client

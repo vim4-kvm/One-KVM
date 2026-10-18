@@ -6,4 +6,5 @@ use typeshare::typeshare;
 #[serde(default, deny_unknown_fields)]
 pub struct McpConfig {
     pub enabled: bool,
+    pub host_natural_scrolling: bool,
 }

@@ -179,7 +179,7 @@ pub fn list() -> Vec<Value> {
         tool(
             "type",
             "Type text",
-            "Type text at the current keyboard focus using a US keyboard layout. Characters that cannot be typed (for example CJK or emoji) are skipped and reported. Up to 1000 characters.",
+            "Type text at the current keyboard focus using a US keyboard layout. Characters that cannot be typed (for example CJK or emoji) are skipped and reported. Up to 1000 characters. Text goes through the host's active input method; switch to an English layout first if a CJK input method is active.",
             json!({
                 "text": {
                     "type": "string",
