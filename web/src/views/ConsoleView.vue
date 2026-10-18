@@ -225,6 +225,7 @@ let pendingMouseMove: { type: 'move' | 'move_abs'; x: number; y: number } | null
 let accumulatedDelta = { x: 0, y: 0 }
 
 const cursorVisible = ref(localStorage.getItem('hidShowCursor') !== 'false')
+const cursorStyle = ref(localStorage.getItem('hidCursorStyle') === 'crosshair' ? 'crosshair' : 'native')
 let interactionListenersBound = false
 const isConsoleActive = ref(false)
 
@@ -2987,6 +2988,11 @@ function handleCursorVisibilityChange(e: Event) {
   }
 }
 
+function handleCursorStyleChange(e: Event) {
+  const customEvent = e as CustomEvent<{ style: string }>
+  cursorStyle.value = customEvent.detail.style === 'crosshair' ? 'crosshair' : 'native'
+}
+
 function clampMouseMoveSendIntervalMs(ms: number): number {
   if (!Number.isFinite(ms)) return DEFAULT_MOUSE_MOVE_SEND_INTERVAL_MS
   return Math.max(0, Math.min(1000, Math.floor(ms)))
@@ -3030,6 +3036,7 @@ function registerInteractionListeners() {
   window.addEventListener('blur', handleBlur)
   window.addEventListener('mouseup', handleWindowMouseUp)
   window.addEventListener('hidCursorVisibilityChanged', handleCursorVisibilityChange as EventListener)
+  window.addEventListener('hidCursorStyleChanged', handleCursorStyleChange)
   window.addEventListener('hidMouseSendIntervalChanged', handleMouseSendIntervalChange as EventListener)
   window.addEventListener('storage', handleMouseSendIntervalStorage)
 
@@ -3048,6 +3055,7 @@ function unregisterInteractionListeners() {
   window.removeEventListener('blur', handleBlur)
   window.removeEventListener('mouseup', handleWindowMouseUp)
   window.removeEventListener('hidCursorVisibilityChanged', handleCursorVisibilityChange as EventListener)
+  window.removeEventListener('hidCursorStyleChanged', handleCursorStyleChange)
   window.removeEventListener('hidMouseSendIntervalChanged', handleMouseSendIntervalChange as EventListener)
   window.removeEventListener('storage', handleMouseSendIntervalStorage)
 
@@ -3414,7 +3422,8 @@ onUnmounted(() => {
           >
             <div
               ref="videoContainerRef"
-              class="relative flex shrink-0 cursor-none items-center justify-center overflow-hidden bg-black touch-none"
+              class="relative flex shrink-0 items-center justify-center overflow-hidden bg-black touch-none"
+              :class="cursorVisible && cursorStyle === 'native' ? 'cursor-default' : 'cursor-none'"
               :style="videoContainerStyle"
               tabindex="0"
               @mouseleave="handleMouseLeaveVideo"
@@ -3457,15 +3466,22 @@ onUnmounted(() => {
                 />
               </div>
           <div
-            v-if="cursorVisible && localCrosshairPos"
-            class="pointer-events-none absolute z-[15] -translate-x-1/2 -translate-y-1/2"
+            v-if="cursorVisible && localCrosshairPos && (cursorStyle === 'crosshair' || isPointerLocked)"
+            class="pointer-events-none absolute z-[15]"
+            :class="{ '-translate-x-1/2 -translate-y-1/2': cursorStyle === 'crosshair' }"
             :style="{
               left: `${localCrosshairPos.x}px`,
               top: `${localCrosshairPos.y}px`,
             }"
             aria-hidden="true"
           >
+            <!-- Pointer lock hides the OS cursor, so render an arrow with its tip at the tracked position. -->
+            <svg v-if="cursorStyle === 'native'" width="20" height="24" viewBox="0 0 20 24">
+              <path d="M1 1 L1 18 L5.5 13.5 L9.5 22 L13 20.5 L9 12 L16 12 Z"
+                fill="white" stroke="black" stroke-width="1.5" stroke-linejoin="round" />
+            </svg>
             <svg
+              v-else
               width="23"
               height="23"
               viewBox="-11.5 -11.5 23 23"

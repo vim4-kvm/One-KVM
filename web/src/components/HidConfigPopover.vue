@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { Slider } from '@/components/ui/slider'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import {
   Popover,
   PopoverContent,
@@ -53,6 +54,7 @@ const mouseThrottle = ref<number>(
 const showCursor = ref<boolean>(
   localStorage.getItem('hidShowCursor') !== 'false' // default true
 )
+const cursorStyle = ref(localStorage.getItem('hidCursorStyle') === 'crosshair' ? 'crosshair' : 'native')
 const reverseScroll = ref<boolean>(localStorage.getItem('hidReverseScroll') === 'true')
 
 watch(reverseScroll, (value) => {
@@ -66,6 +68,11 @@ watch(showCursor, (newValue, oldValue) => {
       detail: { visible: newValue }
     }))
   }
+})
+
+watch(cursorStyle, (style) => {
+  localStorage.setItem('hidCursorStyle', style)
+  window.dispatchEvent(new CustomEvent('hidCursorStyleChanged', { detail: { style } }))
 })
 
 const buttonText = computed(() => t('actionbar.hidConfig'))
@@ -143,6 +150,7 @@ watch(() => props.open, (open) => {
   if (!open) return
   mouseThrottle.value = loadMouseMoveSendIntervalFromStorage()
   showCursor.value = localStorage.getItem('hidShowCursor') !== 'false'
+  cursorStyle.value = localStorage.getItem('hidCursorStyle') === 'crosshair' ? 'crosshair' : 'native'
   reverseScroll.value = localStorage.getItem('hidReverseScroll') === 'true'
   if (!hidSaving.value) void configStore.refreshHid().catch(() => undefined)
 })
@@ -235,6 +243,19 @@ watch(() => props.open, (open) => {
           <div class="flex items-center justify-between">
             <Label class="text-xs text-muted-foreground">{{ t('actionbar.showCursor') }}</Label>
             <Switch v-model="showCursor" />
+          </div>
+
+          <div class="flex items-center justify-between gap-3">
+            <Label for="hid-cursor-style" class="text-xs text-muted-foreground">{{ t('actionbar.cursorStyle') }}</Label>
+            <Select v-model="cursorStyle" :disabled="!showCursor">
+              <SelectTrigger id="hid-cursor-style" size="sm" class="w-32 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="native">{{ t('actionbar.cursorNative') }}</SelectItem>
+                <SelectItem value="crosshair">{{ t('actionbar.cursorCrosshair') }}</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <div class="flex items-center justify-between">
