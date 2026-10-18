@@ -4804,6 +4804,9 @@ watch(isWindows, () => {
             </Card>
           </div>
 
+          <!-- UU Remote Section -->
+          <UuRemoteCard v-if="activeSection === 'third-party-access'" :remote="uu" :active="activeSection === 'third-party-access'" :is-vim4="isVim4" @navigate="activeSection = $event" />
+
           <!-- RTSP Section -->
           <div v-show="activeSection === 'third-party-access'" class="space-y-4">
             <Card>
@@ -5051,9 +5054,6 @@ watch(isWindows, () => {
               </CardFooter>
             </Card>
           </div>
-
-          <!-- UU Remote Section -->
-          <UuRemoteCard v-if="activeSection === 'third-party-access'" :remote="uu" :active="activeSection === 'third-party-access'" :is-vim4="isVim4" @navigate="activeSection = $event" />
 
           <!-- RustDesk Section -->
           <div v-show="activeSection === 'third-party-access'" class="space-y-4">
