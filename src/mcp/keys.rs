@@ -112,6 +112,35 @@ pub fn modifiers(text: &str) -> Result<KeyboardReport, String> {
     Ok(report)
 }
 
+/// Derive history text from parsed usages, never from untrusted key names.
+pub fn normalized_chord(text: &str) -> Result<String, String> {
+    let report = chord(text)?;
+    let mut names = Vec::new();
+    for (bit, name) in [
+        "ctrl", "shift", "alt", "super", "ctrl_r", "shift_r", "alt_r", "super_r",
+    ]
+    .iter()
+    .enumerate()
+    {
+        if report.modifiers & (1 << bit) != 0 {
+            names.push((*name).to_owned());
+        }
+    }
+    let mut keys = report.keys;
+    keys.sort_unstable();
+    for usage in keys.into_iter().filter(|usage| *usage != 0) {
+        let key = CanonicalKey::from_hid_usage(usage).expect("parsed key has a canonical usage");
+        let name = format!("{key:?}").to_ascii_lowercase();
+        names.push(
+            name.strip_prefix("key")
+                .or_else(|| name.strip_prefix("digit"))
+                .unwrap_or(&name)
+                .to_owned(),
+        );
+    }
+    Ok(names.join("+"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +155,28 @@ mod tests {
         assert_eq!(character('中'), None);
         assert_eq!(character('\n'), Some((40, 0)));
     }
+    #[test]
+    fn normalized_chords_preserve_parsed_meaning() {
+        for (text, expected) in [
+            ("Control+KeyS", "ctrl+s"),
+            ("KeyS+ctrl+ctrl", "ctrl+s"),
+            ("SHIFT+Control+KeyS", "ctrl+shift+s"),
+            ("A", "shift+a"),
+            ("?", "shift+slash"),
+            ("ctrl_r+KP_1", "ctrl_r+numpad1"),
+            ("Return", "enter"),
+            ("Prior", "pageup"),
+        ] {
+            let normalized = normalized_chord(text).unwrap();
+            assert_eq!(normalized, expected);
+            assert_eq!(
+                chord(text).unwrap().to_bytes(),
+                chord(&normalized).unwrap().to_bytes()
+            );
+        }
+        assert!(normalized_chord("private-invalid-key").is_err());
+    }
+
     #[test]
     fn aliases_chords_and_limits() {
         assert_eq!(

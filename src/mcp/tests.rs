@@ -43,6 +43,45 @@ async fn state(data: &std::path::Path) -> Arc<crate::state::AppState> {
 }
 
 #[tokio::test]
+async fn activity_details_normalize_keys_and_do_not_copy_typed_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = state(temp.path()).await;
+    for (name, args, expected) in [
+        ("key", json!({"text": "Control+KeyS"}), Some("ctrl+s")),
+        (
+            "hold_key",
+            json!({"text": "SHIFT+Control+KeyS", "duration": 0.1}),
+            Some("ctrl+shift+s"),
+        ),
+        ("key", json!({"text": "private-invalid-key"}), None),
+        ("type", json!({"text": "secret中文"}), Some("8 chars")),
+        (
+            "scroll",
+            json!({"scroll_direction": "down", "scroll_amount": 3}),
+            Some("down 3"),
+        ),
+        (
+            "left_click_drag",
+            json!({"start_coordinate": [1, 2], "coordinate": [3, 4]}),
+            Some("(1, 2) → (3, 4)"),
+        ),
+        (
+            "zoom",
+            json!({"region": [0, 0, 100, 200]}),
+            Some("[0,0,100,200]"),
+        ),
+        ("mouse_move", json!({"coordinate": [1, 2]}), Some("(1, 2)")),
+        ("mouse_move", json!({"coordinate": ["secret", 2]}), None),
+    ] {
+        tools::call(state.clone(), name, args).await;
+        let status = state.mcp.status(&state.snapshot).await;
+        let record = &status.recent[0];
+        assert_eq!(record.tool, name);
+        assert_eq!(record.detail.as_deref(), expected, "{name}");
+    }
+}
+
+#[tokio::test]
 async fn protocol_and_credentials_are_isolated_from_web_sessions() {
     let temp = tempfile::tempdir().unwrap();
     let state = state(temp.path()).await;
@@ -132,7 +171,24 @@ async fn protocol_and_credentials_are_isolated_from_web_sessions() {
         StatusCode::UNAUTHORIZED
     );
     for version in ["2025-11-25", "2025-06-18", "2025-03-26", "unknown"] {
-        let response:Value = client.post(&endpoint).bearer_auth(&key).json(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":version,"clientInfo":{"name":"test-client"}}})).send().await.unwrap().json().await.unwrap();
+        let response: Value = client
+            .post(&endpoint)
+            .bearer_auth(&key)
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": version,
+                    "clientInfo": {"name": "test-client"}
+                }
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         assert_eq!(
             response["result"]["protocolVersion"],
             if version == "unknown" {
@@ -166,10 +222,26 @@ async fn protocol_and_credentials_are_isolated_from_web_sessions() {
         .await
         .unwrap();
     assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 17);
+    let mut descriptions = std::collections::HashSet::new();
     for tool in list["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["inputSchema"]["additionalProperties"], false);
         assert!(tool["title"].is_string());
         assert!(tool["annotations"]["readOnlyHint"].is_boolean());
+        let description = tool["description"].as_str().unwrap();
+        assert!(!description.trim().is_empty());
+        assert!(
+            descriptions.insert(description),
+            "duplicate tool description"
+        );
+        for parameter in tool["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .values()
+        {
+            assert!(parameter["description"]
+                .as_str()
+                .is_some_and(|description| !description.trim().is_empty()));
+        }
     }
     for (body, code) in [
         ("{", -32700),
@@ -188,7 +260,21 @@ async fn protocol_and_credentials_are_isolated_from_web_sessions() {
             .unwrap();
         assert_eq!(response["error"]["code"], code);
     }
-    let call:Value = client.post(&endpoint).bearer_auth(&key).json(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"key","arguments":{"text":"Return"}}})).send().await.unwrap().json().await.unwrap();
+    let call: Value = client
+        .post(&endpoint)
+        .bearer_auth(&key)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "key", "arguments": {"text": "Return"}}
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(call["result"]["isError"], true);
     assert_eq!(
         call["result"]["content"][0]["text"],

@@ -29,31 +29,8 @@ pub const NAMES: &[&str] = &[
 pub fn read_only(name: &str) -> bool {
     matches!(name, "screenshot" | "zoom" | "cursor_position" | "wait")
 }
-fn coordinate_schema() -> Value {
-    json!({"type":"array","items":{"type":"integer"},"minItems":2,"maxItems":2})
-}
-pub fn list() -> Vec<Value> {
-    NAMES.iter().map(|name| {
-        let mut properties = json!({}); let mut required = Vec::new();
-        match *name {
-            "mouse_move"|"left_click_drag" => { properties["coordinate"] = coordinate_schema(); required.push("coordinate"); if *name == "left_click_drag" { properties["start_coordinate"] = coordinate_schema(); required.push("start_coordinate"); properties["text"] = json!({"type":"string"}); } }
-            "left_click"|"right_click"|"middle_click"|"double_click"|"triple_click"|"scroll" => { properties["coordinate"] = coordinate_schema(); properties["text"] = json!({"type":"string","description":"Modifiers held only during the action: shift, ctrl, alt, super joined with +."}); }
-            "type"|"key"|"hold_key" => { properties["text"] = json!({"type":"string"}); required.push("text"); }
-            "zoom" => { properties["region"] = json!({"type":"array","items":{"type":"integer"},"minItems":4,"maxItems":4}); required.push("region"); }
-            _ => {},
-        }
-        match *name {
-            "type" => properties["text"]["maxLength"] = json!(1000),
-            "key" => properties["repeat"] = json!({"type":"integer","minimum":1,"maximum":100,"default":1}),
-            "hold_key"|"wait" => { properties["duration"] = json!({"type":"number","minimum":if *name == "wait" {0.0} else {0.05},"maximum":30}); required.push("duration"); }
-            "scroll" => { properties["scroll_direction"] = json!({"type":"string","enum":["up","down","left","right"]}); properties["scroll_amount"] = json!({"type":"integer","minimum":1,"maximum":50}); required.extend(["scroll_direction","scroll_amount"]); }
-            _ => {},
-        }
-        json!({"name":name,"title":name.replace('_'," "),"description":if *name == "scroll" { "Scroll at the current or given position. Horizontal scrolling uses Shift plus vertical wheel reports." } else { "Hardware KVM action. Coordinates are pixels in the screenshot space. Keyboard uses the US layout." },
-            "inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},
-            "annotations":if read_only(name) { json!({"readOnlyHint":true}) } else { json!({"readOnlyHint":false,"destructiveHint":true,"idempotentHint":false,"openWorldHint":true}) }})
-    }).collect()
-}
+pub use super::definitions::list;
+
 fn validate(name: &str, args: &Value) -> Result<(), String> {
     let schema = list()
         .into_iter()
@@ -130,21 +107,17 @@ pub async fn call(state: Arc<AppState>, name: &str, args: Value) -> Value {
     let started = tokio::time::Instant::now();
     state.mcp.begin(name);
     let token = state.mcp.operation_token();
+    let mut detail = None;
     let result = match validate(name, &args) {
-        Ok(()) => tokio::select! { biased;
-            _ = token.cancelled() => Err(crate::hid::control::DISABLED.into()),
-            result = execute(&state,name,&args) => result,
-        },
+        Ok(()) => {
+            detail = argument_detail(name, &args);
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => Err(crate::hid::control::DISABLED.into()),
+                result = execute(&state, name, &args, &mut detail) => result,
+            }
+        }
         Err(e) => Err(e),
-    };
-    // Never copy input text or arbitrary key names into the activity history.
-    let detail = if name == "type" {
-        args["text"]
-            .as_str()
-            .map(|s| format!("{} chars", s.chars().count()))
-    } else {
-        args.get("coordinate")
-            .map(|c| format!("({}, {})", c[0], c[1]))
     };
     state.mcp.record(
         name,
@@ -158,13 +131,42 @@ pub async fn call(state: Arc<AppState>, name: &str, args: Value) -> Value {
         Err(error) => json!({"isError":true,"content":[{"type":"text","text":error}]}),
     }
 }
-async fn execute(state: &Arc<AppState>, name: &str, args: &Value) -> Result<Value, String> {
+/// Arguments have passed schema validation. Typed text is represented only by its length.
+fn argument_detail(name: &str, args: &Value) -> Option<String> {
+    match name {
+        "type" => Some(format!("{} chars", args["text"].as_str()?.chars().count())),
+        "key" | "hold_key" => super::keys::normalized_chord(args["text"].as_str()?).ok(),
+        "zoom" => Some(args["region"].to_string()),
+        "scroll" => Some(format!(
+            "{} {}",
+            args["scroll_direction"].as_str()?,
+            args["scroll_amount"]
+        )),
+        "left_click_drag" => Some(format!(
+            "({}, {}) → ({}, {})",
+            args["start_coordinate"][0],
+            args["start_coordinate"][1],
+            args["coordinate"][0],
+            args["coordinate"][1]
+        )),
+        _ => args
+            .get("coordinate")
+            .map(|c| format!("({}, {})", c[0], c[1])),
+    }
+}
+
+async fn execute(
+    state: &Arc<AppState>,
+    name: &str,
+    args: &Value,
+    detail: &mut Option<String>,
+) -> Result<Value, String> {
     if name == "wait" {
         tokio::time::sleep(Duration::from_secs_f64(args["duration"].as_f64().unwrap())).await;
         return Ok(text_result("OK"));
     }
     if matches!(name, "screenshot" | "zoom") {
-        return screenshot(state, name, args).await;
+        return screenshot(state, name, args, detail).await;
     }
     let source = state.snapshot.source_size().await;
     let size = source.map(|(w, h)| display_size(w, h));
@@ -417,7 +419,12 @@ impl Input<'_> {
         Ok(text_result("OK"))
     }
 }
-async fn screenshot(state: &AppState, name: &str, args: &Value) -> Result<Value, String> {
+async fn screenshot(
+    state: &AppState,
+    name: &str,
+    args: &Value,
+    detail: &mut Option<String>,
+) -> Result<Value, String> {
     let target = if name == "zoom" {
         let (sw, sh) = state
             .snapshot
@@ -471,14 +478,22 @@ async fn screenshot(state: &AppState, name: &str, args: &Value) -> Result<Value,
             args["region"], frame.width, frame.height
         )
     } else {
+        *detail = Some(format!("{}x{}", frame.width, frame.height));
         format!(
             "Screen {}x{} (source {}x{}).",
             frame.width, frame.height, frame.source_width, frame.source_height
         )
     };
-    Ok(
-        json!({"content":[{"type":"image","mimeType":"image/jpeg","data":base64::engine::general_purpose::STANDARD.encode(frame.jpeg)},{"type":"text","text":text}]}),
-    )
+    Ok(json!({
+        "content": [
+            {
+                "type": "image",
+                "mimeType": "image/jpeg",
+                "data": base64::engine::general_purpose::STANDARD.encode(frame.jpeg)
+            },
+            {"type": "text", "text": text}
+        ]
+    }))
 }
 #[cfg(test)]
 mod tests {

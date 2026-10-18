@@ -1,6 +1,7 @@
 //! Stateless MCP transport, independent of web sessions and built-in CUA.
 pub mod auth;
 mod credentials;
+mod definitions;
 pub mod keys;
 pub mod server;
 #[cfg(all(test, unix))]
