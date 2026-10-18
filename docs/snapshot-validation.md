@@ -2,7 +2,7 @@
 
 `AppState.snapshot` implements the `SnapshotService` contract in the workspace's
 `logs/onekvm-mcp/design.md` §3. The public frame, target, error variants and method
-signatures are unchanged. MCP and `/api/snapshot` are not modified here.
+signatures are unchanged. MCP uses this service for `screenshot` and `zoom`.
 
 The raw tee is immediately after the existing `vfmcapsrc`, before queues and
 `videorate`. Its valve is closed when idle; the branch queue and appsink each
@@ -24,6 +24,16 @@ JPEG size must be strictly below 1 MiB. Neither hardware JPEG nor H.26x encoding
 is opened by the screenshot conversion. There is no second capture source,
 codec switch, keyframe request, or VPU mutex manipulation.
 
+The one-frame appsrc path uses private caps with `framerate=1/1`, constrains
+GE2D's output to the same rate, and queries downstream caps before pushing the
+frame. The vendor amlvconv caches rates inside `transform_caps`, ignores 0/1,
+and uses uninitialized local values when a template query has no fixed fraction.
+Appsrc does not normally perform the reverse query that initializes the output
+rate. Merely adding a fixed output capsfilter is insufficient. The explicit query
+initializes that cache; it does not change shared capture caps or streaming fps.
+An empty conversion EOS and bus errors return `Unavailable`; only an expired
+deadline returns `Timeout`. Bus errors are checked while waiting for RGB output.
+
 The service admits one operation. Caller cancellation closes the tap. Native work
 retains the slot until teardown, so timeout cannot create an unbounded worker pool.
 Pipeline startup finishes registration even if the caller disappears. Short
@@ -37,9 +47,12 @@ is one end-to-end budget. Quality must be 1–100, dimensions nonzero, region in
 validation limits include all design callers (1280, 4). Non-VIM4 builds expose the
 same service interface but report no source / unsupported raw capture.
 
-This branch has **not been run on a board**. Bounded queues and no IDR avoid known
-causes of stream stalls, but do not prove that DMA/GE2D/CPU contention has no effect
-on live streams. That is a hardware acceptance condition, not a measured result.
+The Fit failure was reproduced on VIM4 with 3840×2160 H.264: five of eight
+requests ended early while amlvconv logged a random rate ratio greater than one
+and `drop frame`. This drops the only input before EOS, previously mislabeled as
+a timeout. Hardware acceptance measurements are recorded separately; the broader
+codec, signal-change, motion and concurrent-viewer matrix below remains a test
+procedure, not a claim that every combination has passed.
 
 ## Builder checks
 

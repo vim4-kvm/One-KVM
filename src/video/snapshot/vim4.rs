@@ -184,6 +184,32 @@ fn conversion_caps(caps: &gst::CapsRef) -> gst::Caps {
     caps
 }
 
+fn start_conversion(
+    pipeline: &gst::Pipeline,
+    input: &gstreamer_app::AppSrc,
+    caps: &gst::CapsRef,
+) -> Result<(), SnapshotError> {
+    let caps = conversion_caps(caps);
+    input.set_caps(Some(&caps));
+    pipeline
+        .set_state(gst::State::Playing)
+        .map_err(SnapshotError::unavailable)?;
+    // appsrc normally pushes CAPS without querying downstream first. amlvconv
+    // caches its output rate in the reverse caps query, not in set_info, so a
+    // fixed output capsfilter alone leaves the rate from earlier template queries
+    // uninitialized. Query the complete, fixed path before submitting our frame.
+    let accepted = input
+        .static_pad("src")
+        .unwrap()
+        .peer_query_caps(Some(&caps));
+    if accepted.is_empty() {
+        return Err(SnapshotError::unavailable(
+            "conversion caps are unsupported",
+        ));
+    }
+    Ok(())
+}
+
 fn converted_sample(
     pipeline: &gst::Pipeline,
     output: &gstreamer_app::AppSink,
@@ -261,11 +287,7 @@ pub(crate) fn encode(
         .unwrap()
         .downcast::<gstreamer_app::AppSink>()
         .unwrap();
-    input.set_caps(Some(&conversion_caps(caps)));
-    conversion
-        .0
-        .set_state(gst::State::Playing)
-        .map_err(SnapshotError::unavailable)?;
+    start_conversion(&conversion.0, &input, caps)?;
     input
         .push_buffer(
             sample
@@ -346,9 +368,36 @@ mod tests {
                 .buffer(&sample.buffer().unwrap().to_owned())
                 .caps(&caps)
                 .build();
-            let pipeline = gst::parse::launch("appsrc name=input format=time ! video/x-raw,framerate=1/1 ! appsink name=output sync=false async=false")
+            let pipeline = gst::parse::launch("appsrc name=input format=time ! identity name=converter ! video/x-raw,framerate=1/1 ! appsink name=output sync=false async=false")
                 .unwrap().downcast::<gst::Pipeline>().unwrap();
             let conversion = Conversion(pipeline);
+            // Model the vendor converter's dependency on a fixed caps query
+            // before its only frame: without the query it drops that frame.
+            let queried = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let seen = queried.clone();
+            conversion
+                .0
+                .by_name("converter")
+                .unwrap()
+                .static_pad("sink")
+                .unwrap()
+                .add_probe(
+                    gst::PadProbeType::QUERY_DOWNSTREAM | gst::PadProbeType::BUFFER,
+                    move |_, probe| {
+                        if let Some(query) = probe.query() {
+                            if let gst::QueryView::Caps(query) = query.view() {
+                                if query.filter().is_some_and(|caps| caps.is_fixed()) {
+                                    seen.store(true, Ordering::Release);
+                                }
+                            }
+                        }
+                        if probe.buffer().is_some() && !seen.load(Ordering::Acquire) {
+                            gst::PadProbeReturn::Drop
+                        } else {
+                            gst::PadProbeReturn::Ok
+                        }
+                    },
+                );
             let input = conversion
                 .0
                 .by_name("input")
@@ -361,8 +410,7 @@ mod tests {
                 .unwrap()
                 .downcast::<gstreamer_app::AppSink>()
                 .unwrap();
-            input.set_caps(Some(&conversion_caps(sample.caps().unwrap())));
-            conversion.0.set_state(gst::State::Playing).unwrap();
+            start_conversion(&conversion.0, &input, sample.caps().unwrap()).unwrap();
             input
                 .push_buffer(sample.buffer().unwrap().to_owned())
                 .unwrap();
