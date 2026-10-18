@@ -1,4 +1,8 @@
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use typeshare::typeshare;
 
@@ -24,12 +28,15 @@ pub struct UuRemoteConfigUpdate {
     pub device_name: Option<String>,
     pub reverse_scroll: Option<bool>,
     pub video_codec: Option<crate::config::UuVideoCodec>,
+    pub terminal: Option<crate::config::UuTerminalConfig>,
 }
 
 async fn status_response(state: &RemoteAccessApiState) -> UuRemoteStatusResponse {
+    let mut status = state.coordinator.uu_remote_status().await;
+    status.terminal.serial.usb_gadget_enabled = state.config.get().otg_serial.enabled;
     UuRemoteStatusResponse {
         config: state.config.get().uu_remote.clone(),
-        status: state.coordinator.uu_remote_status().await,
+        status,
         video: state.coordinator.uu_remote().video_output().await,
     }
 }
@@ -58,6 +65,10 @@ pub async fn update_uu_remote_config(
     if let Some(codec) = req.video_codec {
         new_config.video_codec = codec;
     }
+    if let Some(terminal) = req.terminal {
+        terminal.validate().map_err(AppError::BadRequest)?;
+        new_config.terminal = terminal;
+    }
     if let Some(name) = req.device_name {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 64 || name.chars().any(char::is_control) {
@@ -74,6 +85,64 @@ pub async fn update_uu_remote_config(
         .update(|config| config.uu_remote = new_config.clone())
         .await?;
     Ok(Json(status_response(&state).await))
+}
+
+pub async fn delete_uu_terminal_session(
+    State(state): State<RemoteAccessApiState>,
+    Path(id): Path<u32>,
+) -> StatusCode {
+    if state.coordinator.uu_remote().terminal().kill(id).await {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+pub async fn test_uu_terminal_ssh(
+    State(state): State<RemoteAccessApiState>,
+) -> Json<crate::uu_remote::terminal::targets::ssh::SshTestResponse> {
+    let terminal = state.coordinator.uu_remote().terminal();
+    let config = state.config.get().uu_remote.terminal.ssh.clone();
+    Json(terminal.ssh.test(&config).await)
+}
+
+#[typeshare]
+#[derive(Deserialize)]
+pub struct UuTerminalTrustRequest {
+    pub fingerprint: String,
+}
+
+pub async fn trust_uu_terminal_ssh(
+    State(state): State<RemoteAccessApiState>,
+    Json(request): Json<UuTerminalTrustRequest>,
+) -> Result<StatusCode> {
+    let _guard = try_apply_lock(&state.uu_remote_apply_lock, "uu_remote")?;
+    let terminal = state.coordinator.uu_remote().terminal();
+    let config = state.config.get().uu_remote.terminal.ssh.clone();
+    let trusted = terminal
+        .ssh
+        .trust(&config, &request.fingerprint)
+        .await
+        .map_err(AppError::Internal)?;
+    Ok(if trusted {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CONFLICT
+    })
+}
+
+pub async fn remove_uu_terminal_known_host(
+    State(state): State<RemoteAccessApiState>,
+) -> Result<StatusCode> {
+    let _guard = try_apply_lock(&state.uu_remote_apply_lock, "uu_remote")?;
+    let terminal = state.coordinator.uu_remote().terminal();
+    let config = state.config.get().uu_remote.terminal.ssh.clone();
+    terminal
+        .ssh
+        .remove(&config)
+        .await
+        .map_err(AppError::Internal)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn get_uu_remote_login(State(state): State<RemoteAccessApiState>) -> Json<UuLoginState> {

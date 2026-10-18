@@ -16,7 +16,7 @@ MEDIA = Path('/var/lib/one-kvm/msd')
 GADGET = Path('/sys/kernel/config/usb_gadget/kvm')
 UDC_ROOT = Path('/sys/class/udc')
 LUN = GADGET / 'functions/mass_storage.disk0/lun.0'
-FUNCTIONS = ('ncm.usb0', 'mass_storage.disk0', 'uac2.usb0')
+FUNCTIONS = ('ncm.usb0', 'mass_storage.disk0', 'uac2.usb0', 'acm.usb0')
 PROFILE_DIR = Path('/run/vim4-onekvm-usb')
 HID_FUNCTIONS = {'keyboard': 'hid.keyboard', 'mouse_absolute': 'hid.mouse_abs',
                  'mouse_relative': 'hid.mouse_rel', 'consumer': 'hid.consumer'}
@@ -49,23 +49,27 @@ def profile_links(profile, mounted):
         links.append(profile['network'] + '.usb0')
     if profile['uac']:
         links.append('uac2.usb0')
+    if profile.get('serial', False):
+        links.append('acm.usb0')
     if mounted:
         links.append('mass_storage.disk0')
-    # CRG fails CONFIG_EP with six IN endpoints. Network uses two; each
+    # CRG fails CONFIG_EP with six IN endpoints. Network and ACM use two; each
     # HID, mass-storage and microphone function consumes one.
-    endpoints = len(links) + bool(profile['network'])
+    endpoints = len(links) + bool(profile['network']) + bool(profile.get('serial', False))
     if endpoints > 5:
-        raise ValueError('VIM4 USB IN endpoint limit exceeded (maximum 5); disable a HID function, USB network or microphone')
+        raise ValueError('VIM4 USB IN endpoint limit exceeded (maximum 5); disable a HID function, USB network, serial or microphone')
     return links
 
 
 def validate_profile(profile):
-    if not isinstance(profile, dict) or set(profile) != {'hid', 'descriptor', 'network', 'uac', 'inquiry'}:
+    if not isinstance(profile, dict) or set(profile) - {'serial'} != {'hid', 'descriptor', 'network', 'uac', 'inquiry'}:
         raise ValueError('Invalid USB profile')
     if not isinstance(profile['hid'], dict) or set(profile['hid']) != set(HID_FUNCTIONS):
         raise ValueError('Invalid HID functions')
     if any(type(value) is not bool for value in profile['hid'].values()) or type(profile['uac']) is not bool:
         raise ValueError('USB function flags must be boolean')
+    if type(profile.get('serial', False)) is not bool:
+        raise ValueError('USB serial flag must be boolean')
     if profile['network'] not in ('', 'ncm', 'ecm', 'rndis'):
         raise ValueError('Unsupported USB network driver')
     if not isinstance(profile['inquiry'], dict) or set(profile['inquiry']) != {'flash', 'cdrom'}:
@@ -133,6 +137,8 @@ def replace_usb(target):
 
 
 def ensure_functions(profile):
+    if profile.get('serial', False):
+        (GADGET / 'functions/acm.usb0').mkdir(exist_ok=True)
     consumer = GADGET / 'functions/hid.consumer'
     if profile['hid']['consumer'] and not consumer.exists():
         consumer.mkdir()
@@ -210,16 +216,26 @@ def configure_profile(profile):
         return
     if not baseline.exists():
         save_json(baseline, old)
-    ensure_functions(profile)
-    replace_usb(target)
     try:
+        ensure_functions(profile)
+        replace_usb(target)
         settle_usb()
         configure_network(profile['network'])
+        remove_unused_serial()
         save_json(profile_file('profile.json'), profile)
     except Exception:
+        if 'acm.usb0' in old['links']:
+            (GADGET / 'functions/acm.usb0').mkdir(exist_ok=True)
         replace_usb(old)
+        remove_unused_serial()
         configure_network(previous['network'] if previous else '')
         raise
+
+
+def remove_unused_serial():
+    function = GADGET / 'functions/acm.usb0'
+    if function.exists() and not (GADGET / 'configs/c.1/acm.usb0').is_symlink():
+        function.rmdir()
 
 
 def restore_profile():
@@ -234,6 +250,7 @@ def restore_profile():
     target['links'].append('mass_storage.disk0' if (LUN / 'file').read_text().strip() else 'ncm.usb0')
     target['links'].sort()
     replace_usb(target)
+    remove_unused_serial()
     profile_file('profile.json').unlink(missing_ok=True)
     baseline.unlink()
 

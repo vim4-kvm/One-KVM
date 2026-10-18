@@ -196,6 +196,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/config/uu-remote/logout",
             post(handlers::config::logout_uu_remote),
         )
+        .route("/config/uu-remote/terminal/sessions/{id}", delete(handlers::config::delete_uu_terminal_session))
+        .route("/config/uu-remote/terminal/ssh/test", post(handlers::config::test_uu_terminal_ssh))
+        .route("/config/uu-remote/terminal/ssh/trust", post(handlers::config::trust_uu_terminal_ssh))
+        .route("/config/uu-remote/terminal/ssh/known-host", delete(handlers::config::remove_uu_terminal_known_host))
         // RTSP configuration endpoints
         .route("/config/rtsp", get(handlers::config::get_rtsp_config))
         .route("/config/rtsp", patch(handlers::config::update_rtsp_config))
@@ -299,7 +303,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             .route("/hid/otg/self-check", get(handlers::hid_otg_self_check))
             .route("/config/msd", get(handlers::config::get_msd_config))
             .route("/config/msd", patch(handlers::config::update_msd_config))
-            .route("/config/otg", patch(handlers::config::update_otg_config))
+            .route("/config/otg", get(handlers::config::get_otg_config).patch(handlers::config::update_otg_config))
             .route(
                 "/config/otg-network",
                 get(handlers::config::get_otg_network_config),

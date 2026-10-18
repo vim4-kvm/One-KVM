@@ -1,2 +1,4 @@
 # The board's three original HID nodes are owned by the shared NanoKVM rule.
 SUBSYSTEM=="hidg", KERNEL=="hidg3", GROUP="input", MODE="0660"
+# ACM uses the same serial-access group as USB serial adapters under systemd.
+SUBSYSTEM=="tty", KERNEL=="ttyGS0", GROUP="dialout", MODE="0660"

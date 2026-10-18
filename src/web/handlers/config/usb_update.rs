@@ -210,6 +210,7 @@ where
                 config.msd = staged_config.msd.clone();
                 config.otg_network = staged_config.otg_network.clone();
                 config.uac = staged_config.uac.clone();
+                config.otg_serial = staged_config.otg_serial.clone();
                 config.enforce_invariants();
             })
             .await

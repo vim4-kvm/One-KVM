@@ -72,6 +72,7 @@ pub struct UuRemoteConfig {
     /// None uses the system default, including configurations saved before this setting existed.
     pub reverse_scroll: Option<bool>,
     pub video_codec: UuVideoCodec,
+    pub terminal: super::UuTerminalConfig,
 }
 
 fn uu_device_name() -> String {
@@ -86,6 +87,7 @@ impl Default for UuRemoteConfig {
             device_name: uu_device_name(),
             reverse_scroll: None,
             video_codec: UuVideoCodec::Auto,
+            terminal: Default::default(),
         }
     }
 }

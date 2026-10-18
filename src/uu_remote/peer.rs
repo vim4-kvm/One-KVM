@@ -333,10 +333,14 @@ pub struct PeerDeps {
     pub hid: Arc<HidController>,
     pub audio: Arc<AudioController>,
     pub signaling: Arc<SignalingClient>,
+    pub terminal: Arc<super::terminal::Registry>,
 }
 
 /// State shared between the media tasks and the CONTROL channel.
 struct Shared {
+    closed: AtomicBool,
+    terminal: bool,
+    terminal_conn: parking_lot::Mutex<Option<Arc<super::terminal::TerminalConn>>>,
     deps: PeerDeps,
     sequence: AtomicU64,
     /// Encoded size and fps, refreshed by the video task.
@@ -401,6 +405,9 @@ impl Shared {
     }
 
     async fn update_input(&self, event: SessionInputEvent<'_>) {
+        if self.terminal {
+            return;
+        }
         self.input
             .update(event, |actions| self.send_hid(actions))
             .await;
@@ -408,6 +415,7 @@ impl Shared {
 }
 
 pub struct Peer {
+    pub created_at: Instant,
     pub pc: Arc<RTCPeerConnection>,
     context: Arc<Mutex<Context>>,
     video: Arc<VideoStreamManager>,
@@ -501,11 +509,18 @@ impl Peer {
         deps: PeerDeps,
         transport: SessionIce,
         offer: &SoacMessage,
+        terminal: bool,
     ) -> Result<Self, String> {
         let sdp = offer_sdp(offer).ok_or("Offer SDP is empty")?;
-        let constraints = deps.video.codec_constraints().await;
-        let codec = select_video_codec(&sdp, deps.video_codec, &constraints.allowed_webrtc_codecs)?;
-        info!(?codec, preference = ?deps.video_codec, "UU negotiated video codec");
+        let codec = if terminal {
+            VideoCodecType::H264
+        } else {
+            let constraints = deps.video.codec_constraints().await;
+            select_video_codec(&sdp, deps.video_codec, &constraints.allowed_webrtc_codecs)?
+        };
+        if !terminal {
+            info!(?codec, preference = ?deps.video_codec, "UU negotiated video codec");
+        }
         let mut media = MediaEngine::default();
         media
             .register_default_codecs()
@@ -566,6 +581,9 @@ impl Peer {
             .map(|c| c.bitrate_preset)
             .unwrap_or(BitratePreset::Balanced);
         let shared = Arc::new(Shared {
+            closed: AtomicBool::new(false),
+            terminal,
+            terminal_conn: parking_lot::Mutex::new(None),
             default_bitrate,
             custom_kbps: AtomicU64::new(u64::from(default_bitrate.bitrate_kbps())),
             actual_kbps: AtomicU64::new(u64::from(default_bitrate.bitrate_kbps())),
@@ -606,97 +624,120 @@ impl Peer {
             })
         }));
 
-        let video_track = Arc::new(VideoTrack::new(codec));
-        let video_sender = pc
-            .add_track(video_track.local())
-            .await
-            .map_err(|e| format!("Add video track failed: {e}"))?;
-        tokio::spawn(read_video_feedback(video_sender, shared.clone()));
-        // The viewer always offers an Opus m-line.
-        let audio_track = Arc::new(TrackLocalStaticSample::new(
-            RTCRtpCodecCapability {
-                mime_type: "audio/opus".to_owned(),
-                clock_rate: 48_000,
-                channels: 2,
-                ..Default::default()
-            },
-            "audio_0".to_owned(),
-            "audio_0".to_owned(),
-        ));
-        let audio_sender = pc
-            .add_track(audio_track.clone())
-            .await
-            .map_err(|e| format!("Add audio track failed: {e}"))?;
-        tokio::spawn(async move {
-            let mut rtcp = [0u8; 1500];
-            while audio_sender.read(&mut rtcp).await.is_ok() {}
-        });
+        if !terminal {
+            let video_track = Arc::new(VideoTrack::new(codec));
+            let video_sender = pc
+                .add_track(video_track.local())
+                .await
+                .map_err(|e| format!("Add video track failed: {e}"))?;
+            tokio::spawn(read_video_feedback(video_sender, shared.clone()));
+            // The viewer always offers an Opus m-line.
+            let audio_track = Arc::new(TrackLocalStaticSample::new(
+                RTCRtpCodecCapability {
+                    mime_type: "audio/opus".to_owned(),
+                    clock_rate: 48_000,
+                    channels: 2,
+                    ..Default::default()
+                },
+                "audio_0".to_owned(),
+                "audio_0".to_owned(),
+            ));
+            let audio_sender = pc
+                .add_track(audio_track.clone())
+                .await
+                .map_err(|e| format!("Add audio track failed: {e}"))?;
+            tokio::spawn(async move {
+                let mut rtcp = [0u8; 1500];
+                while audio_sender.read(&mut rtcp).await.is_ok() {}
+            });
 
-        let started = Arc::new(AtomicBool::new(false));
-        let (state_pc, state_shared, state_context) =
-            (Arc::downgrade(&pc), shared.clone(), context.clone());
-        pc.on_peer_connection_state_change(Box::new(move |state| {
-            let (pc, shared, context, started) = (
-                state_pc.clone(),
-                state_shared.clone(),
-                state_context.clone(),
-                started.clone(),
-            );
-            let (video_track, audio_track) = (video_track.clone(), audio_track.clone());
-            Box::pin(async move {
-                info!("UU peer connection state: {state:?}");
-                match state {
-                    PcState::Connected => shared.update_input(SessionInputEvent::Connected).await,
-                    PcState::Disconnected => {
-                        shared.update_input(SessionInputEvent::Disconnected).await
+            let started = Arc::new(AtomicBool::new(false));
+            let (state_pc, state_shared, state_context) =
+                (Arc::downgrade(&pc), shared.clone(), context.clone());
+            pc.on_peer_connection_state_change(Box::new(move |state| {
+                let (pc, shared, context, started) = (
+                    state_pc.clone(),
+                    state_shared.clone(),
+                    state_context.clone(),
+                    started.clone(),
+                );
+                let (video_track, audio_track) = (video_track.clone(), audio_track.clone());
+                Box::pin(async move {
+                    info!("UU peer connection state: {state:?}");
+                    match state {
+                        PcState::Connected => {
+                            shared.update_input(SessionInputEvent::Connected).await
+                        }
+                        PcState::Disconnected => {
+                            shared.update_input(SessionInputEvent::Disconnected).await
+                        }
+                        PcState::Closed | PcState::Failed => {
+                            shared.update_input(SessionInputEvent::Close).await
+                        }
+                        _ => {}
                     }
-                    PcState::Closed | PcState::Failed => {
-                        shared.update_input(SessionInputEvent::Close).await
+                    if state != PcState::Connected || started.swap(true, Ordering::AcqRel) {
+                        return;
                     }
-                    _ => {}
-                }
-                if state != PcState::Connected || started.swap(true, Ordering::AcqRel) {
-                    return;
-                }
-                let Some(pc) = pc.upgrade() else { return };
-                tokio::spawn(stream_video(pc.clone(), video_track, shared.clone(), codec));
-                tokio::spawn(stream_audio(pc, audio_track, shared.deps.audio.clone()));
-                let context = context.lock().await.clone();
-                let signal = &shared.deps.signaling;
-                if let (Some(client), Some(ice)) = (
-                    &context.client_id,
-                    context.ice_id.as_ref().and_then(|v| v.as_str()),
-                ) {
-                    let fps = shared.screen.borrow().1;
-                    if let Err(e) = signal
-                        .emit_event(
-                            FORWARD_SETTING_EVENT,
-                            device_capability(client, ice, fps, codec),
-                        )
-                        .await
-                    {
-                        warn!("UU device capability notification failed: {e}");
-                    }
-                    if let Some(control) = context.app_control_id.as_ref().and_then(|v| v.as_str())
-                    {
-                        let payload =
-                            serde_json::json!({ "ice_id": ice, "app_control_id": control });
-                        if let Err(e) = signal.emit_event(ICE_FINISHED_EVENT, payload).await {
-                            warn!("UU connection completion notification failed: {e}");
+                    let Some(pc) = pc.upgrade() else { return };
+                    tokio::spawn(stream_video(pc.clone(), video_track, shared.clone(), codec));
+                    tokio::spawn(stream_audio(pc, audio_track, shared.deps.audio.clone()));
+                    let context = context.lock().await.clone();
+                    let signal = &shared.deps.signaling;
+                    if let (Some(client), Some(ice)) = (
+                        &context.client_id,
+                        context.ice_id.as_ref().and_then(|v| v.as_str()),
+                    ) {
+                        let fps = shared.screen.borrow().1;
+                        if let Err(e) = signal
+                            .emit_event(
+                                FORWARD_SETTING_EVENT,
+                                device_capability(client, ice, fps, codec),
+                            )
+                            .await
+                        {
+                            warn!("UU device capability notification failed: {e}");
+                        }
+                        if let Some(control) =
+                            context.app_control_id.as_ref().and_then(|v| v.as_str())
+                        {
+                            let payload =
+                                serde_json::json!({ "ice_id": ice, "app_control_id": control });
+                            if let Err(e) = signal.emit_event(ICE_FINISHED_EVENT, payload).await {
+                                warn!("UU connection completion notification failed: {e}");
+                            }
                         }
                     }
-                }
-            })
-        }));
+                })
+            }));
+        } else {
+            let closing = shared.clone();
+            pc.on_peer_connection_state_change(Box::new(move |state| {
+                let shared = closing.clone();
+                Box::pin(async move {
+                    if let Some(conn) = shared.terminal_conn.lock().as_ref() {
+                        if matches!(state, PcState::Closed | PcState::Failed) {
+                            conn.close();
+                        } else if state == PcState::Disconnected {
+                            conn.detach();
+                        }
+                    }
+                })
+            }));
+        }
 
         let channel_shared = shared.clone();
         pc.on_data_channel(Box::new(move |channel: Arc<RTCDataChannel>| {
             let shared = channel_shared.clone();
             Box::pin(async move {
+                if shared.closed.load(Ordering::Acquire) {
+                    return;
+                }
                 let label = channel.label().to_string();
                 info!("UU data channel opened: {label}");
                 match label.as_str() {
                     "CONTROL_DATA_CHANNEL" => attach_control(channel, shared),
+                    "BINARY_DATA_CHANNEL" if shared.terminal => attach_terminal(channel, shared),
                     "STREAMER_DATA_CHANNEL" => {
                         let reply = channel.clone();
                         channel.on_message(Box::new(move |message: DataChannelMessage| {
@@ -729,8 +770,11 @@ impl Peer {
             })
         }));
 
-        deps.video.set_uu_negotiated_codec(Some(codec)).await;
+        if !terminal {
+            deps.video.set_uu_negotiated_codec(Some(codec)).await;
+        }
         Ok(Self {
+            created_at: Instant::now(),
             pc,
             context,
             video: deps.video.clone(),
@@ -753,7 +797,9 @@ impl Peer {
             .set_remote_description(offer)
             .await
             .map_err(|e| format!("Set remote description failed: {e}"))?;
-        restrict_video_codec(&self.pc, self.codec).await?;
+        if !self.shared.terminal {
+            restrict_video_codec(&self.pc, self.codec).await?;
+        }
         let answer = self
             .pc
             .create_answer(None)
@@ -861,13 +907,23 @@ impl Peer {
         closed(self.pc.connection_state())
     }
 
+    pub fn is_terminal(&self) -> bool {
+        self.shared.terminal
+    }
+
     pub async fn close(&self) {
+        self.shared.closed.store(true, Ordering::Release);
+        if let Some(conn) = self.shared.terminal_conn.lock().take() {
+            conn.close();
+        }
         // Finish releases before the room loop can create a replacement peer.
         self.shared.update_input(SessionInputEvent::Close).await;
         if let Err(e) = self.pc.close().await {
             debug!("UU peer close: {e}");
         }
-        self.video.set_uu_negotiated_codec(None).await;
+        if !self.shared.terminal {
+            self.video.set_uu_negotiated_codec(None).await;
+        }
     }
 }
 
@@ -1172,6 +1228,83 @@ async fn send(channel: &RTCDataChannel, message: Vec<u8>) -> bool {
     }
 }
 
+fn attach_terminal(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
+    let (out, mut frames) = tokio::sync::mpsc::channel(64);
+    let conn = super::terminal::TerminalConn::new(shared.deps.terminal.clone(), out);
+    if let Some(old) = shared.terminal_conn.lock().replace(conn.clone()) {
+        old.close();
+    }
+    let sender = Arc::downgrade(&channel);
+    let sending = conn.clone();
+    tokio::spawn(async move {
+        loop {
+            let frame = tokio::select! {
+                _ = sending.cancelled() => break,
+                frame = frames.recv() => match frame { Some(frame) => frame, None => break },
+            };
+            let Some(channel) = sender.upgrade() else {
+                break;
+            };
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(5), channel.send(&Bytes::from(frame)))
+                    .await,
+                Ok(Ok(_))
+            ) {
+                break;
+            }
+        }
+        sending.close();
+        if let Some(channel) = sender.upgrade() {
+            let _ = channel.close().await;
+        }
+    });
+    let closing = conn.clone();
+    channel.on_close(Box::new(move || {
+        let conn = closing.clone();
+        Box::pin(async move {
+            conn.close();
+        })
+    }));
+    let reply = channel.clone();
+    channel.on_message(Box::new(move |message: DataChannelMessage| {
+        let (conn, shared, reply) = (conn.clone(), shared.clone(), reply.clone());
+        Box::pin(async move {
+            if message.data.starts_with(b"TERM") {
+                conn.handle(&message.data).await;
+            } else {
+                terminal_rpc(&reply, &shared, &message.data).await;
+            }
+        })
+    }));
+}
+
+async fn terminal_rpc(channel: &RTCDataChannel, shared: &Shared, data: &[u8]) -> bool {
+    if shared.closed.load(Ordering::Acquire) {
+        return true;
+    }
+    let response = wire::decode(data).ok().and_then(|fields| {
+        wire::message(&fields, wire::which::RPC_REQUEST)
+            .and_then(|rpc| wire::decode(rpc).ok())
+            .and_then(|rpc| shared.deps.terminal.rpc_response(&rpc))
+    });
+    if let Some(response) = response {
+        // uu-remote-linux replies on the channel carrying the request, including BINARY.
+        send(
+            channel,
+            wire::envelope(
+                shared.next_seq(),
+                now_secs(),
+                wire::which::RPC_RESPONSE,
+                &response,
+            ),
+        )
+        .await;
+        true
+    } else {
+        false
+    }
+}
+
 fn attach_control(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
     let (open_channel, open_shared) = (channel.clone(), shared.clone());
     channel.on_open(Box::new(move || {
@@ -1196,6 +1329,40 @@ fn attach_control(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
 /// CaptureChange, SystemMetrics, ScreenSources and the unlocked state, then ScreenSources
 /// again whenever the encoded size or rate changes.
 async fn control_initialization(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
+    if shared.terminal {
+        // The reference host initializes tool peers with nominal source metadata,
+        // but omits CodecNegotiation and never attaches media tracks.
+        let size = Rect {
+            width: 1920,
+            height: 1080,
+        };
+        send(
+            &channel,
+            wire::capture_change(shared.next_seq(), now_secs(), SCREEN_NAME),
+        )
+        .await;
+        send(
+            &channel,
+            wire::system_metrics(shared.next_seq(), now_secs(), false),
+        )
+        .await;
+        if let Ok(sources) = wire::screen_sources_with_output(
+            shared.next_seq(),
+            now_secs(),
+            size,
+            size,
+            60,
+            SCREEN_NAME,
+        ) {
+            send(&channel, sources).await;
+        }
+        send(
+            &channel,
+            wire::secure_desktop_unlocked(shared.next_seq(), now_secs()),
+        )
+        .await;
+        return;
+    }
     let sound = shared.deps.audio.is_streaming().await;
     let mut screen = shared.screen.subscribe();
     let (size, fps) = *screen.borrow_and_update();
@@ -1273,6 +1440,43 @@ async fn control_initialization(channel: Arc<RTCDataChannel>, shared: Arc<Shared
 }
 
 async fn handle_control(channel: &RTCDataChannel, shared: &Shared, data: &[u8]) {
+    if terminal_rpc(channel, shared, data).await {
+        return;
+    }
+    if shared.terminal {
+        if let Ok(fields) = wire::decode(data) {
+            if wire::message(&fields, wire::which::SIMPLE_ACTION)
+                .and_then(|a| wire::decode(a).ok())
+                .is_some_and(|a| wire::number(&a, 1).unwrap_or(0) == wire::action::ECHO_REQUEST)
+            {
+                send(
+                    channel,
+                    wire::terminal_echo_response(
+                        shared.next_seq(),
+                        now_secs(),
+                        wire::number(&fields, 1).unwrap_or(0),
+                    ),
+                )
+                .await;
+            }
+            if let Some(response) = wire::message(&fields, wire::which::RPC_REQUEST)
+                .and_then(|r| wire::decode(r).ok())
+                .and_then(|r| wire::session_rpc(&r))
+            {
+                send(
+                    channel,
+                    wire::envelope(
+                        shared.next_seq(),
+                        now_secs(),
+                        wire::which::RPC_RESPONSE,
+                        &response,
+                    ),
+                )
+                .await;
+            }
+        }
+        return;
+    }
     // Input is JSON; '{' is an invalid protobuf group tag, so the two never overlap.
     let Ok(fields) = wire::decode(data) else {
         if let Some(event) = input::decode(data) {
@@ -1492,6 +1696,69 @@ async fn apply_capture_setting(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_offer_has_no_media_and_preserves_desktop_codec() {
+        let viewer = APIBuilder::new()
+            .build()
+            .new_peer_connection(Default::default())
+            .await
+            .unwrap();
+        viewer
+            .create_data_channel("BINARY_DATA_CHANNEL", None)
+            .await
+            .unwrap();
+        let offer = viewer.create_offer(None).await.unwrap();
+        let soac: SoacMessage = serde_json::from_value(
+            serde_json::json!({"type":"offer","sdp":offer.sdp,"ice_id":"terminal-test"}),
+        )
+        .unwrap();
+        let video = VideoStreamManager::with_webrtc_streamer(
+            crate::video::streamer::Streamer::new(),
+            crate::webrtc::WebRtcStreamer::new(),
+        );
+        video
+            .set_uu_negotiated_codec(Some(VideoCodecType::H265))
+            .await;
+        let (out, _receiver) = tokio::sync::mpsc::channel(32);
+        let dir = tempfile::tempdir().unwrap();
+        let terminal = super::super::terminal::Registry::new(dir.path().join("terminal"));
+        let peer = Peer::new(
+            PeerDeps {
+                system: crate::config::UuRemoteSystem::Windows,
+                reverse_scroll: false,
+                video_codec: crate::config::UuVideoCodec::Auto,
+                video: video.clone(),
+                hid: Arc::new(HidController::new(crate::hid::HidBackendType::None, None)),
+                audio: Arc::new(AudioController::default()),
+                signaling: Arc::new(SignalingClient::with_test_sender(out)),
+                terminal,
+            },
+            SessionIce::from_header(
+                &serde_json::json!({"iceServers":[{"urls":"stun:127.0.0.1:9"}]}),
+            ),
+            &soac,
+            true,
+        )
+        .await
+        .unwrap();
+        let answer = peer.handle_offer(&soac).await.unwrap();
+        assert!(answer.contains("m=application"));
+        assert!(!answer.contains("m=video"));
+        assert!(!answer.contains("m=audio"));
+        assert!(peer.pc.get_senders().await.is_empty());
+        assert_eq!(
+            video.uu_negotiated_codec().await,
+            Some(VideoCodecType::H265)
+        );
+        peer.close().await;
+        viewer.close().await.unwrap();
+        assert_eq!(
+            video.uu_negotiated_codec().await,
+            Some(VideoCodecType::H265)
+        );
+    }
 
     #[test]
     fn hevc_preserves_cra_with_mixed_prefixes_and_exact_fragment_boundary() {

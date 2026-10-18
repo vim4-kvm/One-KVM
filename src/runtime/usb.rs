@@ -57,6 +57,7 @@ impl UsbCoordinator {
                 && new_config.hid.backend != HidBackend::Otg;
             let hid_unchanged = old_config.hid == new_config.hid;
             let gadget_rebuilt = old_config.msd != new_config.msd
+                || old_config.otg_serial != new_config.otg_serial
                 || old_config.otg_network != new_config.otg_network
                 || old_config.uac != new_config.uac
                 || old_config.hid.otg_udc != new_config.hid.otg_udc
@@ -91,6 +92,7 @@ impl UsbCoordinator {
                     &new_config.msd,
                     &new_config.otg_network,
                     &new_config.uac,
+                    &new_config.otg_serial,
                     ConfigApplyOptions::default(),
                 )
                 .await?;
@@ -100,6 +102,7 @@ impl UsbCoordinator {
                     &new_config.msd,
                     &new_config.otg_network,
                     &new_config.uac,
+                    &new_config.otg_serial,
                 )
                 .await?;
                 self.apply_hid(
@@ -108,6 +111,7 @@ impl UsbCoordinator {
                     &new_config.msd,
                     &new_config.otg_network,
                     &new_config.uac,
+                    &new_config.otg_serial,
                     ConfigApplyOptions::default(),
                 )
                 .await?;
@@ -129,6 +133,7 @@ impl UsbCoordinator {
                 &new_config.hid,
                 &new_config.otg_network,
                 &new_config.uac,
+                &new_config.otg_serial,
                 ConfigApplyOptions::default(),
             )
             .await?;
@@ -159,6 +164,7 @@ impl UsbCoordinator {
                 &new_config.msd,
                 &new_config.otg_network,
                 &new_config.uac,
+                &new_config.otg_serial,
                 ConfigApplyOptions::default(),
             )
             .await
@@ -172,6 +178,7 @@ impl UsbCoordinator {
         msd_config: &MsdConfig,
         network_config: &OtgNetworkConfig,
         uac_config: &UacConfig,
+        serial_config: &crate::config::OtgSerialConfig,
         options: ConfigApplyOptions,
     ) -> Result<()> {
         new_config.validate_otg_functions()?;
@@ -214,8 +221,14 @@ impl UsbCoordinator {
                 .map_err(|error| AppError::Config(format!("HID reload failed: {error}")))?;
         }
         if otg_changed {
-            self.reconcile_otg(new_config, msd_config, network_config, uac_config)
-                .await?;
+            self.reconcile_otg(
+                new_config,
+                msd_config,
+                network_config,
+                uac_config,
+                serial_config,
+            )
+            .await?;
         }
         if !transitioning_away_from_otg {
             self.hid
@@ -237,17 +250,18 @@ impl UsbCoordinator {
         msd: &MsdConfig,
         network: &OtgNetworkConfig,
         uac: &UacConfig,
+        serial: &crate::config::OtgSerialConfig,
     ) -> Result<()> {
         #[cfg(unix)]
         {
             self.otg
-                .apply_config(hid, msd, network, uac)
+                .apply_config(hid, msd, network, uac, serial)
                 .await
                 .map_err(|error| AppError::Config(format!("OTG reconcile failed: {error}")))
         }
         #[cfg(not(unix))]
         {
-            let _ = (hid, msd, network, uac);
+            let _ = (hid, msd, network, uac, serial);
             Ok(())
         }
     }
@@ -260,6 +274,7 @@ impl UsbCoordinator {
         hid_config: &HidConfig,
         network_config: &OtgNetworkConfig,
         uac_config: &UacConfig,
+        serial_config: &crate::config::OtgSerialConfig,
         options: ConfigApplyOptions,
     ) -> Result<()> {
         let old_enabled = old_config.enabled;
@@ -275,8 +290,14 @@ impl UsbCoordinator {
 
         if new_enabled {
             tracing::info!("(Re)initializing MSD...");
-            self.reconcile_otg(hid_config, new_config, network_config, uac_config)
-                .await?;
+            self.reconcile_otg(
+                hid_config,
+                new_config,
+                network_config,
+                uac_config,
+                serial_config,
+            )
+            .await?;
 
             let old_msd = self.msd.write().await.take();
             if let Some(msd) = old_msd {
@@ -306,8 +327,14 @@ impl UsbCoordinator {
                     .map_err(|error| AppError::Config(format!("MSD shutdown failed: {error}")))?;
             }
             tracing::info!("MSD shutdown complete");
-            self.reconcile_otg(hid_config, new_config, network_config, uac_config)
-                .await?;
+            self.reconcile_otg(
+                hid_config,
+                new_config,
+                network_config,
+                uac_config,
+                serial_config,
+            )
+            .await?;
         }
 
         if hid_config.backend == HidBackend::Otg && (options.force || old_enabled != new_enabled) {

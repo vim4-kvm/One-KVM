@@ -31,7 +31,7 @@ pub use hid::{get_hid_config, update_hid_config};
 #[cfg(unix)]
 pub use msd::{get_msd_config, update_msd_config};
 #[cfg(unix)]
-pub use otg::update_otg_config;
+pub use otg::{get_otg_config, update_otg_config};
 #[cfg(unix)]
 pub use otg_network::{get_otg_network_config, get_otg_network_status, update_otg_network_config};
 pub use redfish::{get_redfish_config, update_redfish_config};
@@ -49,6 +49,7 @@ pub use uac::{get_uac_config, update_uac_config};
 pub use uu_remote::{
     cancel_uu_remote_login, get_uu_remote_login, get_uu_remote_status, logout_uu_remote,
     start_uu_remote_login, update_uu_remote_config,
+    delete_uu_terminal_session, test_uu_terminal_ssh, trust_uu_terminal_ssh, remove_uu_terminal_known_host,
 };
 pub use video::{get_video_config, update_video_config};
 pub use vnc::{

@@ -445,6 +445,7 @@ pub struct OtgConfigUpdate {
     pub msd: Option<MsdConfigUpdate>,
     pub network: Option<OtgNetworkConfigUpdate>,
     pub uac: Option<UacConfig>,
+    pub serial: Option<crate::config::OtgSerialConfig>,
 }
 
 impl HidConfigUpdate {

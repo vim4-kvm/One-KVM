@@ -52,8 +52,8 @@ images 目录镜像和 Ventoy 盘也属于外部介质。外部弹出后清除�
 ## HID 功能配置
 
 设置页支持键盘、绝对/相对鼠标、多媒体键、键盘 LED 状态反馈、USB VID/PID、
-厂商/产品名/序列号、虚拟盘及磁盘名称、USB 网卡和麦克风。`PATCH /api/config/otg`
-可同时提交 `hid`、`msd`、`network`、`uac`，应用失败后回滚，避免麦克风单独保存
+厂商/产品名/序列号、虚拟盘及磁盘名称、USB 网卡、麦克风和 USB 串口。`GET/PATCH /api/config/otg`
+包含 `hid`、`msd`、`network`、`uac`、`serial: {enabled}`；可一起提交，应用失败后回滚，避免麦克风单独保存
 导致中间组合超过端点上限。绝对鼠标单独启用时，按钮和滚轮使用绝对接口。
 控制台 HID 弹窗的“反转滚动”只保存在当前浏览器，默认关闭。浏览器滚轮方向已含本机
 自然滚动设置，因此是否反转取决于被控机（如 macOS 开启自然滚动），不按浏览器系统自动判断。
@@ -61,7 +61,7 @@ images 目录镜像和 Ventoy 盘也属于外部介质。外部弹出后清除�
 相对鼠标锁定会隐藏系统指针，此时原生样式以本地箭头显示跟踪位置；不代表被控机光标的实际形状。
 
 VIM4 CRG 限制同时使用最多 5 个 IN 端点：每个 HID、麦克风、已挂载磁盘各一个，
-网卡两个。设置页和 API 在启用虚拟盘时预留一个；助手在实际挂载时再次校验。
+网卡和 USB ACM 串口各两个（串口为中断 IN + bulk IN）。设置页和 API 在启用虚拟盘时预留一个；助手在实际挂载时再次校验。
 只读的存储目录是 `/var/lib/one-kvm/msd`，不能用网页配置绕过助手的路径限制。
 USB 网卡不改变已有以太网配置；地址、DHCP 与 NAT 由 NetworkManager shared 连接
 管理。RNDIS 的 Windows 驱动兼容性仍需在 Windows 主机验收。
@@ -70,6 +70,7 @@ USB 网卡不改变已有以太网配置；地址、DHCP 与 NAT 由 NetworkMana
 不销毁现有 HID 实例；设备编号保持稳定。首次应用前在 root 专用的
 `/run/vim4-onekvm-usb` 保存原始状态，systemd `ExecStopPost` 恢复配置并删除本应用
 创建的网络连接，因此切换到其他 KVM 不继承 One-KVM 的键鼠禁用设置。
+USB 串口启用时创建并链接 `acm.usb0`，禁用与服务停止时移除；板侧为 `/dev/ttyGS0`。
 保存会重新枚举 USB，用户应先在被控机安全弹出挂载磁盘。网页关闭不等于停止服务。
 
 ## 视频设置
@@ -112,6 +113,12 @@ cargo test --locked --features vim4 --lib
 cargo build --locked --release --features vim4
 python3 -m unittest discover -s deploy/vim4 -p 'test_*.py'
 ```
+
+独立 worktree 的助手测试需设置 `VIM4_BOARD_DIR`，指向公共工作区的 `board` 目录。
+UU SSH 回环集成测试默认跳过；可在隔离构建容器安装 `openssh-client`、`openssh-server`，
+准备 root 所有、0755 的 `/run/sshd`，运行
+`cargo test --locked --features vim4 --lib local_server_checks_trust_key_change_login_and_removal -- --ignored`。
+它只启动容器内临时 SSH 服务，不访问板子。
 
 Rust 版本由 rust-toolchain.toml 固定；系统依赖在公共工作区的
 packaging/ubuntu/Dockerfile 固定。Ubuntu libyuv 使用兼容的两步 BGR 转换；
@@ -323,9 +330,36 @@ UU 客户端设置仅在当前运行期生效，不保存到网页配置；网�
 连接断开或 CONTROL 通道关闭时释放本连接按住的键和鼠标按钮。输入发送与释放串行化，
 替换会话前等待旧会话完成释放；关闭后的迟到输入、快捷键和连接回调不能再注入或释放输入。
 临时传输断线后同一 Peer 可恢复输入，CONTROL 通道关闭后需新建会话。
-文件传输、终端、端口映射会暴露 KVM 板本身，
-不提供；剪贴板、静音、远程结束自动锁屏、自动解锁和指针形状未声明能力。
+文件传输和端口映射不提供；剪贴板、静音、远程结束自动锁屏、自动解锁和指针形状未声明能力。
 被控机锁屏状态无法观测，始终上报未锁定。ICE 不使用 usb*、容器与覆盖网络接口。
+
+### UU 终端
+
+官方客户端的「终端远控」支持板子 shell、被控机串口、被控机 SSH。三项目标默认全部关闭，
+须在网页逐项开启；板子 shell 以服务用户运行，具有维护 KVM 的权限。新会话先显示终端内
+选择器；只有一个可用目标且串口未占用时直接打开。方向键或 j/k 选择、数字直开、回车确认、
+q/Ctrl-C/Ctrl-D 退出；窄屏使用两行布局。不可用项跳过，串口接管须再次按回车确认。
+
+串口支持 USB 转串口与同一根 USB-C 线上的 ACM gadget，优先选择 `/dev/serial/by-id/…`。
+使用 raw 8N1、无流控，支持 9600–1500000 的预设波特率。Ctrl-] 打开本地菜单，可发送 Break、
+临时换波特率、发送 Ctrl-] 或断开；拔插设备后每秒尝试恢复。每个设备仅一个会话持有；
+非阻塞写入放不下的字节会丢弃并计数。systemd 补充 `dialout` 组，udev 将 ttyGS0 开放给该组。
+ACM 占两个 IN 端点，启用前可能需要关闭部分 HID、网卡、麦克风或虚拟盘功能。
+
+SSH 使用独立 ed25519 密钥和 known_hosts，保存在数据目录 `uu-remote/terminal`（0700，私钥 0600），
+不读取服务用户的 SSH 配置、代理或系统 known_hosts。网页可测试公钥登录、核对指纹后信任、
+移除信任；交互终端仍可显示 SSH 自身的指纹确认与口令提示。镜像需安装 `openssh-client`。
+
+最多四个独立终端 peer，超出时关闭最旧连接；桌面替换不影响终端。最多八个会话，列表名称
+反映目标且可重命名。DETACH 或连接断开保留会话，重接回放最近 256 KiB 并重绘；CLOSE、
+终止对话和网页结束会话会回收进程。关闭目标先打印中文通知再退出其会话；停用 UU、解除绑定、
+切换身份和 One-KVM 正常退出结束全部会话，PTY 子进程先 HUP、后 KILL。
+日志只记录类型、会话 ID、尺寸、计数与退出码，不记录终端字节、SSH 地址/用户名、口令或密钥。
+
+TERM v1 与 RPC 28/29 按 uu-remote-linux：TERM 在 BINARY，RPC 在收到请求的通道回复；
+LIST 返回裸数组并保留请求 ID。验证状态：**未上板**。仍需官方 Mac/Windows/手机客户端验证
+入口、错误文案、重命名、保留进程重接、回放重绘；需实机验证 USB 枚举、串口权限、拔插恢复、
+ttyGS0 主机未打开时的读写及与其他 USB 功能共享端点。
 
 ## 终端、扩展与看门狗
 

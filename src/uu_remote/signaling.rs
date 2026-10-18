@@ -101,6 +101,11 @@ fn ice_id_of(value: &Value) -> Option<String> {
 }
 
 impl SignalingClient {
+    #[cfg(test)]
+    pub(super) fn with_test_sender(outgoing: mpsc::Sender<String>) -> Self {
+        Self { outgoing }
+    }
+
     pub async fn connect(
         url: &str,
         room_token: &str,

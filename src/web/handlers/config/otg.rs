@@ -16,7 +16,21 @@ pub struct OtgConfigResponse {
     pub hid: HidConfig,
     pub msd: MsdConfig,
     pub network: OtgNetworkConfig,
+    pub uac: crate::config::UacConfig,
+    pub serial: crate::config::OtgSerialConfig,
     pub status: OtgNetworkStatus,
+}
+
+pub async fn get_otg_config(State(state): State<UsbApiState>) -> Json<OtgConfigResponse> {
+    let config = state.config.get();
+    Json(OtgConfigResponse {
+        hid: config.hid.clone(),
+        msd: config.msd.clone(),
+        network: config.otg_network.clone(),
+        uac: config.uac.clone(),
+        serial: config.otg_serial.clone(),
+        status: state.otg.network_status().await,
+    })
 }
 
 pub async fn update_otg_config(
@@ -52,6 +66,9 @@ pub(super) async fn update_otg_config_inner(
             update.validate()?;
             staged.uac = update.clone();
         }
+        if let Some(ref serial) = request.serial {
+            staged.otg_serial = serial.clone();
+        }
 
         Ok(requested_ch9329_descriptor)
     })
@@ -61,6 +78,8 @@ pub(super) async fn update_otg_config_inner(
         hid: staged_config.hid,
         msd: staged_config.msd,
         network: staged_config.otg_network,
+        uac: staged_config.uac,
+        serial: staged_config.otg_serial,
         status: state.otg.network_status().await,
     })
 }

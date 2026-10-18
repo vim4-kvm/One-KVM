@@ -177,6 +177,20 @@ pub fn echo_response(seq: u64, timestamp: u64, request_seq: u64) -> Vec<u8> {
     envelope(seq, timestamp, which::SIMPLE_ACTION, &action)
 }
 
+/// The reference host has no terminal-specific FeatureFlag. Data-only peers must
+/// not advertise capture settings, clipboard, mute or file transfer.
+pub fn terminal_echo_response(seq: u64, timestamp: u64, request_seq: u64) -> Vec<u8> {
+    let mut action = Vec::new();
+    put_varint(1, 1, &mut action);
+    put_bytes(
+        2,
+        format!(r#"{{"seq":{request_seq}}}"#).as_bytes(),
+        &mut action,
+    );
+    put_bytes(4, &[], &mut action);
+    envelope(seq, timestamp, which::SIMPLE_ACTION, &action)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub width: i32,

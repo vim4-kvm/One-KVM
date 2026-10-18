@@ -70,6 +70,7 @@ pub async fn configure_usb(
     msd: &crate::config::MsdConfig,
     network: &crate::config::OtgNetworkConfig,
     uac: &crate::config::UacConfig,
+    serial: &crate::config::OtgSerialConfig,
 ) -> crate::error::Result<()> {
     use crate::error::AppError;
     if !network.bridge_interface.is_empty() {
@@ -88,9 +89,10 @@ pub async fn configure_usb(
         + u8::from(functions.consumer)
         + u8::from(network.enabled) * 2
         + u8::from(uac.enabled)
+        + u8::from(serial.enabled) * 2
         + u8::from(msd.enabled);
     if endpoints > 5 {
-        return Err(AppError::BadRequest("VIM4 supports at most 5 USB IN endpoints; disable some HID, network, microphone or virtual media functions".into()));
+        return Err(AppError::BadRequest("VIM4 supports at most 5 USB IN endpoints; disable some HID, network, microphone, serial or virtual media functions".into()));
     }
     let profile = serde_json::json!({
         "hid": functions,
@@ -103,6 +105,7 @@ pub async fn configure_usb(
         },
         "network": if network.enabled { network.driver_mode.function_name() } else { "" },
         "uac": uac.enabled,
+        "serial": serial.enabled,
         "inquiry": { "flash": msd.flash_inquiry_string, "cdrom": msd.cdrom_inquiry_string },
     });
     let output = tokio::process::Command::new("sudo")

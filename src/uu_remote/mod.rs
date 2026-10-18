@@ -9,6 +9,7 @@ mod metrics;
 mod peer;
 mod signaling;
 mod status;
+pub mod terminal;
 mod video_metrics;
 mod wire;
 
@@ -40,8 +41,9 @@ const ROOM_RENEWAL: Duration = Duration::from_secs(900);
 const RETRY_DELAY: Duration = Duration::from_secs(5);
 /// One QR code stays valid for about five minutes; stop offering new ones after this.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-/// ConnectOptions.capture_type: 0 unknown, 1 desktop, 2 window. File transfer (5),
-/// terminal (8) and port mapping (9) would expose the KVM board itself, not the target.
+/// ConnectOptions.capture_type: 0 unknown, 1 desktop, 2 window; terminal (8)
+/// is an independent data-only peer with explicitly enabled targets.
+/// File transfer (5) and port mapping (9) remain unsupported.
 const MAX_DESKTOP_CAPTURE_TYPE: u64 = 2;
 
 #[typeshare]
@@ -67,6 +69,7 @@ pub struct UuRemoteStatus {
     pub connection_count: u32,
     pub video_codec: Option<crate::config::UuVideoCodec>,
     pub sessions: Vec<UuSessionStatus>,
+    pub terminal: terminal::TerminalStatus,
 }
 
 #[typeshare]
@@ -120,6 +123,7 @@ struct Inner {
     video: Arc<VideoStreamManager>,
     hid: Arc<HidController>,
     audio: Arc<AudioController>,
+    terminal: Arc<terminal::Registry>,
 }
 
 pub struct UuRemoteService {
@@ -142,6 +146,9 @@ impl UuRemoteService {
         });
         Self {
             inner: Arc::new(Inner {
+                terminal: terminal::Registry::new(
+                    credentials_path.parent().unwrap().join("terminal"),
+                ),
                 credentials_path,
                 profile: Mutex::new(UuRemoteConfig::default()),
                 credentials: Mutex::new(credentials),
@@ -166,6 +173,7 @@ impl UuRemoteService {
     }
 
     pub async fn configure(&self, profile: &UuRemoteConfig) -> Result<(), String> {
+        profile.terminal.validate()?;
         let old = self.inner.profile.lock().clone();
         if old.system != profile.system {
             let path = profile_path(&self.inner.credentials_path, profile.system);
@@ -190,10 +198,34 @@ impl UuRemoteService {
             && (old.reverse_scroll_enabled() != profile.reverse_scroll_enabled()
                 || old.video_codec != profile.video_codec)
         {
-            self.stop().await;
+            // Desktop preferences do not revoke terminal access or detached jobs.
+            let task = self.run_task.lock().take();
+            if let Some(task) = task {
+                task.abort();
+                let _ = task.await;
+            }
+            let mut peers = self.inner.peers.lock().await;
+            let desktop: Vec<_> = peers
+                .iter()
+                .filter(|(_, p)| !p.is_terminal())
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in desktop {
+                if let Some(peer) = peers.remove(&id) {
+                    peer.close().await;
+                }
+            }
         }
+        self.inner
+            .terminal
+            .configure(&profile.terminal, &profile.device_name)
+            .await?;
         *self.inner.profile.lock() = profile.clone();
         Ok(())
+    }
+
+    pub fn terminal(&self) -> &Arc<terminal::Registry> {
+        &self.inner.terminal
     }
 
     pub fn video_codec_preference(&self) -> crate::config::UuVideoCodec {
@@ -217,9 +249,14 @@ impl UuRemoteService {
             .collect();
         // Do not hold the signaling peer-map lock while querying ICE transports.
         let mut sessions = Vec::new();
+        let mut terminal_peers = 0;
         for (id, peer) in peers {
             if !peer.ended() {
-                sessions.push(peer.status(id).await);
+                if peer.is_terminal() {
+                    terminal_peers += 1;
+                } else {
+                    sessions.push(peer.status(id).await);
+                }
             }
         }
         sessions.sort_by(|a, b| a.id.cmp(&b.id));
@@ -232,6 +269,7 @@ impl UuRemoteService {
             device_id: Some(credentials.device_id).filter(|d| !d.is_empty()),
             connection_count,
             sessions,
+            terminal: self.inner.terminal.status(terminal_peers).await,
             video_codec: self.inner.video.uu_negotiated_codec().await.map(|codec| {
                 if codec == crate::video::codec::VideoCodecType::H265 {
                     crate::config::UuVideoCodec::H265
@@ -264,6 +302,7 @@ impl UuRemoteService {
             return;
         }
         info!("Starting UU Remote host");
+        self.inner.terminal.start();
         *task = Some(tokio::spawn(run(self.inner.clone())));
     }
 
@@ -357,6 +396,7 @@ async fn close_all(inner: &Inner) {
     for (_, peer) in peers.drain() {
         peer.close().await;
     }
+    inner.terminal.shutdown().await;
 }
 
 fn save(inner: &Inner, credentials: &Credentials) -> Result<(), String> {
@@ -594,6 +634,7 @@ async fn run(inner: Arc<Inner>) {
             continue;
         }
         set_state(&inner, UuRemoteServiceState::Connecting, None);
+        inner.terminal.start();
         let profile = inner.profile.lock().clone();
         if let Err(error) = register_device(&inner, &credentials, &profile).await {
             warn!("UU device profile refresh failed: {error}");
@@ -678,6 +719,7 @@ async fn room_loop(
         hid: inner.hid.clone(),
         audio: inner.audio.clone(),
         signaling: signaling.clone(),
+        terminal: inner.terminal.clone(),
     };
     while let Some(event) = events.recv().await {
         match event {
@@ -731,7 +773,13 @@ async fn room_loop(
                 let mut peers = inner.peers.lock().await;
                 let targets: Vec<String> = match ice {
                     Some(id) if peers.contains_key(&id) => vec![id],
-                    _ => peers.keys().cloned().collect(),
+                    // A release for an unknown tool must not tear down the desktop.
+                    Some(_) => Vec::new(),
+                    None => peers
+                        .iter()
+                        .filter(|(_, p)| !p.is_terminal())
+                        .map(|(id, _)| id.clone())
+                        .collect(),
                 };
                 info!("UU viewer disconnected: closing={}", targets.len());
                 let closing: Vec<Arc<Peer>> =
@@ -775,21 +823,35 @@ async fn handle_soac(
                 .remove(&ice)
                 .or_else(|| next_pending.take())
                 .unwrap_or((1, ice::SessionIce::default()));
-            if capture_type > MAX_DESKTOP_CAPTURE_TYPE {
+            if capture_type > MAX_DESKTOP_CAPTURE_TYPE && capture_type != 8 {
                 info!("UU connection type {capture_type} is not offered by a KVM; ignored");
                 return;
             }
-            // One desktop stream at a time: a new desktop offer replaces older ones.
-            for (_, peer) in peers.drain() {
+            let terminal = capture_type == 8;
+            let evict = replacement_peers(
+                terminal,
+                peers
+                    .iter()
+                    .map(|(id, p)| (id.clone(), p.is_terminal(), p.created_at)),
+            );
+            for id in evict {
+                if let Some(peer) = peers.remove(&id) {
+                    peer.close().await;
+                }
+            }
+            if let Some(peer) = peers.remove(&ice) {
                 peer.close().await;
             }
-            let peer = match Peer::new(deps.clone(), transport, &soac).await {
+            let peer = match Peer::new(deps.clone(), transport, &soac, terminal).await {
                 Ok(peer) => Arc::new(peer),
                 Err(e) => {
                     error!("UU peer creation failed: {e}");
                     return;
                 }
             };
+            // Shutdown can cancel negotiation after the answer starts reaching the
+            // viewer; register first so close_all still owns that connection.
+            peers.insert(ice.clone(), peer.clone());
             match peer.handle_offer(&soac).await {
                 Ok(sdp) => {
                     let answer = SoacMessage {
@@ -806,11 +868,11 @@ async fn handle_soac(
                     if let Err(e) = signaling.emit_soac(answer).await {
                         error!("UU answer signaling failed: {e}");
                     }
-                    info!("UU desktop connection answered");
-                    peers.insert(ice, peer);
+                    info!(terminal, "UU connection answered");
                 }
                 Err(e) => {
                     error!("UU offer rejected: {e}");
+                    peers.remove(&ice);
                     peer.close().await;
                 }
             }
@@ -824,5 +886,46 @@ async fn handle_soac(
             None => tracing::debug!("UU candidate for unknown connection"),
         },
         _ => {}
+    }
+}
+
+fn replacement_peers(
+    incoming_terminal: bool,
+    peers: impl Iterator<Item = (String, bool, std::time::Instant)>,
+) -> Vec<String> {
+    let mut same: Vec<_> = peers
+        .filter(|(_, terminal, _)| *terminal == incoming_terminal)
+        .collect();
+    same.sort_by_key(|(_, _, created)| *created);
+    let count = if incoming_terminal {
+        same.len().saturating_sub(3)
+    } else {
+        same.len()
+    };
+    same.into_iter().take(count).map(|(id, _, _)| id).collect()
+}
+
+#[cfg(test)]
+mod terminal_peer_tests {
+    use super::*;
+    #[test]
+    fn tool_and_desktop_replacement_are_independent() {
+        let now = std::time::Instant::now();
+        let peers = vec![
+            ("desktop".into(), false, now),
+            ("t1".into(), true, now),
+            ("t2".into(), true, now + Duration::from_secs(1)),
+            ("t3".into(), true, now + Duration::from_secs(2)),
+            ("t4".into(), true, now + Duration::from_secs(3)),
+        ];
+        assert_eq!(
+            replacement_peers(false, peers.clone().into_iter()),
+            vec!["desktop"]
+        );
+        assert_eq!(
+            replacement_peers(true, peers.clone().into_iter()),
+            vec!["t1"]
+        );
+        assert!(replacement_peers(true, peers.into_iter().take(4)).is_empty());
     }
 }

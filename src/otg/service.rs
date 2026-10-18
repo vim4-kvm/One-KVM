@@ -259,12 +259,13 @@ impl OtgService {
         msd: &MsdConfig,
         network: &OtgNetworkConfig,
         uac: &UacConfig,
+        serial: &crate::config::OtgSerialConfig,
     ) -> Result<()> {
         #[cfg(feature = "vim4")]
         {
             // The restricted helper changes links on the existing board gadget;
             // it never destroys HID instances or renumbers their device nodes.
-            crate::platform::vim4::configure_usb(hid, msd, network, uac).await?;
+            crate::platform::vim4::configure_usb(hid, msd, network, uac, serial).await?;
             let mut state = self.state.write().await;
             state.hid_paths = (hid.backend == crate::config::HidBackend::Otg)
                 .then(|| crate::platform::vim4::hid_paths(hid));
@@ -282,6 +283,8 @@ impl OtgService {
             };
             return Ok(());
         }
+        #[cfg(not(feature = "vim4"))]
+        if serial.enabled { return Err(AppError::BadRequest("USB serial gadget currently requires VIM4".into())); }
         if !self.recovery_checked.load(Ordering::SeqCst) {
             if let Err(error) = NetworkBridgeRuntime::recover_stale_transaction() {
                 let message = format!("Failed to recover stale OTG network transaction: {error}");

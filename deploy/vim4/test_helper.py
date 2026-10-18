@@ -11,7 +11,8 @@ import sys
 from contextlib import nullcontext, redirect_stdout
 from unittest.mock import patch
 
-board_spec = importlib.util.spec_from_file_location('vim4media', Path(__file__).resolve().parents[3] / 'board/vim4media.py')
+board_dir = Path(os.environ.get('VIM4_BOARD_DIR', Path(__file__).resolve().parents[3] / 'board'))
+board_spec = importlib.util.spec_from_file_location('vim4media', board_dir / 'vim4media.py')
 vim4media = importlib.util.module_from_spec(board_spec)
 sys.modules['vim4media'] = vim4media
 board_spec.loader.exec_module(vim4media)
@@ -185,7 +186,7 @@ class UsbProfileTest(unittest.TestCase):
                 (self.config / name).symlink_to(self.gadget / 'functions' / name)
         self.baseline = helper.snapshot_usb()
         self.profile = {'hid': {'keyboard': True, 'mouse_absolute': True, 'mouse_relative': True, 'consumer': True},
-                        'descriptor': descriptors, 'network': '', 'uac': False,
+                        'descriptor': descriptors, 'network': '', 'uac': False, 'serial': False,
                         'inquiry': {'flash': 'One-KVM Disk', 'cdrom': 'One-KVM CD-ROM'}}
 
     def test_switch_profiles_preserves_instances_and_restores_board(self):
@@ -220,6 +221,36 @@ class UsbProfileTest(unittest.TestCase):
         helper.configure_profile(self.profile)
         self.assertEqual((self.gadget / 'strings/0x409/serialnumber').read_text(), 'serial')
 
+    def test_serial_costs_two_endpoints_and_is_removed_on_restore(self):
+        self.profile['serial'] = True
+        with self.assertRaisesRegex(ValueError, 'endpoint limit'):
+            helper.configure_profile(self.profile)
+        self.assertEqual(helper.snapshot_usb(), self.baseline)
+        self.profile['hid']['consumer'] = False
+        helper.configure_profile(self.profile)
+        self.assertTrue((self.config / 'acm.usb0').is_symlink())
+        with self.assertRaisesRegex(ValueError, 'endpoint limit'):
+            helper.profile_links(self.profile, True)
+        helper.restore_profile()
+        self.assertFalse((self.gadget / 'functions/acm.usb0').exists())
+        self.assertEqual(helper.snapshot_usb(), self.baseline)
+
+    def test_serial_disable_and_failed_apply_restore_links(self):
+        self.profile['hid']['consumer'] = False
+        self.profile['serial'] = True
+        helper.configure_profile(self.profile)
+        active = helper.snapshot_usb()
+        self.profile['serial'] = False
+        self.network.side_effect = [ValueError('NetworkManager unavailable'), None]
+        with self.assertRaises(ValueError):
+            helper.configure_profile(self.profile)
+        self.assertEqual(helper.snapshot_usb(), active)
+        self.assertTrue((self.gadget / 'functions/acm.usb0').exists())
+        self.network.side_effect = None
+        helper.configure_profile(self.profile)
+        self.assertFalse((self.config / 'acm.usb0').exists())
+        self.assertFalse((self.gadget / 'functions/acm.usb0').exists())
+
     def test_reenable_after_disabling_every_usb_function(self):
         controllers = self.root / 'udc'
         (controllers / 'controller').mkdir(parents=True)
@@ -238,6 +269,8 @@ class UsbProfileTest(unittest.TestCase):
 
     def test_bind_failure_rolls_back_descriptors_and_links(self):
         self.profile['descriptor']['strings/0x409/product'] = 'New name'
+        self.profile['serial'] = True
+        self.profile['hid']['consumer'] = False
         original = Path.write_text
         failed = False
         def fail_bind(path, text, *args, **kwargs):
@@ -252,10 +285,11 @@ class UsbProfileTest(unittest.TestCase):
         self.assertEqual(helper.snapshot_usb(), self.baseline)
         self.assertEqual((self.gadget / 'UDC').read_text(), 'controller')
         self.assertIsNone(helper.saved_profile())
+        self.assertFalse((self.gadget / 'functions/acm.usb0').exists())
 
     def test_invalid_profile_cannot_write_arbitrary_configfs_paths(self):
         for key, value in [('descriptor', {'../../etc/passwd': 'bad'}),
-                           ('network', '../foo'), ('uac', 'true'),
+                           ('network', '../foo'), ('uac', 'true'), ('serial', 'true'),
                            ('hid', {'keyboard': True})]:
             profile = copy.deepcopy(self.profile)
             profile[key] = value

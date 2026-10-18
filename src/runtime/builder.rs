@@ -411,7 +411,7 @@ async fn build_otg(config: &AppConfig) -> Arc<OtgService> {
     let service = Arc::new(OtgService::new());
     tracing::info!("OTG Service created");
     if let Err(error) = service
-        .apply_config(&config.hid, &config.msd, &config.otg_network, &config.uac)
+        .apply_config(&config.hid, &config.msd, &config.otg_network, &config.uac, &config.otg_serial)
         .await
     {
         tracing::warn!("Failed to apply OTG config: {}", error);

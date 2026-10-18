@@ -10,6 +10,7 @@ mod computer_use;
 mod hid;
 mod otg_network;
 mod stream;
+mod terminal;
 mod uac;
 mod watchdog;
 mod web;
@@ -20,6 +21,7 @@ pub use computer_use::*;
 pub use hid::*;
 pub use otg_network::*;
 pub use stream::*;
+pub use terminal::*;
 pub use uac::*;
 pub use watchdog::*;
 pub use web::*;
@@ -35,6 +37,7 @@ pub struct AppConfig {
     pub video: VideoConfig,
     pub hid: HidConfig,
     pub otg_network: OtgNetworkConfig,
+    pub otg_serial: OtgSerialConfig,
     pub msd: MsdConfig,
     pub atx: AtxConfig,
     pub audio: AudioConfig,
@@ -57,8 +60,10 @@ pub struct AppConfig {
 pub struct RecordingConfig {
     pub location: String,
     /// Current recording folder per NAS, including when another target is selected.
+    #[typeshare(serialized_as = "HashMap<String, String>")]
     pub folders: std::collections::BTreeMap<String, String>,
     /// Previously used NAS folders, most recent first, at most eight per location.
+    #[typeshare(serialized_as = "HashMap<String, Vec<String>>")]
     pub location_folders: std::collections::BTreeMap<String, Vec<String>>,
 }
 
@@ -116,6 +121,7 @@ impl AppConfig {
             self.msd.enabled = false;
             self.otg_network.enabled = false;
             self.uac.enabled = false;
+            self.otg_serial.enabled = false;
         }
         if self.hid.backend == HidBackend::Bluetooth {
             self.hid.mouse_absolute = false;

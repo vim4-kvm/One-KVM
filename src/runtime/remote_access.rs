@@ -124,10 +124,8 @@ impl RemoteAccessCoordinator {
             tracing::info!("RTSP disabled in configuration");
         }
 
-        if config.uu_remote.enabled {
-            if let Err(error) = self.apply_uu_remote(&config.uu_remote).await {
-                tracing::error!("Failed to start UU Remote host: {}", error);
-            }
+        if let Err(error) = self.apply_uu_remote(&config.uu_remote).await {
+            tracing::error!("Failed to configure UU Remote host: {}", error);
         }
 
         if let Err(error) = self.enforce_codec_constraints().await {
