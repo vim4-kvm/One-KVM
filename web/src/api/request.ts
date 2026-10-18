@@ -227,6 +227,9 @@ export async function request<T>(
       throw new ApiError(response.status, message, code)
     }
 
+    // Terminal actions intentionally return no representation on success.
+    if (response.status === 204) return undefined as T
+
     // If response body isn't JSON (or empty), treat as failure for callers expecting JSON.
     if (data === null) {
       const message = t('api.parseResponseFailed')
