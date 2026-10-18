@@ -1220,7 +1220,8 @@ export default {
         json: 'JSON'
       },
       copyCommand: 'Copy command',
-      copyConfig: 'Copy configuration',
+      copyConfig: 'Copy config',
+      codexHint: 'Add to ~/.codex/config.toml and restart Codex. For non-interactive codex exec, also add default_tools_approval_mode = "approve" or input tools are rejected.',
       detail: {
         characters: '{count} characters',
         up: 'up {count}',

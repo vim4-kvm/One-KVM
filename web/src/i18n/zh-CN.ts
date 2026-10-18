@@ -1220,6 +1220,7 @@ export default {
       },
       copyCommand: '复制命令',
       copyConfig: '复制配置',
+      codexHint: '添加到 ~/.codex/config.toml 后重启 Codex。非交互的 codex exec 还需加 default_tools_approval_mode = "approve"，否则键鼠工具会被拒绝。',
       detail: {
         characters: '{count} 个字符',
         up: '向上 {count} 格',

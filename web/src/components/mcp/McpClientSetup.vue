@@ -20,7 +20,7 @@ watch(tab, value => {
   try { localStorage.setItem('mcp-client', value) } catch { /* Optional preference. */ }
 })
 function snippet(key: string) {
-  if (tab.value === 'codex') return `export ONE_KVM_MCP_KEY=${key}\ncodex mcp add one-kvm --url ${props.endpoint} --bearer-token-env-var ONE_KVM_MCP_KEY`
+  if (tab.value === 'codex') return `# ~/.codex/config.toml\n[mcp_servers.one-kvm]\nurl = "${props.endpoint}"\nhttp_headers = { Authorization = "Bearer ${key}" }`
   if (tab.value === 'json') return JSON.stringify({ mcpServers: { 'one-kvm': {
     type: 'http', url: props.endpoint, headers: { Authorization: `Bearer ${key}` },
   } } }, null, 2)
@@ -51,8 +51,9 @@ async function copySnippet() {
       <pre class="overflow-x-auto p-3 pt-11 font-mono text-xs sm:mr-36 sm:pt-3"><code>{{ preview }}</code></pre>
       <Button class="absolute right-1 top-1 h-7 px-2 text-xs" variant="ghost" size="sm" :disabled="disabled || copying" @click="copySnippet">
         <Check v-if="copied" class="size-4" /><Copy v-else class="size-4" />
-        {{ t(copied ? 'extensions.mcp.copied' : tab === 'json' ? 'extensions.mcp.copyConfig' : 'extensions.mcp.copyCommand') }}
+        {{ t(copied ? 'extensions.mcp.copied' : tab === 'claude' ? 'extensions.mcp.copyCommand' : 'extensions.mcp.copyConfig') }}
       </Button>
     </div>
+    <p v-if="tab === 'codex'" class="text-xs text-muted-foreground">{{ t('extensions.mcp.codexHint') }}</p>
   </section>
 </template>
