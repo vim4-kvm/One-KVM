@@ -15,11 +15,11 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Separator } from '@/components/ui/separator'
-import { Monitor, Video, Usb, AlertCircle, CheckCircle, Loader2, Volume2, HardDrive, MonitorOff, Clock } from 'lucide-vue-next'
+import { Monitor, Video, Usb, AlertCircle, CheckCircle, Loader2, Volume2, HardDrive, MonitorOff, Clock, Bot } from 'lucide-vue-next'
 
 const { t } = useI18n()
 
-export type ConnectionStatus = 'connected' | 'connecting' | 'disconnected' | 'error' | 'no_signal' | 'busy'
+export type ConnectionStatus = 'connected' | 'connecting' | 'disconnected' | 'error' | 'no_signal' | 'busy' | 'active-ai' | 'manual'
 
 export interface StatusDetail {
   label: string
@@ -29,7 +29,7 @@ export interface StatusDetail {
 
 const props = withDefaults(defineProps<{
   title: string
-  type: 'device' | 'video' | 'hid' | 'audio' | 'msd'
+  type: 'device' | 'video' | 'hid' | 'audio' | 'msd' | 'mcp'
   status: ConnectionStatus
   quickInfo?: string  // Quick info displayed on trigger (e.g., "1920x1080 30fps")
   subtitle?: string
@@ -37,6 +37,7 @@ const props = withDefaults(defineProps<{
   details?: StatusDetail[]
   hoverAlign?: 'start' | 'center' | 'end'  // HoverCard alignment
   compact?: boolean
+  statusLabel?: string
 }>(), {
   hoverAlign: 'start',
   compact: false,
@@ -52,6 +53,10 @@ onMounted(() => {
 
 const statusColor = computed(() => {
   switch (props.status) {
+    case 'active-ai':
+      return 'bg-amber-500 animate-pulse'
+    case 'manual':
+      return 'bg-muted-foreground'
     case 'connected':
       return 'bg-status-active'
     case 'connecting':
@@ -70,6 +75,8 @@ const statusColor = computed(() => {
 
 const StatusIcon = computed(() => {
   switch (props.type) {
+    case 'mcp':
+      return Bot
     case 'device':
       return Monitor
     case 'video':
@@ -123,6 +130,7 @@ const statusText = computed(() => {
 })
 
 const statusBadgeText = computed(() => {
+  if (props.statusLabel) return props.statusLabel
   switch (props.status) {
     case 'connected':
       return t('statusCard.online')
@@ -152,6 +160,7 @@ const statusBadgeText = computed(() => {
         :class="cn(
           'h-auto flex-col items-start gap-0.5 text-left',
           compact ? 'px-1.5 py-0.5 text-xs' : 'px-3 py-1.5 text-sm min-w-[100px]',
+          type === 'mcp' && !compact && 'w-[100px] shrink-0',
           status === 'error' && 'border-destructive/50'
         )"
       >
@@ -166,7 +175,7 @@ const statusBadgeText = computed(() => {
           <!-- Top: Title -->
           <span class="font-medium text-foreground text-xs truncate">{{ title }}</span>
           <!-- Bottom: Status dot + Quick info -->
-          <div class="flex items-center gap-1.5">
+          <div class="flex max-w-full items-center gap-1.5" :title="quickInfo || subtitle || statusText">
             <span :class="cn('size-2 rounded-full shrink-0', statusColor)" />
             <span class="text-[11px] text-muted-foreground leading-tight truncate">
               {{ quickInfo || subtitle || statusText }}
@@ -205,7 +214,7 @@ const statusBadgeText = computed(() => {
               />
               <Badge
                 :variant="status === 'connected' ? 'success' : (status === 'connecting' || isNotice) ? 'warning' : status === 'error' ? 'destructive' : 'secondary'"
-                class="text-[10px] px-1.5 py-0"
+                class="max-w-full whitespace-normal break-words text-[10px] px-1.5 py-0"
               >
                 {{ statusBadgeText }}
               </Badge>
@@ -223,11 +232,12 @@ const statusBadgeText = computed(() => {
               class="flex items-baseline justify-between gap-3 py-0.5 text-xs"
             >
               <span class="shrink-0 text-muted-foreground">{{ detail.label }}</span>
-              <span :class="cn('min-w-0 text-right text-xs font-medium', detail.status === 'ok' ? 'text-success' : detail.status === 'warning' ? 'text-warning' : detail.status === 'error' ? 'text-destructive' : 'text-foreground')">{{ detail.value }}</span>
+              <span :class="cn('min-w-0 break-words text-right text-xs font-medium', detail.status === 'ok' ? 'text-success' : detail.status === 'warning' ? 'text-warning' : detail.status === 'error' ? 'text-destructive' : 'text-foreground')">{{ detail.value }}</span>
             </div>
           </div>
         </div>
       </div>
+      <slot name="footer" />
     </HoverCardContent>
   </HoverCard>
 
@@ -241,6 +251,7 @@ const statusBadgeText = computed(() => {
         :class="cn(
           'h-auto flex-col items-start gap-0.5 text-left',
           compact ? 'px-1.5 py-0.5 text-xs' : 'px-3 py-1.5 text-sm min-w-[100px]',
+          type === 'mcp' && !compact && 'w-[100px] shrink-0',
           status === 'error' && 'border-destructive/50'
         )"
       >
@@ -255,7 +266,7 @@ const statusBadgeText = computed(() => {
           <!-- Top: Title -->
           <span class="font-medium text-foreground text-xs truncate">{{ title }}</span>
           <!-- Bottom: Status dot + Quick info -->
-          <div class="flex items-center gap-1.5">
+          <div class="flex max-w-full items-center gap-1.5" :title="quickInfo || subtitle || statusText">
             <span :class="cn('size-2 rounded-full shrink-0', statusColor)" />
             <span class="text-[11px] text-muted-foreground leading-tight truncate">
               {{ quickInfo || subtitle || statusText }}
@@ -294,7 +305,7 @@ const statusBadgeText = computed(() => {
               />
               <Badge
                 :variant="status === 'connected' ? 'success' : (status === 'connecting' || isNotice) ? 'warning' : status === 'error' ? 'destructive' : 'secondary'"
-                class="text-[10px] px-1.5 py-0"
+                class="max-w-full whitespace-normal break-words text-[10px] px-1.5 py-0"
               >
                 {{ statusBadgeText }}
               </Badge>
@@ -312,11 +323,12 @@ const statusBadgeText = computed(() => {
               class="flex items-baseline justify-between gap-3 py-0.5 text-xs"
             >
               <span class="shrink-0 text-muted-foreground">{{ detail.label }}</span>
-              <span :class="cn('min-w-0 text-right text-xs font-medium', detail.status === 'ok' ? 'text-success' : detail.status === 'warning' ? 'text-warning' : detail.status === 'error' ? 'text-destructive' : 'text-foreground')">{{ detail.value }}</span>
+              <span :class="cn('min-w-0 break-words text-right text-xs font-medium', detail.status === 'ok' ? 'text-success' : detail.status === 'warning' ? 'text-warning' : detail.status === 'error' ? 'text-destructive' : 'text-foreground')">{{ detail.value }}</span>
             </div>
           </div>
         </div>
       </div>
+      <slot name="footer" />
     </PopoverContent>
   </Popover>
 </template>

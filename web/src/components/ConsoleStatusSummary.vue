@@ -14,6 +14,8 @@ export interface ConsoleStatusItem {
   details: StatusDetail[]
   errorMessage?: string
   required?: boolean
+  hint?: string
+  link?: { to: string; label: string }
 }
 
 const props = defineProps<{
@@ -38,6 +40,8 @@ function dotClass(status: ConsoleStatusItem['status']) {
     error: 'bg-destructive',
     no_signal: 'bg-warning',
     busy: 'bg-warning',
+    'active-ai': 'bg-amber-500 animate-pulse',
+    manual: 'bg-muted-foreground',
   }[status]
 }
 </script>
@@ -69,7 +73,7 @@ function dotClass(status: ConsoleStatusItem['status']) {
             <span class="font-medium">{{ item.title }}</span>
             <span class="flex items-center gap-1.5 text-xs">
               <span class="size-1.5 rounded-full" :class="dotClass(item.status)" />
-              {{ t(`status.${item.status}`) }}
+              {{ item.id === 'mcp' ? item.quickInfo : t(`status.${item.status}`) }}
             </span>
           </div>
           <p v-if="item.quickInfo" class="text-xs text-muted-foreground">{{ item.quickInfo }}</p>
@@ -80,6 +84,8 @@ function dotClass(status: ConsoleStatusItem['status']) {
               <dd class="min-w-0 break-words text-right" :class="detail.status === 'error' ? 'text-destructive' : detail.status === 'warning' ? 'text-warning' : ''">{{ detail.value }}</dd>
             </div>
           </dl>
+          <p v-if="item.hint" class="text-xs text-muted-foreground">{{ item.hint }}</p>
+          <RouterLink v-if="item.link" :to="item.link.to" class="inline-block text-xs underline">{{ item.link.label }}</RouterLink>
         </section>
       </div>
     </PopoverContent>

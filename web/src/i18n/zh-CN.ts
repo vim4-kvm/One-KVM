@@ -161,6 +161,7 @@ export default {
     selectFps: '选择帧率...',
   },
   common: {
+    more: '更多',
     saved: '已保存',
     copy: '复制',
     copied: '已复制',
@@ -1187,6 +1188,11 @@ export default {
   },
   extensions: {
     mcp: {
+      standby: '待命',
+      keyUnavailable: '密钥读取失败',
+      state: '状态',
+      client: '客户端',
+      currentOperation: '当前操作',
       service: '服务',
       preferences: '设置',
       clear: '清空',

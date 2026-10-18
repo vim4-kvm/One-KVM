@@ -36,7 +36,7 @@ import StatusCard, { type StatusDetail, type ConnectionStatus } from '@/componen
 import ActionBar from '@/components/ActionBar.vue'
 import ConsoleHeaderActions from '@/components/ConsoleHeaderActions.vue'
 import RecordingIndicator from '@/components/RecordingIndicator.vue'
-import McpActivityIndicator from '@/components/McpActivityIndicator.vue'
+import { useMcpActivity } from '@/composables/useMcpActivity'
 import { useDeviceRecording } from '@/composables/useDeviceRecording'
 import { provideConsoleAppearance } from '@/composables/useConsoleAppearance'
 import ConsoleStatusSummary, { type ConsoleStatusItem } from '@/components/ConsoleStatusSummary.vue'
@@ -73,6 +73,7 @@ import {
   Sun,
   Moon,
   ChevronDown,
+  MoreHorizontal,
   KeyRound,
   Loader2,
 } from 'lucide-vue-next'
@@ -82,6 +83,7 @@ const router = useRouter()
 const systemStore = useSystemStore()
 const configStore = useConfigStore()
 const authStore = useAuthStore()
+const mcpActivity = useMcpActivity()
 const { connected: wsConnected, networkError: wsNetworkError } = useWebSocket()
 const hidWs = useHidWebSocket()
 const webrtc = useWebRTC()
@@ -300,6 +302,12 @@ const consoleStatusItems = computed<ConsoleStatusItem[]>(() => {
   if (showMsdStatusCard.value) items.push({
     id: 'msd', title: t('statusCard.msd'), status: msdStatus.value,
     quickInfo: msdQuickInfo.value, details: msdDetails.value, errorMessage: msdErrorMessage.value,
+  })
+  if (mcpActivity.enabled.value) items.push({
+    id: 'mcp', title: t('extensions.mcp.title'), status: mcpActivity.status.value,
+    quickInfo: mcpActivity.quickInfo.value, details: mcpActivity.details.value,
+    hint: mcpActivity.hint.value,
+    link: { to: '/settings?tab=ext-mcp', label: t('extensions.mcp.settings') },
   })
   return items
 })
@@ -3256,25 +3264,7 @@ onUnmounted(() => {
               :show-video-info="consoleLayout === 'sidebar'"
             />
             <div v-else class="flex md:hidden items-center gap-1">
-              <StatusCard
-                :title="t('statusCard.video')"
-                type="video"
-                :status="videoStatus"
-                :quick-info="videoQuickInfo"
-                :error-message="videoErrorMessage"
-                :details="videoDetails"
-                compact
-              />
-
-              <StatusCard
-                :title="t('statusCard.hid')"
-                type="hid"
-                :status="hidStatus"
-                :quick-info="hidQuickInfo"
-                :details="hidDetails"
-                :hover-align="hidHoverAlign"
-                compact
-              />
+              <ConsoleStatusSummary :items="consoleStatusItems" />
             </div>
           </div>
           <div class="console-header__account flex shrink-0 items-center gap-1 sm:gap-2">
@@ -3324,16 +3314,48 @@ onUnmounted(() => {
                 :details="msdDetails"
                 hover-align="end"
               />
+              <StatusCard
+                v-if="mcpActivity.enabled.value"
+                :title="t('extensions.mcp.title')"
+                type="mcp"
+                :status="mcpActivity.status.value"
+                :quick-info="mcpActivity.quickInfo.value"
+                :status-label="mcpActivity.quickInfo.value"
+                :details="mcpActivity.details.value"
+                hover-align="end"
+              >
+                <template #footer>
+                  <p v-if="mcpActivity.hint.value" class="mt-3 text-xs text-muted-foreground">{{ mcpActivity.hint.value }}</p>
+                  <RouterLink class="mt-3 inline-block text-xs underline" to="/settings?tab=ext-mcp">{{ t('extensions.mcp.settings') }}</RouterLink>
+                </template>
+              </StatusCard>
             </div>
             <RecordingIndicator v-if="isVim4" />
-            <McpActivityIndicator />
             <div class="mx-1 hidden h-6 w-px bg-border md:block" />
             <Button variant="ghost" size="icon-sm" class="hidden md:flex" :aria-label="t('common.toggleTheme')" @click="toggleTheme">
               <Sun v-if="isDark" class="size-4" />
               <Moon v-else class="size-4" />
             </Button>
             <LanguageToggleButton class="size-8 hidden md:flex" />
-            <DropdownMenu>
+            <DropdownMenu v-if="authStore.managed">
+              <DropdownMenuTrigger as-child>
+                <Button variant="ghost" size="icon-sm" class="md:hidden" :aria-label="t('common.more')">
+                  <MoreHorizontal class="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" class="md:hidden">
+                <DropdownMenuItem @click="toggleTheme">
+                  <Sun v-if="isDark" class="size-4 mr-2" />
+                  <Moon v-else class="size-4 mr-2" />
+                  {{ isDark ? t('settings.lightMode') : t('settings.darkMode') }}
+                </DropdownMenuItem>
+                <DropdownMenuItem as-child class="p-0">
+                  <LanguageToggleButton label-mode="next" size="sm" variant="ghost"
+                    class="w-full justify-start rounded-sm px-2 py-1.5 font-normal shadow-none" />
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <DropdownMenu v-else>
               <DropdownMenuTrigger as-child>
                 <Button variant="outline" size="sm" class="gap-1 sm:gap-1.5 px-2 sm:px-3">
                   <span class="text-xs max-w-[60px] sm:max-w-[100px] truncate">{{ authStore.user || 'admin' }}</span>
@@ -3678,7 +3700,7 @@ onUnmounted(() => {
       :webrtc-stats="webrtc.stats.value"
     />
     <TerminalDialog v-if="showTerminal" v-model:open="showTerminalDialog" />
-    <Dialog v-model:open="changePasswordDialogOpen">
+    <Dialog v-if="!authStore.managed" v-model:open="changePasswordDialogOpen">
       <DialogContent class="w-[95vw] max-w-md">
         <DialogHeader>
           <DialogTitle>{{ t('auth.changePassword') }}</DialogTitle>

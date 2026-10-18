@@ -161,6 +161,7 @@ export default {
     selectFps: 'Select FPS...',
   },
   common: {
+    more: 'More',
     saved: 'Saved',
     copy: 'Copy',
     copied: 'Copied',
@@ -1188,6 +1189,11 @@ export default {
   },
   extensions: {
     mcp: {
+      standby: 'Idle',
+      keyUnavailable: 'Key unavailable',
+      state: 'Status',
+      client: 'Client',
+      currentOperation: 'Current operation',
       service: 'Service',
       preferences: 'Settings',
       clear: 'Clear',
@@ -1205,7 +1211,7 @@ export default {
         error: 'Unable to read key'
       },
       onActive: 'On · {client} is in control',
-      active: '{client} is in control',
+      active: '{client} in control',
       tookOver: 'You took over',
       aiClient: 'AI client',
       ai: 'AI',
