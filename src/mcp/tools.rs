@@ -205,14 +205,6 @@ async fn execute(
     let source = state.snapshot.source_size().await;
     let size = source.map(|(w, h)| display_size(w, h, state.config.get().mcp.screenshot_long_edge));
     capture.screen = size.map(|(w, h)| [w, h]);
-    capture.cursor = size.and_then(|(w, h)| {
-        state.hid.input_control.cursor().map(|(x, y)| {
-            [
-                (x as f64 / 32767.0 * w.saturating_sub(1) as f64).round() as u32,
-                (y as f64 / 32767.0 * h.saturating_sub(1) as f64).round() as u32,
-            ]
-        })
-    });
     if matches!(
         name,
         "mouse_move"
@@ -280,6 +272,11 @@ async fn execute(
         .map(|(x, y)| (x as u16, y as u16))
         .or(start)
         .or(coordinate);
+    // A preceding input call may move the cursor while this call waits for its lease.
+    capture.cursor = size.zip(position).map(|((w, h), (x, y))| [
+        (x as f64 / 32767.0 * w.saturating_sub(1) as f64).round() as u32,
+        (y as f64 / 32767.0 * h.saturating_sub(1) as f64).round() as u32,
+    ]);
     if position.is_none() && !matches!(name, "type" | "key" | "hold_key") {
         return Err("cursor position is unknown: supply a coordinate first.".into());
     }
