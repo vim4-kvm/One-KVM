@@ -130,6 +130,7 @@ pub async fn logout(
 
 #[derive(Serialize)]
 pub struct AuthCheckResponse {
+    pub auth_mode: crate::config::AuthMode,
     pub authenticated: bool,
     pub user: Option<String>,
 }
@@ -139,12 +140,18 @@ pub async fn auth_check(
     axum::Extension(session): axum::Extension<Session>,
 ) -> Json<AuthCheckResponse> {
     // Get user info from user_id
-    let username = match state.users.single_user().await {
-        Ok(Some(user)) if user.id == session.user_id => Some(user.username),
-        _ => None,
+    let auth_mode = state.config.get().web.auth_mode;
+    let username = if auth_mode == crate::config::AuthMode::Managed {
+        Some("vim4-managed".into())
+    } else {
+        match state.users.single_user().await {
+            Ok(Some(user)) if user.id == session.user_id => Some(user.username),
+            _ => None,
+        }
     };
 
     Json(AuthCheckResponse {
+        auth_mode,
         authenticated: true,
         user: username,
     })

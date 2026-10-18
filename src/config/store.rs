@@ -92,6 +92,11 @@ impl ConfigStore {
         self.cache.load_full()
     }
 
+    /// Publish startup CLI overrides before sharing the store with request handlers.
+    pub(crate) fn set_runtime_config(&self, config: AppConfig) {
+        self.cache.store(Arc::new(config));
+    }
+
     pub async fn set(&self, config: AppConfig) -> Result<()> {
         let _guard = self.write_lock.lock().await;
         let mut config = config;

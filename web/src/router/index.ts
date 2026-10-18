@@ -45,6 +45,11 @@ function t(key: string, params?: Record<string, unknown>): string {
 router.beforeEach(async (to, _from, next) => {
   const authStore = useAuthStore()
 
+  if (to.name === 'Login') {
+    try { await authStore.checkAuth() } catch { /* Native login remains public. */ }
+    if (authStore.managed) return next({ name: 'Console' })
+  }
+
   const shouldCheckSetup = to.name === 'Setup' || !authStore.initialized
   if (shouldCheckSetup) {
     try {

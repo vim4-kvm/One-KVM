@@ -39,7 +39,7 @@ export const authApi = {
     request<{ success: boolean }>('/auth/logout', { method: 'POST' }),
 
   check: () =>
-    request<{ authenticated: boolean; user?: string }>('/auth/check'),
+    request<{ authenticated: boolean; user?: string; auth_mode: 'native' | 'managed' }>('/auth/check'),
 
   changePassword: (currentPassword: string, newPassword: string) =>
     request<{ success: boolean }>('/auth/password', {

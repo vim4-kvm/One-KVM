@@ -4,6 +4,7 @@ import { authApi, systemApi, type AuthLoginResponse } from '@/api'
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<string | null>(null)
+  const managed = ref(false)
   const isAuthenticated = ref(false)
   const initialized = ref(false)
   const needsSetup = ref(false)
@@ -28,6 +29,7 @@ export const useAuthStore = defineStore('auth', () => {
   async function checkAuth() {
     try {
       const result = await authApi.check()
+      managed.value = result.auth_mode === 'managed'
       isAuthenticated.value = result.authenticated
       user.value = result.user || null
       return result
@@ -130,6 +132,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   return {
+    managed,
     user,
     isAuthenticated,
     initialized,

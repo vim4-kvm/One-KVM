@@ -39,6 +39,31 @@ pub async fn auth_middleware(
     // Mounted under /api: inner path may lack prefix; normalize for whitelist checks.
     let path = raw_path.strip_prefix("/api").unwrap_or(raw_path);
 
+    if state.config.get().web.auth_mode == crate::config::AuthMode::Managed {
+        if path == "/setup/init" {
+            return Ok(Json(serde_json::json!({
+                "success": true,
+                "message": "Already initialized"
+            }))
+            .into_response());
+        }
+        if (path.starts_with("/auth/") && path != "/auth/check")
+            || path == "/config/auth"
+            || path == "/users"
+            || path.starts_with("/users/")
+        {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        request.extensions_mut().insert(super::Session {
+            id: "vim4-managed".into(),
+            user_id: "vim4-managed".into(),
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            expires_at: time::OffsetDateTime::from_unix_timestamp(253402300799).unwrap(),
+            data: None,
+        });
+        return Ok(next.run(request).await);
+    }
+
     if !state.config.is_initialized() {
         if is_setup_public_endpoint(path) {
             return Ok(next.run(request).await);

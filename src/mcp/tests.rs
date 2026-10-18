@@ -180,6 +180,154 @@ async fn state(data: &std::path::Path) -> Arc<crate::state::AppState> {
 }
 
 #[tokio::test]
+async fn managed_web_sessions_do_not_bypass_mcp_and_disable_local_accounts_and_redfish() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = state(temp.path()).await;
+    state
+        .config
+        .update(|c| {
+            c.initialized = true;
+            c.web.auth_mode = crate::config::AuthMode::Managed;
+            c.web.bind_address = "127.0.0.1".into();
+            c.mcp.enabled = true;
+            c.redfish.enabled = true;
+        })
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let router = crate::web::create_router(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = reqwest::Client::new();
+    let check = client
+        .get(format!("{base}/api/auth/check"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(check.status(), StatusCode::OK);
+    let check: Value = check.json().await.unwrap();
+    assert_eq!(check["user"], "vim4-managed");
+    assert_eq!(check["auth_mode"], "managed");
+    assert_eq!(
+        client
+            .get(format!("{base}/api/config"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let setup: Value = client
+        .get(format!("{base}/api/setup"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(setup["needs_setup"], false);
+    let setup: Value = client
+        .post(format!("{base}/api/setup/init"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(setup["message"], "Already initialized");
+    for path in [
+        "auth/login",
+        "auth/login/totp",
+        "auth/logout",
+        "auth/password",
+        "auth/username",
+        "auth/totp",
+        "auth/totp/enrollment",
+        "auth/totp/enrollment/confirm",
+        "auth/totp/disable",
+        "users",
+        "config/auth",
+    ] {
+        for method in [reqwest::Method::GET, reqwest::Method::POST] {
+            let response = client
+                .request(method, format!("{base}/api/{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+    for path in ["redfish", "redfish/", "redfish/v1", "redfish/v1/Systems"] {
+        assert_eq!(
+            client
+                .get(format!("{base}/{path}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    for patch in [
+        json!({"bind_addresses":["0.0.0.0"]}),
+        json!({"bind_address":"::1"}),
+        json!({"https_enabled":true}),
+        json!({"auth_mode":"native"}),
+        json!({"auth_mode":"invalid"}),
+        json!({"http_port":9000}),
+    ] {
+        assert!(client
+            .patch(format!("{base}/api/config/web"))
+            .json(&patch)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_client_error());
+    }
+    assert!(!state.config.get().web.https_enabled);
+    let key: Value = client
+        .get(format!("{base}/api/mcp/key"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let endpoint = format!("{base}/api/mcp");
+    for token in [None, Some("vim4-managed")] {
+        let request = client.post(&endpoint);
+        let request = if let Some(token) = token {
+            request.bearer_auth(token)
+        } else {
+            request
+        };
+        assert_eq!(
+            request.send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let request = || {
+        client
+            .post(&endpoint)
+            .bearer_auth(key["api_key"].as_str().unwrap())
+            .header("accept", "application/json, text/event-stream")
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"ping"}))
+    };
+    assert_eq!(request().send().await.unwrap().status(), StatusCode::OK);
+    assert_eq!(
+        request()
+            .header("origin", "http://other")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn activity_details_normalize_keys_and_do_not_copy_typed_text() {
     let temp = tempfile::tempdir().unwrap();
     let state = state(temp.path()).await;

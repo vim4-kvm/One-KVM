@@ -3360,7 +3360,7 @@ onUnmounted(() => {
                   {{ t('auth.changePassword') }}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem @click="logout">
+                <DropdownMenuItem v-if="!authStore.managed" @click="logout">
                   <LogOut class="size-4 mr-2" />
                   {{ t('auth.logout') }}
                 </DropdownMenuItem>

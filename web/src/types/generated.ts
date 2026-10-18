@@ -194,7 +194,13 @@ export interface StreamConfig {
 	turn_password?: string;
 }
 
+export enum AuthMode {
+	Native = "native",
+	Managed = "managed",
+}
+
 export interface WebConfig {
+	auth_mode: AuthMode;
 	http_port: number;
 	https_port: number;
 	bind_addresses: string[];
@@ -1071,6 +1077,7 @@ export interface WatchdogConfigUpdate {
  * Public API shape: certificate paths on disk are not exposed. The full stored model is `WebConfig` in `config::schema`.
  */
 export interface WebConfigResponse {
+	auth_mode: AuthMode;
 	http_port: number;
 	https_port: number;
 	bind_addresses: string[];
@@ -1081,6 +1088,7 @@ export interface WebConfigResponse {
 }
 
 export interface WebConfigUpdate {
+	auth_mode?: AuthMode;
 	http_port?: number;
 	https_port?: number;
 	bind_addresses?: string[];

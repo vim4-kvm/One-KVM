@@ -17,7 +17,7 @@ Environment=GST_PLUGIN_PATH=/usr/lib/vim4-kvm/gstreamer-1.0
 Environment=LD_LIBRARY_PATH=/opt/vim4-onekvm/lib
 Environment=GST_REGISTRY=/var/lib/one-kvm/gstreamer-registry.bin
 ExecStartPre=/usr/bin/test -r /opt/vim4-onekvm/lib/libgst-aml-dma-allocator.so
-ExecStart=/opt/vim4-onekvm/one-kvm --data-dir /var/lib/one-kvm
+ExecStart=/opt/vim4-onekvm/one-kvm --data-dir /var/lib/one-kvm --address 127.0.0.1 --port 8081 --auth-mode managed
 ExecStopPost=/usr/bin/sudo -n /usr/libexec/vim4-onekvm usb-restore
 Restart=on-failure
 RestartSec=3

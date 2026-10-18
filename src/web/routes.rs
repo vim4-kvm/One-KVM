@@ -28,7 +28,7 @@ use crate::state::AppState;
 pub fn create_router(state: Arc<AppState>) -> Router {
     let redfish_router = {
         let config = state.config.get();
-        if config.redfish.enabled {
+        if config.redfish.enabled && config.web.auth_mode != crate::config::AuthMode::Managed {
             Some(crate::redfish::routes::create_redfish_router(state.clone()))
         } else {
             None
@@ -448,6 +448,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let static_routes = super::static_files::static_file_router();
 
     // Main router
+    let managed = state.config.get().web.auth_mode == crate::config::AuthMode::Managed;
     let main_router = Router::new()
         .nest("/api", api_routes)
         .merge(static_routes)
@@ -455,6 +456,16 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .layer(cors)
         .with_state(state)
         .merge(mcp_transport);
+
+    // Override the SPA fallback so disabled Redfish paths really return 404.
+    let main_router = if managed {
+        main_router
+            .route("/redfish", any(api_not_found))
+            .route("/redfish/", any(api_not_found))
+            .route("/redfish/{*path}", any(api_not_found))
+    } else {
+        main_router
+    };
 
     match redfish_router {
         Some(rf) => main_router.merge(rf),

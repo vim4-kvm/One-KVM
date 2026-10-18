@@ -62,7 +62,7 @@ async function handleLogout() {
           <LanguageToggleButton />
 
           <!-- Mobile Menu -->
-          <DropdownMenu>
+          <DropdownMenu v-if="!authStore.managed">
             <DropdownMenuTrigger as-child class="md:hidden">
               <Button variant="ghost" size="icon-sm" :aria-label="t('common.menu')">
                 <Menu class="size-4" />
@@ -77,7 +77,7 @@ async function handleLogout() {
           </DropdownMenu>
 
           <!-- Logout Button (Desktop) -->
-          <Button variant="ghost" size="icon-sm" class="hidden md:flex" :aria-label="t('nav.logout')" @click="handleLogout">
+          <Button v-if="!authStore.managed" variant="ghost" size="icon-sm" class="hidden md:flex" :aria-label="t('nav.logout')" @click="handleLogout">
             <LogOut class="size-4" />
             <span class="sr-only">{{ t('nav.logout') }}</span>
           </Button>

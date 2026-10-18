@@ -26,6 +26,7 @@ use super::supervisor::RuntimeSupervisor;
 
 #[derive(Debug, Clone, Default)]
 pub struct WebConfigOverrides {
+    pub auth_mode: Option<crate::config::AuthMode>,
     pub address: Option<String>,
     pub http_port: Option<u16>,
     pub https_port: Option<u16>,
@@ -36,6 +37,9 @@ pub struct WebConfigOverrides {
 
 impl WebConfigOverrides {
     fn apply(self, config: &mut AppConfig) {
+        if let Some(mode) = self.auth_mode {
+            config.web.auth_mode = mode;
+        }
         if let Some(address) = self.address {
             config.web.bind_address = address.clone();
             config.web.bind_addresses = vec![address];
@@ -82,10 +86,12 @@ impl RuntimeBuilder {
             web_overrides,
         } = self;
         let (db, config_store, mut config) = load_runtime_config(&data_dir).await?;
-        web_overrides.apply(&mut config);
+        prepare_web_config(&config_store, &mut config, web_overrides).await?;
 
         let sessions = SessionStore::new(config.auth.session_timeout_secs as i64);
         let users = UserStore::new(db.clone_pool());
+        initialize_managed_user(&config_store, &users, &mut config).await?;
+        config_store.set_runtime_config(config.clone());
         let two_factor = TwoFactorService::new(db.clone_pool());
         let (shutdown_tx, _) = broadcast::channel::<ShutdownAction>(1);
 
@@ -194,6 +200,46 @@ impl RuntimeBuilder {
             supervisor,
         })
     }
+}
+
+async fn prepare_web_config(
+    store: &ConfigStore,
+    config: &mut AppConfig,
+    overrides: WebConfigOverrides,
+) -> anyhow::Result<()> {
+    let explicit_https = overrides.enable_https;
+    overrides.apply(config);
+    if explicit_https && config.web.auth_mode == crate::config::AuthMode::Managed {
+        anyhow::bail!("--enable-https cannot be used with managed authentication");
+    }
+    if config.web.auth_mode == crate::config::AuthMode::Managed && config.web.https_enabled {
+        tracing::warn!("Disabling HTTPS for managed authentication during startup migration");
+        config.web.https_enabled = false;
+        config.web.validate_managed()?;
+        store
+            .update(|stored| stored.web.https_enabled = false)
+            .await?;
+    }
+    config.web.validate_managed()?;
+    Ok(())
+}
+
+async fn initialize_managed_user(
+    store: &ConfigStore,
+    users: &UserStore,
+    config: &mut AppConfig,
+) -> anyhow::Result<()> {
+    if config.web.auth_mode == crate::config::AuthMode::Managed && !config.initialized {
+        // An interrupted first startup may already have inserted the account.
+        if users.single_user().await?.is_none() {
+            users
+                .create_first_user("vim4-managed", &uuid::Uuid::new_v4().to_string())
+                .await?;
+        }
+        store.update(|stored| stored.initialized = true).await?;
+        config.initialized = true;
+    }
+    Ok(())
 }
 
 pub struct ApplicationRuntime {
@@ -413,7 +459,13 @@ async fn build_otg(config: &AppConfig) -> Arc<OtgService> {
     let service = Arc::new(OtgService::new());
     tracing::info!("OTG Service created");
     if let Err(error) = service
-        .apply_config(&config.hid, &config.msd, &config.otg_network, &config.uac, &config.otg_serial)
+        .apply_config(
+            &config.hid,
+            &config.msd,
+            &config.otg_network,
+            &config.uac,
+            &config.otg_serial,
+        )
         .await
     {
         tracing::warn!("Failed to apply OTG config: {}", error);
@@ -569,6 +621,70 @@ async fn start_watchdog(state: &Arc<AppState>, config: &AppConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn managed_startup_migrates_https_and_initializes_without_replacing_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_database_pool(dir.path()).await.unwrap();
+        let store = ConfigStore::new(db.clone_pool());
+        store.load().await.unwrap();
+        store
+            .update(|c| {
+                c.web.bind_addresses = vec!["0.0.0.0".into(), "::".into()];
+                c.web.https_enabled = true;
+            })
+            .await
+            .unwrap();
+        let mut config = (*store.get()).clone();
+        prepare_web_config(
+            &store,
+            &mut config,
+            WebConfigOverrides {
+                auth_mode: Some(config::AuthMode::Managed),
+                address: Some("127.0.0.1".into()),
+                http_port: Some(8081),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!config.web.https_enabled);
+        assert_eq!(config.web.bind_addresses, ["127.0.0.1"]);
+        assert_eq!(config.web.http_port, 8081);
+        let users = UserStore::new(db.clone_pool());
+        initialize_managed_user(&store, &users, &mut config)
+            .await
+            .unwrap();
+        let user = users.single_user().await.unwrap().unwrap();
+        assert!(config.initialized);
+        assert!(users.verify("vim4-managed", "").await.unwrap().is_none());
+        // Recover an interrupted startup without changing the inserted account.
+        config.initialized = false;
+        initialize_managed_user(&store, &users, &mut config)
+            .await
+            .unwrap();
+        assert_eq!(users.single_user().await.unwrap().unwrap().id, user.id);
+        store.load().await.unwrap();
+        assert!(!store.get().web.https_enabled);
+        assert!(store.is_initialized());
+        // Native CLI flags retain startup-only semantics until a settings save.
+        assert_eq!(store.get().web.auth_mode, config::AuthMode::Native);
+        assert!(prepare_web_config(
+            &store,
+            &mut config,
+            WebConfigOverrides {
+                enable_https: true,
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err());
+        config.web.https_enabled = false;
+        config.web.bind_addresses = vec!["0.0.0.0".into()];
+        assert!(prepare_web_config(&store, &mut config, Default::default())
+            .await
+            .is_err());
+    }
 
     #[test]
     fn web_overrides_only_replace_explicit_values() {

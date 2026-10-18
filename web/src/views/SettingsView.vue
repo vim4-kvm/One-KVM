@@ -62,7 +62,7 @@ import type {
   OtgNetworkStatus,
   WatchdogConfigResponse,
 } from '@/types/generated'
-import { EasytierConfigMode, FrpProxyType, FrpcConfigMode } from '@/types/generated'
+import { AuthMode, EasytierConfigMode, FrpProxyType, FrpcConfigMode } from '@/types/generated'
 import { toConfigFps } from '@/lib/fps'
 import { useClipboard } from '@/composables/useClipboard'
 import { useFeatureVisibility } from '@/composables/useFeatureVisibility'
@@ -207,7 +207,7 @@ const navGroups = computed(() => [
     title: t('settings.software'),
     items: [
       { id: 'appearance', label: t('settings.appearance'), icon: Sun },
-      { id: 'account', label: t('settings.account'), icon: User },
+      ...(!authStore.managed ? [{ id: 'account', label: t('settings.account'), icon: User }] : []),
       { id: 'network', label: t('settings.network'), icon: Globe },
       { id: 'about', label: t('settings.about'), icon: Info },
     ]
@@ -281,7 +281,7 @@ function normalizeSettingsSection(value: unknown): SettingsSectionId | null {
 }
 
 function ensureVisibleSection() {
-  if (!SETTINGS_SECTION_ID_SET.has(activeSection.value)) {
+  if (!SETTINGS_SECTION_ID_SET.has(activeSection.value) || (authStore.managed && activeSection.value === 'account')) {
     activeSection.value = 'appearance'
   }
 }
@@ -291,6 +291,7 @@ async function loadSectionData(section: SettingsSectionId) {
     case 'appearance':
       return
     case 'account':
+      if (authStore.managed) return
       await loadAuthConfig()
       return
     case 'network':
@@ -612,6 +613,7 @@ const vncStreamUrl = computed(() => {
 })
 
 const webServerConfig = ref<WebConfig>({
+  auth_mode: AuthMode.Native,
   http_port: 8080,
   https_port: 8443,
   bind_address: '0.0.0.0',
@@ -2951,7 +2953,7 @@ watch(isWindows, () => {
           </div>
 
           <!-- Account Section -->
-          <div v-show="activeSection === 'account'" class="space-y-4">
+          <div v-if="!authStore.managed" v-show="activeSection === 'account'" class="space-y-4">
             <Card>
               <CardHeader>
                 <CardTitle>{{ t('settings.username') }}</CardTitle>
@@ -3891,7 +3893,7 @@ watch(isWindows, () => {
                 <!-- HTTPS toggle -->
                 <div class="flex items-start justify-between gap-4">
                   <Label>{{ t('settings.httpsEnabled') }}</Label>
-                  <Switch v-model="webServerConfig.https_enabled" />
+                  <Switch v-model="webServerConfig.https_enabled" :disabled="authStore.managed" />
                 </div>
 
                 <Separator />
@@ -3913,6 +3915,7 @@ watch(isWindows, () => {
                     <Input
                       v-else
                       v-model.number="webServerConfig.http_port"
+                      :disabled="authStore.managed"
                       type="number" min="1" max="65535"
                     />
                   </div>
@@ -3982,7 +3985,8 @@ watch(isWindows, () => {
                 <CardDescription>{{ t('settings.listenAddressDesc') }}</CardDescription>
               </CardHeader>
               <CardContent class="space-y-4">
-                <RadioGroup v-model="bindMode" class="space-y-3">
+                <p v-if="authStore.managed" class="text-sm text-muted-foreground">由 VIM4 管理面板统一登录时，One-KVM 只在本机监听</p>
+                <RadioGroup v-else v-model="bindMode" class="space-y-3">
                   <!-- All addresses -->
                   <div class="space-y-2">
                     <div class="flex items-start gap-3">
@@ -4050,7 +4054,7 @@ watch(isWindows, () => {
                   <AlertTriangle class="size-3.5 shrink-0 text-warning" />
                   <span class="truncate">{{ t('settings.restartRequiredHint') }}</span>
                 </p>
-                <Button @click="saveWebServerConfig" :disabled="webServerLoading || !!bindAddressError || autoRestarting">
+                <Button @click="saveWebServerConfig" :disabled="authStore.managed || webServerLoading || !!bindAddressError || autoRestarting">
                   <RefreshCw v-if="autoRestarting" class="size-4 mr-2 animate-spin" />
                   <Save v-else class="size-4 mr-2" />
                   {{ autoRestarting ? t('settings.restarting') : t('common.save') }}

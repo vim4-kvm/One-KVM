@@ -15,7 +15,7 @@ pub async fn update_web_config(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WebConfigUpdate>,
 ) -> Result<Json<WebConfigResponse>> {
-    req.validate()?;
+    req.validate_for(&state.config.get().web)?;
 
     // Determine certificate path changes (requires async file I/O before config update)
     // Some(Some((cert, key))) = write new cert

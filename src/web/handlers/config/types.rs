@@ -1274,6 +1274,7 @@ impl RtspConfigUpdate {
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebConfigResponse {
+    pub auth_mode: crate::config::AuthMode,
     pub http_port: u16,
     pub https_port: u16,
     pub bind_addresses: Vec<String>,
@@ -1296,6 +1297,7 @@ impl WebConfigResponse {
                 .map(|p| !p.is_empty())
                 .unwrap_or(false);
         Self {
+            auth_mode: web.auth_mode,
             http_port: web.http_port,
             https_port: web.https_port,
             bind_addresses: web.bind_addresses.clone(),
@@ -1309,6 +1311,7 @@ impl WebConfigResponse {
 #[typeshare]
 #[derive(Debug, Deserialize)]
 pub struct WebConfigUpdate {
+    pub auth_mode: Option<crate::config::AuthMode>,
     pub http_port: Option<u16>,
     pub https_port: Option<u16>,
     pub bind_addresses: Option<Vec<String>>,
@@ -1323,6 +1326,28 @@ pub struct WebConfigUpdate {
 }
 
 impl WebConfigUpdate {
+    pub fn validate_for(&self, current: &WebConfig) -> crate::error::Result<()> {
+        self.validate()?;
+        if self.auth_mode.is_some_and(|mode| mode != current.auth_mode) {
+            return Err(AppError::BadRequest(
+                "Authentication mode must be changed at startup".into(),
+            ));
+        }
+        let mut candidate = current.clone();
+        self.apply_to(&mut candidate);
+        candidate.validate_managed()?;
+        if current.auth_mode == crate::config::AuthMode::Managed
+            && (candidate.bind_addresses != current.bind_addresses
+                || candidate.bind_address != current.bind_address
+                || candidate.http_port != current.http_port)
+        {
+            return Err(AppError::BadRequest(
+                "Managed HTTP listener is configured at startup".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> crate::error::Result<()> {
         if let Some(port) = self.http_port {
             if port == 0 {

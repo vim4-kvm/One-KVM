@@ -139,6 +139,7 @@ impl Default for AudioConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebConfig {
+    pub auth_mode: AuthMode,
     pub http_port: u16,
     pub https_port: u16,
     pub bind_addresses: Vec<String>,
@@ -151,6 +152,7 @@ pub struct WebConfig {
 impl Default for WebConfig {
     fn default() -> Self {
         Self {
+            auth_mode: AuthMode::Native,
             http_port: 8080,
             https_port: 8443,
             bind_addresses: Vec::new(),
@@ -162,9 +164,65 @@ impl Default for WebConfig {
     }
 }
 
+#[typeshare]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMode {
+    #[default]
+    Native,
+    Managed,
+}
+
+impl WebConfig {
+    pub fn validate_managed(&self) -> crate::error::Result<()> {
+        if self.auth_mode != AuthMode::Managed {
+            return Ok(());
+        }
+        let addresses = if self.bind_addresses.is_empty() {
+            std::slice::from_ref(&self.bind_address)
+        } else {
+            &self.bind_addresses
+        };
+        if addresses.iter().any(|address| {
+            !address
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+        }) || self.https_enabled
+        {
+            return Err(crate::error::AppError::BadRequest(
+                "Managed authentication requires loopback HTTP addresses and HTTPS disabled".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_accepts_only_loopback_http() {
+        let mut web: WebConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(web.auth_mode, AuthMode::Native);
+        assert!(web.validate_managed().is_ok());
+        web.auth_mode = AuthMode::Managed;
+        for address in [
+            "0.0.0.0",
+            "::",
+            "192.168.1.1",
+            "localhost",
+            "::ffff:127.0.0.1",
+        ] {
+            web.bind_address = address.into();
+            assert!(web.validate_managed().is_err(), "{address}");
+        }
+        web.bind_addresses = vec!["127.0.0.2".into(), "::1".into()];
+        assert!(web.validate_managed().is_ok());
+        web.https_enabled = true;
+        assert!(web.validate_managed().is_err());
+        assert!(serde_json::from_str::<WebConfig>(r#"{"auth_mode":"invalid"}"#).is_err());
+    }
 
     #[test]
     fn msd_inquiry_strings_default_and_validate() {

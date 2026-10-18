@@ -40,6 +40,10 @@ struct CliArgs {
     #[arg(short = 'a', long, value_name = "ADDRESS")]
     address: Option<String>,
 
+    /// Web authentication mode (overrides database config)
+    #[arg(long, value_enum)]
+    auth_mode: Option<config::AuthMode>,
+
     /// HTTP port (overrides database config)
     #[arg(
         short = 'p',
@@ -117,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let overrides = WebConfigOverrides {
+        auth_mode: args.auth_mode,
         address: args.address,
         http_port: args.http_port,
         https_port: args.https_port,
