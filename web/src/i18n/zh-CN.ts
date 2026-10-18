@@ -692,7 +692,7 @@ export default {
     otherSubtitle: '其他系统硬件控制与 USB 设备维护',
     aboutSubtitle: '在线升级与版本信息',
     extTtydSubtitle: '在浏览器中打开本机 Shell 终端',
-    thirdPartyAccessSubtitle: '集中配置 RustDesk、VNC、RTSP 与 Redfish 外部接入',
+    thirdPartyAccessSubtitle: '集中配置 UU 远程、RustDesk、VNC、RTSP 与 Redfish 外部接入',
     extRemoteAccessSubtitle: '通过内网穿透服务实现远程访问',
     extFrpcSubtitle: '通过 FRP 客户端实现内网穿透',
     watchdog: {

@@ -693,7 +693,7 @@ export default {
     otherSubtitle: 'Additional hardware controls and USB device maintenance',
     aboutSubtitle: 'Online upgrade and version information',
     extTtydSubtitle: 'Open a host Shell terminal in the browser',
-    thirdPartyAccessSubtitle: 'Configure external RustDesk, VNC, RTSP, and Redfish access',
+    thirdPartyAccessSubtitle: 'Configure external UU Remote, RustDesk, VNC, RTSP, and Redfish access',
     extRemoteAccessSubtitle: 'Remote access through NAT-traversal services',
     extFrpcSubtitle: 'NAT traversal through the FRP client',
     watchdog: {
