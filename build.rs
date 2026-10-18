@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=PACKAGE_VERSION");
     if std::env::var_os("CARGO_FEATURE_VIM4").is_some() {
         // The bundled TurboJPEG uses a different libjpeg ABI than Ubuntu's
         // libyuv/GStreamer. Do not let its static JPEG symbols interpose on

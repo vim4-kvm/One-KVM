@@ -62,7 +62,7 @@ pub async fn transport(State(state): State<Arc<AppState>>, request: Request) -> 
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": "one-kvm",
-                    "version": env!("CARGO_PKG_VERSION")
+                    "version": option_env!("PACKAGE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
                 },
                 "instructions": INSTRUCTIONS
             })

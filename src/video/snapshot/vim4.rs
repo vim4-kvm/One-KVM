@@ -175,6 +175,49 @@ impl Drop for Conversion {
     }
 }
 
+fn conversion_caps(caps: &gst::CapsRef) -> gst::Caps {
+    let mut caps = caps.to_owned();
+    // amlvconv ignores 0/1 and reads uninitialized rate values from caps queries.
+    // This is a single-frame conversion, so use the same nonzero rate at both
+    // ends of GE2D. Copy caps to leave the shared capture pipeline untouched.
+    caps.make_mut().set("framerate", gst::Fraction::new(1, 1));
+    caps
+}
+
+fn converted_sample(
+    pipeline: &gst::Pipeline,
+    output: &gstreamer_app::AppSink,
+    deadline: std::time::Instant,
+) -> Result<gst::Sample, SnapshotError> {
+    let bus = pipeline.bus().unwrap();
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let wait = remaining.min(Duration::from_millis(10));
+        if let Some(sample) =
+            output.try_pull_sample(gst::ClockTime::from_nseconds(wait.as_nanos() as u64))
+        {
+            return Ok(sample);
+        }
+        if let Some(message) = bus.pop_filtered(&[gst::MessageType::Error]) {
+            if let gst::MessageView::Error(error) = message.view() {
+                return Err(SnapshotError::unavailable(format!(
+                    "conversion failed: {}",
+                    error.error()
+                )));
+            }
+        }
+        // try_pull_sample also returns None on EOS, not only on timeout.
+        if output.is_eos() {
+            return Err(SnapshotError::unavailable(
+                "conversion ended without producing a frame",
+            ));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(SnapshotError::Timeout);
+        }
+    }
+}
+
 pub(crate) fn encode(
     sample: gst::Sample,
     target: SnapshotTarget,
@@ -193,11 +236,11 @@ pub(crate) fn encode(
     // Fit scales in DMA memory before any CPU access. Region first converts the full
     // source to RGB, so odd crop coordinates retain their exact pixel boundaries.
     let transform = match target {
-        SnapshotTarget::Fit { .. } => format!("amlvconv ! video/x-raw,format=NV12,width={},height={} ! videoconvert ! video/x-raw,format=RGB ! videoscale ! video/x-raw,width={},height={} ! ",
+        SnapshotTarget::Fit { .. } => format!("amlvconv ! video/x-raw,format=NV12,framerate=1/1,width={},height={} ! videoconvert ! video/x-raw,format=RGB ! videoscale ! video/x-raw,width={},height={} ! ",
             (g.width + 1) & !1, (g.height + 1) & !1, g.width, g.height),
         SnapshotTarget::Region { .. } => {
             let output_scale = if (sw,sh) != (info.width(),info.height()) {
-                format!("amlvconv ! video/x-raw,format=NV12,width={sw},height={sh} ! ")
+                format!("amlvconv ! video/x-raw,format=NV12,framerate=1/1,width={sw},height={sh} ! ")
             } else { String::new() };
             format!("{output_scale}videoconvert ! video/x-raw,format=RGB ! videocrop left={} top={} right={} bottom={} ! videoscale ! video/x-raw,width={},height={} ! ",
                 g.x, g.y, sw-g.x-g.w, sh-g.y-g.h, g.width, g.height)
@@ -218,7 +261,7 @@ pub(crate) fn encode(
         .unwrap()
         .downcast::<gstreamer_app::AppSink>()
         .unwrap();
-    input.set_caps(Some(&caps.to_owned()));
+    input.set_caps(Some(&conversion_caps(caps)));
     conversion
         .0
         .set_state(gst::State::Playing)
@@ -232,12 +275,7 @@ pub(crate) fn encode(
         )
         .map_err(SnapshotError::unavailable)?;
     input.end_of_stream().map_err(SnapshotError::unavailable)?;
-    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-    let rgb = output
-        .try_pull_sample(gst::ClockTime::from_nseconds(
-            remaining.as_nanos().min(u128::from(u64::MAX)) as u64,
-        ))
-        .ok_or(SnapshotError::Timeout)?;
+    let rgb = converted_sample(&conversion.0, &output, deadline)?;
     // Only CPU RGB memory survives this point. Return the capture DMA buffer before
     // JPEG compression (including the potentially expensive quality retry).
     drop(sample);
@@ -296,6 +334,105 @@ pub(crate) fn encode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_frame_conversion_negotiates_a_rate_without_changing_capture_caps() {
+        gst::init().unwrap();
+        for rate in [gst::Fraction::new(0, 1), gst::Fraction::new(60000, 1001)] {
+            let sample = raw_sample(16, 16);
+            let mut caps = sample.caps().unwrap().to_owned();
+            caps.make_mut().set("framerate", rate);
+            let sample = gst::Sample::builder()
+                .buffer(&sample.buffer().unwrap().to_owned())
+                .caps(&caps)
+                .build();
+            let pipeline = gst::parse::launch("appsrc name=input format=time ! video/x-raw,framerate=1/1 ! appsink name=output sync=false async=false")
+                .unwrap().downcast::<gst::Pipeline>().unwrap();
+            let conversion = Conversion(pipeline);
+            let input = conversion
+                .0
+                .by_name("input")
+                .unwrap()
+                .downcast::<gstreamer_app::AppSrc>()
+                .unwrap();
+            let output = conversion
+                .0
+                .by_name("output")
+                .unwrap()
+                .downcast::<gstreamer_app::AppSink>()
+                .unwrap();
+            input.set_caps(Some(&conversion_caps(sample.caps().unwrap())));
+            conversion.0.set_state(gst::State::Playing).unwrap();
+            input
+                .push_buffer(sample.buffer().unwrap().to_owned())
+                .unwrap();
+            input.end_of_stream().unwrap();
+            let converted = converted_sample(
+                &conversion.0,
+                &output,
+                std::time::Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+            assert_eq!(
+                converted.buffer().unwrap().size(),
+                sample.buffer().unwrap().size()
+            );
+            assert_eq!(
+                sample
+                    .caps()
+                    .unwrap()
+                    .structure(0)
+                    .unwrap()
+                    .get::<gst::Fraction>("framerate")
+                    .unwrap(),
+                rate
+            );
+        }
+    }
+
+    #[test]
+    fn conversion_distinguishes_dropped_frame_error_and_deadline() {
+        gst::init().unwrap();
+        for (source, expected) in [
+            (
+                "videotestsrc num-buffers=1 ! identity drop-probability=1.0",
+                "ended without",
+            ),
+            (
+                "videotestsrc num-buffers=1 ! identity error-after=1",
+                "conversion failed",
+            ),
+            ("appsrc format=time", "timeout"),
+        ] {
+            let pipeline = gst::parse::launch(&format!(
+                "{source} ! appsink name=output sync=false async=false"
+            ))
+            .unwrap()
+            .downcast::<gst::Pipeline>()
+            .unwrap();
+            let conversion = Conversion(pipeline);
+            let output = conversion
+                .0
+                .by_name("output")
+                .unwrap()
+                .downcast::<gstreamer_app::AppSink>()
+                .unwrap();
+            conversion.0.set_state(gst::State::Playing).unwrap();
+            let deadline = std::time::Instant::now()
+                + if expected == "timeout" {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(1)
+                };
+            match converted_sample(&conversion.0, &output, deadline) {
+                Err(SnapshotError::Unavailable(message)) if expected != "timeout" => {
+                    assert!(message.contains(expected), "{message}");
+                }
+                Err(SnapshotError::Timeout) if expected == "timeout" => {}
+                result => panic!("Expected {expected}, got {result:?}"),
+            }
+        }
+    }
 
     fn raw_sample(width: u32, height: u32) -> gst::Sample {
         gst::init().unwrap();
