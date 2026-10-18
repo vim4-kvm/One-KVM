@@ -44,9 +44,10 @@ impl Streamer {
             "videoconvert ! jpegenc"
         };
         let element = gst::parse::launch(&format!(
-            "vfmcapsrc ! {filter}\
+            "vfmcapsrc ! {}{filter}\
              queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! \
              {encoder} quality={} ! appsink name=frames sync=false max-buffers=1 drop=true",
+            crate::video::snapshot::vim4::BRANCH,
             config.jpeg_quality.clamp(1, 100)
         ))?;
         let pipeline = element
@@ -58,6 +59,7 @@ impl Streamer {
                 .and_then(|e| e.downcast::<gstreamer_app::AppSink>().ok())
                 .ok_or_else(|| anyhow::anyhow!("Missing appsink"))?;
             pipeline.set_state(gst::State::Playing)?;
+            let _snapshot = self.snapshot_tap.attach(&pipeline)?;
             let mut sequence = 0;
             let mut last_frame = std::time::Instant::now();
             let mut idle_since = None;

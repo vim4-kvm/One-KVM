@@ -57,7 +57,15 @@ pub async fn transport(State(state): State<Arc<AppState>>, request: Request) -> 
             } else {
                 "2025-11-25"
             };
-            json!({"protocolVersion":version,"capabilities":{"tools":{}},"serverInfo":{"name":"one-kvm","version":env!("CARGO_PKG_VERSION")},"instructions":INSTRUCTIONS})
+            json!({
+                "protocolVersion": version,
+                "capabilities": {"tools": {}},
+                "serverInfo": {
+                    "name": "one-kvm",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "instructions": INSTRUCTIONS
+            })
         }
         "ping" => json!({}),
         "tools/list" => json!({"tools":super::tools::list()}),

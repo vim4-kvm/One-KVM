@@ -38,6 +38,10 @@ pub trait VideoOutput: Send + Sync {
     async fn reconnect_audio_sources(&self);
     async fn ensure_video_pipeline_for_external(&self) -> Result<Arc<SharedVideoPipeline>>;
     async fn get_pipeline_config(&self) -> Option<SharedVideoPipelineConfig>;
+    #[cfg(feature = "vim4")]
+    async fn vim4_output_settings(&self) -> Option<crate::platform::vim4::OutputSettings> {
+        self.get_pipeline_config().await.map(|config| config.output)
+    }
     async fn set_video_codec(&self, codec: VideoCodecType) -> Result<()>;
     async fn set_bitrate_preset(&self, preset: BitratePreset) -> Result<()>;
     #[cfg(feature = "vim4")]

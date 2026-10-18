@@ -216,6 +216,10 @@ protobuf-codegen = "3.7"
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 
+[[example]]
+name = "snapshot-bench"
+required-features = ["vim4"]
+
 [patch.crates-io]
 dtls = { path = "libs/dtls" }
 
