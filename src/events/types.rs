@@ -310,6 +310,7 @@ mod tests {
                 state: "idle".into(),
                 client: None,
                 tool: None,
+                detail: None,
                 since: String::new(),
             }),
             SystemEvent::StreamModeSwitching {

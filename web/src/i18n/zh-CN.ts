@@ -1219,6 +1219,14 @@ export default {
         json: 'JSON'
       },
       copyCommand: '复制命令',
+      copyConfig: '复制配置',
+      detail: {
+        characters: '{count} 个字符',
+        up: '向上 {count} 格',
+        down: '向下 {count} 格',
+        left: '向左 {count} 格',
+        right: '向右 {count} 格',
+      },
       copyFailed: '复制失败，请重试',
       operationFailed: '操作失败，请重试',
       operationCancelled: '操作已取消',

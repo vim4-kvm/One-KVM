@@ -28,6 +28,7 @@ pub struct McpService {
     status: parking_lot::Mutex<StatusMemory>,
 }
 struct StatusMemory {
+    call_id: u64,
     activity: McpActivity,
     recent: VecDeque<McpCallRecord>,
     last_input: Option<tokio::time::Instant>,
@@ -70,10 +71,12 @@ impl McpService {
             credentials: parking_lot::Mutex::new(credentials),
             mutation: tokio::sync::Mutex::new(()),
             status: parking_lot::Mutex::new(StatusMemory {
+                call_id: 0,
                 activity: McpActivity {
                     state: "idle".into(),
                     client: None,
                     tool: None,
+                    detail: None,
                     since: now(),
                 },
                 recent: VecDeque::new(),
@@ -155,11 +158,16 @@ impl McpService {
         self.status.lock().activity.client =
             name.map(|s| s.chars().filter(|c| !c.is_control()).take(80).collect());
     }
-    pub fn begin(&self, tool: &str) {
-        self.status.lock().activity.tool = Some(tool.into());
+    pub fn begin(&self, tool: &str, detail: Option<String>) -> u64 {
+        let mut s = self.status.lock();
+        s.call_id += 1;
+        s.activity.tool = Some(tool.into());
+        s.activity.detail = detail;
+        s.call_id
     }
     pub fn record(
         &self,
+        call_id: u64,
         tool: &str,
         input: bool,
         started: tokio::time::Instant,
@@ -167,6 +175,10 @@ impl McpService {
         detail: Option<String>,
     ) {
         let mut s = self.status.lock();
+        // An older concurrent call must not replace the latest call's summary.
+        if s.call_id == call_id {
+            s.activity.detail = detail.clone();
+        }
         if input {
             s.last_input = Some(tokio::time::Instant::now());
         }

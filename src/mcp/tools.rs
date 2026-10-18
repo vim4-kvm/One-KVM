@@ -105,12 +105,15 @@ fn text_result(text: impl Into<String>) -> Value {
 }
 pub async fn call(state: Arc<AppState>, name: &str, args: Value) -> Value {
     let started = tokio::time::Instant::now();
-    state.mcp.begin(name);
     let token = state.mcp.operation_token();
-    let mut detail = None;
-    let result = match validate(name, &args) {
+    let validation = validate(name, &args);
+    let mut detail = validation
+        .as_ref()
+        .ok()
+        .and_then(|()| argument_detail(name, &args));
+    let call_id = state.mcp.begin(name, detail.clone());
+    let result = match validation {
         Ok(()) => {
-            detail = argument_detail(name, &args);
             tokio::select! {
                 biased;
                 _ = token.cancelled() => Err(crate::hid::control::DISABLED.into()),
@@ -120,6 +123,7 @@ pub async fn call(state: Arc<AppState>, name: &str, args: Value) -> Value {
         Err(e) => Err(e),
     };
     state.mcp.record(
+        call_id,
         name,
         !read_only(name),
         started,

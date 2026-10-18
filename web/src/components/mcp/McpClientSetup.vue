@@ -24,7 +24,7 @@ function snippet(key: string) {
   if (tab.value === 'json') return JSON.stringify({ mcpServers: { 'one-kvm': {
     type: 'http', url: props.endpoint, headers: { Authorization: `Bearer ${key}` },
   } } }, null, 2)
-  return `claude mcp add --transport http one-kvm ${props.endpoint} --header "Authorization: Bearer ${key}"`
+  return `claude mcp add --transport http one-kvm ${props.endpoint} \\\n  --header "Authorization: Bearer ${key}"`
 }
 const preview = computed(() => snippet(props.displayKey))
 async function copySnippet() {
@@ -47,14 +47,12 @@ async function copySnippet() {
         <TabsTrigger value="json">{{ t('extensions.mcp.clients.json') }}</TabsTrigger>
       </TabsList>
     </Tabs>
-    <div class="min-w-0 rounded-md border bg-muted/30">
-      <pre class="overflow-x-auto p-3 font-mono text-xs"><code>{{ preview }}</code></pre>
-      <div class="flex justify-end px-2 pb-2">
-        <Button variant="ghost" size="sm" :disabled="disabled || copying" @click="copySnippet">
-          <Check v-if="copied" class="size-4" /><Copy v-else class="size-4" />
-          {{ t(copied ? 'extensions.mcp.copied' : 'extensions.mcp.copyCommand') }}
-        </Button>
-      </div>
+    <div class="relative min-w-0 rounded-md border bg-muted/30">
+      <pre class="overflow-x-auto p-3 pt-11 font-mono text-xs sm:mr-36 sm:pt-3"><code>{{ preview }}</code></pre>
+      <Button class="absolute right-1 top-1 h-7 px-2 text-xs" variant="ghost" size="sm" :disabled="disabled || copying" @click="copySnippet">
+        <Check v-if="copied" class="size-4" /><Copy v-else class="size-4" />
+        {{ t(copied ? 'extensions.mcp.copied' : tab === 'json' ? 'extensions.mcp.copyConfig' : 'extensions.mcp.copyCommand') }}
+      </Button>
     </div>
   </section>
 </template>

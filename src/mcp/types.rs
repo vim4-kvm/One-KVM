@@ -9,6 +9,8 @@ pub struct McpActivity {
     pub client: Option<String>,
     #[typeshare(serialized_as = "String", typescript(type = "string | null"))]
     pub tool: Option<String>,
+    #[typeshare(serialized_as = "String", typescript(type = "string | null"))]
+    pub detail: Option<String>,
     pub since: String,
 }
 #[typeshare]

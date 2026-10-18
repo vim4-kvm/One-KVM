@@ -1220,6 +1220,14 @@ export default {
         json: 'JSON'
       },
       copyCommand: 'Copy command',
+      copyConfig: 'Copy configuration',
+      detail: {
+        characters: '{count} characters',
+        up: 'up {count}',
+        down: 'down {count}',
+        left: 'left {count}',
+        right: 'right {count}',
+      },
       copyFailed: 'Copy failed. Please try again.',
       operationFailed: 'Operation failed. Please try again.',
       operationCancelled: 'Operation cancelled',

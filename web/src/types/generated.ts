@@ -655,6 +655,7 @@ export interface McpActivity {
 	state: "idle" | "active" | "manual";
 	client: string | null;
 	tool: string | null;
+	detail: string | null;
 	since: string;
 }
 

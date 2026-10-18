@@ -7,6 +7,7 @@ import { useWebSocket } from '@/composables/useWebSocket'
 import { mcpApi } from '@/api/mcp'
 import type { McpActivity } from '@/types/generated'
 import { clientName } from './mcp/useMcp'
+import { formatDetail } from './mcp/formatDetail'
 
 const { t, te } = useI18n()
 const socket = useWebSocket()
@@ -21,7 +22,8 @@ const label = computed(() => manual.value ? t('extensions.mcp.tookOver') : t('ex
 }))
 const tool = computed(() => {
   const name = activity.value?.tool
-  return name && te(`extensions.mcp.tools.${name}`) ? t(`extensions.mcp.tools.${name}`) : name
+  const label = name && te(`extensions.mcp.tools.${name}`) ? t(`extensions.mcp.tools.${name}`) : name
+  return [label, formatDetail(activity.value?.detail, t)].filter(Boolean).join(' ')
 })
 function receive(next: McpActivity) {
   revision++

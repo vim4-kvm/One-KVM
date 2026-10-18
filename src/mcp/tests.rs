@@ -78,7 +78,49 @@ async fn activity_details_normalize_keys_and_do_not_copy_typed_text() {
         let record = &status.recent[0];
         assert_eq!(record.tool, name);
         assert_eq!(record.detail.as_deref(), expected, "{name}");
+        assert_eq!(status.activity.tool.as_deref(), Some(name));
+        assert_eq!(status.activity.detail.as_deref(), expected, "{name}");
     }
+}
+
+#[tokio::test]
+async fn activity_keeps_the_latest_call_summary_when_calls_finish_out_of_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = state(temp.path()).await;
+    assert_eq!(state.mcp.activity().detail, None);
+    let started = tokio::time::Instant::now();
+    let first = state.mcp.begin("screenshot", None);
+    state.mcp.record(
+        first,
+        "screenshot",
+        false,
+        started,
+        None,
+        Some("1280x720".into()),
+    );
+    assert_eq!(state.mcp.activity().detail.as_deref(), Some("1280x720"));
+
+    let older = state.mcp.begin("left_click", Some("(1, 2)".into()));
+    let latest = state.mcp.begin("left_click", Some("(640, 360)".into()));
+    state.mcp.record(
+        older,
+        "left_click",
+        true,
+        started,
+        None,
+        Some("(1, 2)".into()),
+    );
+    assert_eq!(state.mcp.activity().detail.as_deref(), Some("(640, 360)"));
+    state.mcp.record(
+        latest,
+        "left_click",
+        true,
+        started,
+        None,
+        Some("(640, 360)".into()),
+    );
+    state.mcp.begin("wait", None);
+    assert_eq!(state.mcp.activity().detail, None);
 }
 
 #[tokio::test]
@@ -390,16 +432,24 @@ async fn activity_events_follow_lease_cooldown_and_history_excludes_typed_text()
     tokio::time::pause();
     let mut events = state.events.subscribe_topic("mcp.activity").unwrap();
     let lease = state.hid.input_control.acquire().await.unwrap();
-    state.mcp.begin("key");
+    let call_id = state.mcp.begin("key", Some("ctrl+s".into()));
     tokio::time::advance(Duration::from_millis(200)).await;
     let event = events.recv().await.unwrap();
-    assert!(matches!(event,SystemEvent::McpActivity(ref a) if a.state == "active"));
+    assert!(
+        matches!(event,SystemEvent::McpActivity(ref a) if a.state == "active" && a.detail.as_deref() == Some("ctrl+s"))
+    );
     lease.finish();
-    state
-        .mcp
-        .record("key", true, tokio::time::Instant::now(), None, None);
+    state.mcp.record(
+        call_id,
+        "key",
+        true,
+        tokio::time::Instant::now(),
+        None,
+        Some("ctrl+s".into()),
+    );
     tokio::time::advance(Duration::from_secs(3)).await;
     assert_eq!(state.mcp.activity().state, "idle");
+    assert_eq!(state.mcp.activity().detail.as_deref(), Some("ctrl+s"));
     let sensitive = "private input value";
     for _ in 0..22 {
         tools::call(state.clone(), "type", json!({"text":sensitive})).await;
