@@ -2,6 +2,8 @@
 import HidDeviceSettings from '@/components/HidDeviceSettings.vue'
 import UuRemoteCard from '@/components/uu-remote/UuRemoteCard.vue'
 import { useUuRemote } from '@/components/uu-remote/useUuRemote'
+import McpCard from '@/components/mcp/McpCard.vue'
+import { useMcp } from '@/components/mcp/useMcp'
 import ConsoleLayoutPreview from '@/components/ConsoleLayoutPreview.vue'
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -564,11 +566,17 @@ const vncLocalConfig = ref<VncConfigUpdate & { password?: string }>({
 })
 
 const uu = useUuRemote()
+const mcp = useMcp()
 let uuStatusTimer: ReturnType<typeof setInterval> | null = null
 watch(activeSection, (section) => {
   if (uuStatusTimer) clearInterval(uuStatusTimer)
   uuStatusTimer = section === 'third-party-access'
-    ? setInterval(() => { if (!document.hidden) void uu.refresh() }, 5000)
+    ? setInterval(() => {
+      if (!document.hidden) {
+        void uu.refresh()
+        void mcp.refresh()
+      }
+    }, 5000)
     : null
 }, { immediate: true })
 onBeforeUnmount(() => { if (uuStatusTimer) clearInterval(uuStatusTimer) })
@@ -4806,6 +4814,7 @@ watch(isWindows, () => {
 
           <!-- UU Remote Section -->
           <UuRemoteCard v-if="activeSection === 'third-party-access'" :remote="uu" :active="activeSection === 'third-party-access'" :is-vim4="isVim4" @navigate="activeSection = $event" />
+          <McpCard v-if="activeSection === 'third-party-access'" :controller="mcp" @navigate="activeSection = $event" />
 
           <!-- RTSP Section -->
           <div v-show="activeSection === 'third-party-access'" class="space-y-4">

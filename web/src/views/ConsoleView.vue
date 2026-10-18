@@ -36,6 +36,7 @@ import StatusCard, { type StatusDetail, type ConnectionStatus } from '@/componen
 import ActionBar from '@/components/ActionBar.vue'
 import ConsoleHeaderActions from '@/components/ConsoleHeaderActions.vue'
 import RecordingIndicator from '@/components/RecordingIndicator.vue'
+import McpActivityIndicator from '@/components/McpActivityIndicator.vue'
 import { useDeviceRecording } from '@/composables/useDeviceRecording'
 import { provideConsoleAppearance } from '@/composables/useConsoleAppearance'
 import ConsoleStatusSummary, { type ConsoleStatusItem } from '@/components/ConsoleStatusSummary.vue'
@@ -3325,6 +3326,7 @@ onUnmounted(() => {
               />
             </div>
             <RecordingIndicator v-if="isVim4" />
+            <McpActivityIndicator />
             <div class="mx-1 hidden h-6 w-px bg-border md:block" />
             <Button variant="ghost" size="icon-sm" class="hidden md:flex" :aria-label="t('common.toggleTheme')" @click="toggleTheme">
               <Sun v-if="isDark" class="size-4" />
