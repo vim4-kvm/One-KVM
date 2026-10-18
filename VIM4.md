@@ -153,7 +153,7 @@ GE2D 缩放使用私有 `libgst-aml-dma-allocator.so`，仅实现 amlvconv 调�
 录制沿用当前画质，共享硬件编码及 HDMI Opus 音频，不再次打开采集设备、不转码。
 
 默认保存到本机 `/var/lib/one-kvm/recordings`，面板“保存到”可选择 NAS 并编辑相对
-子文件夹（默认 `One-KVM`，支持多级）；配置持久化并分别记住各 NAS 的文件夹，录制中
+子文件夹（默认 `One-KVM`，支持多级）；配置持久化并分别记住各 NAS 最近使用的 8 个文件夹，录制中
 禁止切换。文件采用 MKV（H.264/H.265 + Opus），可下载到
 VLC 等播放器播放。目录 0700、文件 0600，独立于虚拟介质目录；升级不删除录像。
 `/api/recording`、`/start`、`/stop`、`/files` 和 `/files/{name}` 均要求网页认证。
@@ -170,9 +170,17 @@ chmod 可能无实际效果。添加 NAS 的链接指向当前主机 80 端口�
 NAS 含 `type`；不可用原因 `not_mounted/unresponsive/not_writable`。
 `PUT/PATCH /api/recording/location {location, folder}` 校验并保存位置；状态增加
 `location: {id,name,folder}` 和 `storage_reason`，空间查询超时返回 `storage: null`。
-`GET /files` 混合按时间返回各位置录像（每项含 `location`）；`?details=true` 返回
-`{files, unavailable}`，单个 NAS 故障不影响其他位置。下载和删除使用 `?location=nas:ID`，
-省略时仍访问本机。每个 NAS 只列出当前记住的文件夹，改文件夹不会搬移已有录像。
+`GET /files` 混合按时间返回各位置所有记住的文件夹中的录像（每项含
+`location: {id,name,folder}`）；`?details=true` 返回 `{files, unavailable}`，单个 NAS
+故障不影响其他位置。下载和删除使用 `?location=nas:ID&folder=相对文件夹`（参数需 URL
+编码），folder 不在该位置历史内返回 400；省略 folder 时 NAS 使用当前文件夹，本机仍使用
+固定目录，省略 location 时仍访问本机。所有文件夹共享该位置原有的 1.5 秒列表预算和信号量。
+改文件夹不会搬移或删除已有录像；不存在的历史目录只跳过，不重新创建，空目录也不移除记录。
+
+配置新增 `recording.location_folders: {"nas:ID": ["新文件夹", "旧文件夹"]}`，最近使用
+在前、去重、最多 8 项；本机不记录历史。旧配置缺少此字段时默认为空，读取时仍纳入
+`recording.folders` 保存的当前目录（未配置则为 `One-KVM`）；下次成功切换时连同旧目录
+保存历史。超过上限只移除最早的历史记录，不删除文件，重新选择该目录即可再次列出录像。
 
 保存位置通过「更改」打开选择器，桌面浮层与卡片等宽，底部面板内展开；选中立即保存，
 失败恢复原选择并在选择器内提示。NAS 文件夹按 Enter 或失焦保存并校验相对路径。
@@ -180,7 +188,10 @@ NAS 含 `type`；不可用原因 `not_mounted/unresponsive/not_writable`。
 位置列表仅在打开选择器时刷新；当前保存位置的可用性仍随录屏状态刷新。
 自动停止提示显示本地停止时间、原位置与已录时长，存储恢复后追加可重新开始的提示；
 关闭提示按 `started_at` 记在浏览器，新录制开始时清除。多位置录像提供临时位置筛选，
-单一位置隐藏筛选与逐行位置标签；未完成文件保留徽章，说明使用弱化文字。
+单一位置隐藏筛选；同一 NAS 有多个文件夹的录像时，逐行位置标签增加末段文件夹名，
+悬停显示完整相对路径。筛选仍按位置。未完成文件保留徽章，说明使用弱化文字。
+空闲时使用列表中最近一个完整且时长至少 10 秒的录像平均码率估算可录时长，无历史时
+隐藏估算；录制中使用实时码率。不足 1 小时显示分钟，超过 99 小时显示超过 99 小时。
 
 状态新增 `error_code`、`started_at`（Unix 秒）、`codec`、`bytes`、
 `storage: {free_bytes, reserve_bytes}` 和空闲时的 `blocker`；错误码采用 snake_case，

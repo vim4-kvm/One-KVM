@@ -93,7 +93,11 @@ export function localDownloadName(file: RecordingFile) {
 }
 
 export function recordingDownloadUrl(file: RecordingFile) {
-  return `/api/recording/files/${encodeURIComponent(file.name)}?filename=${localDownloadName(file)}&location=${encodeURIComponent(file.location.id)}`
+  return `/api/recording/files/${encodeURIComponent(file.name)}?filename=${localDownloadName(file)}&${fileLocationQuery(file)}`
+}
+
+function fileLocationQuery(file: RecordingFile) {
+  return `location=${encodeURIComponent(file.location.id)}&folder=${encodeURIComponent(file.location.folder)}`
 }
 
 export function downloadRecording(file: RecordingFile) {
@@ -137,7 +141,8 @@ function announceTransition(previous: RecordingStatus | null, next: RecordingSta
   if (!previous?.recording || next.recording) return
   const byUser = stopRequested
   stopRequested = false
-  const saved = files.value.find(file => file.name === next.file && file.location.id === next.location.id && file.complete)
+  const saved = files.value.find(file => file.name === next.file && file.location.id === next.location.id
+    && file.location.folder === next.location.folder && file.complete)
   if (next.error_code || next.error) {
     toast.error(t('recording.toast.interrupted'), {
       description: reasonText(next.error_code, next.error),
@@ -204,7 +209,7 @@ const stop = () => run('stopping', () => {
   return request('/recording/stop', { method: 'POST' })
 })
 const remove = (file: RecordingFile) => run('deleting', async () => {
-  await request(`/recording/files/${encodeURIComponent(file.name)}?location=${encodeURIComponent(file.location.id)}`, { method: 'DELETE' })
+  await request(`/recording/files/${encodeURIComponent(file.name)}?${fileLocationQuery(file)}`, { method: 'DELETE' })
   toast.success(t('recording.toast.deleted'))
 })
 
@@ -222,8 +227,15 @@ const bitrateBps = computed(() => {
 
 const remainingSeconds = computed(() => {
   const storage = status.value?.storage
-  if (!storage || !bitrateBps.value) return null
-  return Math.max(0, storage.free_bytes - storage.reserve_bytes) * 8 / bitrateBps.value
+  if (!storage) return null
+  let bitrate = bitrateBps.value
+  if (!status.value?.recording) {
+    // The library is ordered newest first across all locations.
+    const latest = files.value.find(file => file.complete && (file.duration_seconds ?? 0) >= 10 && file.bytes > 0)
+    bitrate = latest ? latest.bytes * 8 / latest.duration_seconds! : null
+  }
+  if (!bitrate) return null
+  return Math.max(0, storage.free_bytes - storage.reserve_bytes) * 8 / bitrate
 })
 
 export function useDeviceRecording() {

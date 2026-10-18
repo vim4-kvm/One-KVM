@@ -56,8 +56,10 @@ pub struct AppConfig {
 #[serde(default)]
 pub struct RecordingConfig {
     pub location: String,
-    /// Remember one recording folder per NAS, including when another target is selected.
+    /// Current recording folder per NAS, including when another target is selected.
     pub folders: std::collections::BTreeMap<String, String>,
+    /// Previously used NAS folders, most recent first, at most eight per location.
+    pub location_folders: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl Default for RecordingConfig {
@@ -65,7 +67,46 @@ impl Default for RecordingConfig {
         Self {
             location: "local".into(),
             folders: Default::default(),
+            location_folders: Default::default(),
         }
+    }
+}
+
+impl RecordingConfig {
+    pub fn folders_for_location(&self, id: &str) -> Vec<String> {
+        if id == "local" {
+            return vec![String::new()];
+        }
+        // Include the legacy current folder even before history is first persisted.
+        let current = self
+            .folders
+            .get(id)
+            .map(String::as_str)
+            .unwrap_or("One-KVM");
+        let mut folders = vec![current.to_owned()];
+        if let Some(history) = self.location_folders.get(id) {
+            for folder in history {
+                if folders.len() == 8 {
+                    break;
+                }
+                if !folders.contains(folder) {
+                    folders.push(folder.clone());
+                }
+            }
+        }
+        folders
+    }
+
+    pub fn remember_folder(&mut self, id: &str, folder: String) {
+        if id == "local" {
+            return;
+        }
+        let mut history = self.folders_for_location(id);
+        history.retain(|previous| previous != &folder);
+        history.insert(0, folder.clone());
+        history.truncate(8);
+        self.location_folders.insert(id.to_owned(), history);
+        self.folders.insert(id.to_owned(), folder);
     }
 }
 

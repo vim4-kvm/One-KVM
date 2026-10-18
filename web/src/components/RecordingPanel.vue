@@ -26,6 +26,9 @@ const fileLocationFilter = ref('all')
 
 const isRecording = computed(() => !!status.value?.recording)
 const blocker = computed(() => isRecording.value ? null : status.value?.storage_reason ? 'storage_unavailable' : status.value?.blocker ?? null)
+const blockerDescription = computed(() => status.value?.storage_reason
+  ? t(`recording.locationBlockers.${status.value.storage_reason}`, { name: locationName(status.value.location) })
+  : t(`recording.blockers.${blocker.value}`, t('recording.reasons.internal')))
 const canStart = computed(() => !!status.value && !isRecording.value && !blocker.value && !action.value && !unreachable.value)
 const lowRemaining = computed(() => remainingSeconds.value !== null && remainingSeconds.value < 600)
 const freeBytes = computed(() => {
@@ -54,6 +57,19 @@ const lastError = computed(() => {
 })
 const totalBytes = computed(() => files.value.reduce((sum, file) => sum + file.bytes, 0))
 const fileLocations = computed(() => [...new Map(files.value.map(file => [file.location.id, file.location])).values()])
+const multipleFolders = computed(() => {
+  const folders = new Map<string, Set<string>>()
+  for (const file of files.value) {
+    const known = folders.get(file.location.id) ?? new Set<string>()
+    known.add(file.location.folder)
+    folders.set(file.location.id, known)
+  }
+  return new Set([...folders].filter(([id, known]) => id !== 'local' && known.size > 1).map(([id]) => id))
+})
+function fileLocationLabel(file: RecordingFile) {
+  const name = locationName(file.location)
+  return multipleFolders.value.has(file.location.id) ? `${name} › ${file.location.folder.split('/').pop()}` : name
+}
 const filteredFiles = computed(() => fileLocationFilter.value === 'all' ? files.value : files.value.filter(file => file.location.id === fileLocationFilter.value))
 watch(fileLocations, locations => {
   if (locations.length < 2 || !locations.some(location => location.id === fileLocationFilter.value)) fileLocationFilter.value = 'all'
@@ -64,6 +80,7 @@ onUnmounted(() => recording.setPanelOpen(false))
 
 function isActive(file: RecordingFile) {
   return isRecording.value && status.value?.file === file.name && status.value.location.id === file.location.id
+    && status.value.location.folder === file.location.folder
 }
 function codecLabel(codec: string | null | undefined) {
   return codec === 'h265' ? 'H.265' : codec === 'h264' ? 'H.264' : null
@@ -83,6 +100,7 @@ function fileMeta(file: RecordingFile) {
   ].filter(Boolean).join(' · ')
 }
 function remainingText(seconds: number) {
+  if (seconds > 99 * 3600) return t('recording.remainingOver99Hours')
   if (seconds >= 3600) return t('recording.remainingHours', { hours: Math.floor(seconds / 3600) })
   return t('recording.remainingMinutes', { minutes: Math.max(1, Math.floor(seconds / 60)) })
 }
@@ -143,8 +161,7 @@ function confirmDelete() {
           </template>
           <template v-else-if="blocker">
             <p class="flex items-center gap-1.5 text-sm font-medium"><AlertTriangle class="size-4 text-amber-500" />{{ t('recording.blocked') }}</p>
-            <p class="mt-1 text-xs text-muted-foreground">{{ t(`recording.blockers.${blocker}`, t('recording.reasons.internal')) }}</p>
-            <p v-if="status?.storage_reason" class="mt-1 text-xs text-muted-foreground">{{ t(`recording.locationReasons.${status.storage_reason}`) }}</p>
+            <p class="mt-1 text-xs text-muted-foreground">{{ blockerDescription }}</p>
             <Button v-if="blocker === 'video_codec'" variant="outline" size="sm" class="mt-2.5" @click="emit('switchCodec', 'h264')">
               {{ t('recording.switchToH264') }}
             </Button>
@@ -214,7 +231,7 @@ function confirmDelete() {
       <ul v-else class="-mx-1 max-h-72 space-y-1 overflow-y-auto px-1">
         <li
           v-for="file in filteredFiles"
-          :key="`${file.location.id}:${file.name}`"
+          :key="JSON.stringify([file.location.id, file.location.folder, file.name])"
           :data-recording="file.name"
           :class="['group flex items-center gap-3 rounded-lg border px-3 py-2.5 transition-colors', isActive(file) ? 'border-red-500/30 bg-red-500/[0.04]' : 'hover:bg-muted/50']"
         >
@@ -228,7 +245,8 @@ function confirmDelete() {
               <Badge v-else-if="!file.complete" variant="warning" class="px-1.5 py-0 text-[10px]">{{ t('recording.partialBadge') }}</Badge>
             </div>
             <p class="truncate text-xs text-muted-foreground tabular-nums">{{ isActive(file) ? t('recording.inProgress') : fileMeta(file) }}</p>
-            <Badge v-if="fileLocations.length >= 2" variant="secondary" class="max-w-full truncate px-1.5 py-0 text-[10px]">{{ locationName(file.location) }}</Badge>
+            <Badge v-if="fileLocations.length >= 2 || multipleFolders.has(file.location.id)" variant="secondary" class="max-w-full truncate px-1.5 py-0 text-[10px]"
+              :title="file.location.folder ? `${locationName(file.location)} › ${file.location.folder}` : locationName(file.location)">{{ fileLocationLabel(file) }}</Badge>
             <p v-if="!file.complete && !isActive(file)" class="truncate text-xs text-muted-foreground" :title="t('recording.partial')">{{ t('recording.partial') }}</p>
             <p v-else-if="file.stop_reason && !isActive(file)" class="truncate text-xs text-muted-foreground" :title="reasonText(file.stop_reason)">
               {{ t('recording.stoppedBecause', { reason: reasonText(file.stop_reason) }) }}

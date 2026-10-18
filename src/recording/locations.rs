@@ -163,17 +163,39 @@ impl Locations {
     }
 
     pub fn directory(&self, location: &Location, create: bool) -> Result<Directory, Unavailable> {
+        self.open_directory(location, create)?
+            .ok_or(Unavailable::NotWritable)
+    }
+
+    /// Missing historical folders are omitted without recreating them.
+    pub fn directory_for_listing(
+        &self,
+        location: &Location,
+    ) -> Result<Option<Directory>, Unavailable> {
+        self.open_directory(location, false)
+    }
+
+    fn open_directory(
+        &self,
+        location: &Location,
+        create: bool,
+    ) -> Result<Option<Directory>, Unavailable> {
         if location.id == "local" {
             if create {
                 std::fs::create_dir_all(&self.local).map_err(|_| Unavailable::NotWritable)?;
             }
-            let dir = open_dir(&self.local).map_err(|_| Unavailable::NotWritable)?;
+            let dir = match open_dir(&self.local) {
+                Err(error) if !create && error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(None)
+                }
+                result => result.map_err(|_| Unavailable::NotWritable)?,
+            };
             if create {
                 use std::os::unix::fs::PermissionsExt;
                 dir.set_permissions(std::fs::Permissions::from_mode(0o700))
                     .map_err(|_| Unavailable::NotWritable)?;
             }
-            return Ok(Directory(dir));
+            return Ok(Some(Directory(dir)));
         }
         let id = location
             .id
@@ -211,11 +233,14 @@ impl Locations {
                 )
             };
             if fd < 0 {
+                if !create && std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+                    return Ok(None);
+                }
                 return Err(Unavailable::NotWritable);
             }
             dir = unsafe { File::from_raw_fd(fd) };
         }
-        Ok(Directory(dir))
+        Ok(Some(Directory(dir)))
     }
 }
 

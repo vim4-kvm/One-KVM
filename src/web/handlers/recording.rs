@@ -114,7 +114,11 @@ pub async fn delete(
 ) -> Result<Json<serde_json::Value>> {
     state
         .recording
-        .delete_at(query.location.as_deref().unwrap_or("local"), &name)
+        .delete_at(
+            query.location.as_deref().unwrap_or("local"),
+            query.folder.as_deref(),
+            &name,
+        )
         .await?;
     Ok(Json(serde_json::json!({ "success": true })))
 }
@@ -122,6 +126,7 @@ pub async fn delete(
 pub struct DownloadQuery {
     filename: Option<String>,
     location: Option<String>,
+    folder: Option<String>,
 }
 
 /// Browsers name files in the viewer's timezone; the device clock is often UTC.
@@ -147,7 +152,11 @@ pub async fn download(
 ) -> Result<Response> {
     let (file, size, default_name) = state
         .recording
-        .open_at(query.location.as_deref().unwrap_or("local"), &name)
+        .open_at(
+            query.location.as_deref().unwrap_or("local"),
+            query.folder.as_deref(),
+            &name,
+        )
         .await?;
     let download_name = match query.filename {
         Some(requested) if is_download_name(&requested) => requested,

@@ -214,7 +214,7 @@ impl Recorder {
             .update(|c| {
                 c.recording.location = id.clone();
                 if id != "local" {
-                    c.recording.folders.insert(id, target.folder);
+                    c.recording.remember_folder(&id, target.folder);
                 }
             })
             .await
@@ -596,18 +596,32 @@ impl Recorder {
     }
 
     pub async fn files(&self) -> (Vec<RecordingFile>, Vec<Availability>) {
-        let entries = self.locations.discover(&self.configuration());
+        let config = self.configuration();
+        let entries = self.locations.discover(&config);
+        let config = &config;
         let results = futures::future::join_all(entries.into_iter().map(|mut entry| async move {
             let locations = self.locations.clone();
             let location = entry.location.clone();
+            let folders = config.folders_for_location(&location.id);
             let result = bounded(
                 locations.gate(&format!("files:{}", location.id)),
                 move || {
-                    let directory = locations.directory(&location, true)?;
-                    let mut files =
-                        storage::list(&directory.path()).map_err(|_| Unavailable::NotWritable)?;
-                    for file in &mut files {
-                        file.location = location.clone();
+                    // All folders share one deadline and one worker permit per location.
+                    let mut files = Vec::new();
+                    for folder in folders {
+                        let location = Location {
+                            folder,
+                            ..location.clone()
+                        };
+                        let Some(directory) = locations.directory_for_listing(&location)? else {
+                            continue;
+                        };
+                        let mut items = storage::list(&directory.path())
+                            .map_err(|_| Unavailable::NotWritable)?;
+                        for file in &mut items {
+                            file.location = location.clone();
+                        }
+                        files.extend(items);
                     }
                     Ok::<_, Unavailable>(files)
                 },
@@ -646,10 +660,31 @@ impl Recorder {
         self.locations.gate(&format!("download:{id}"))
     }
 
-    pub async fn open_at(&self, id: &str, name: &str) -> Result<(std::fs::File, u64, String)> {
+    fn file_location(&self, id: &str, folder: Option<&str>) -> Result<Location> {
+        let mut location = self.find_location(id)?;
+        if let Some(folder) = folder {
+            if !self
+                .configuration()
+                .folders_for_location(id)
+                .iter()
+                .any(|known| known == folder)
+            {
+                return Err(recording_error("Unknown recording folder"));
+            }
+            location.folder = folder.to_owned();
+        }
+        Ok(location)
+    }
+
+    pub async fn open_at(
+        &self,
+        id: &str,
+        folder: Option<&str>,
+        name: &str,
+    ) -> Result<(std::fs::File, u64, String)> {
         let _session = self.session.lock().await;
-        self.ensure_inactive(id, name).await?;
-        let location = self.find_location(id)?;
+        let location = self.file_location(id, folder)?;
+        self.ensure_inactive(&location, name).await?;
         let locations = self.locations.clone();
         let name = name.to_owned();
         bounded(self.download_gate(id), move || -> anyhow::Result<_> {
@@ -670,10 +705,10 @@ impl Recorder {
         .map_err(recording_error)
     }
 
-    pub async fn delete_at(&self, id: &str, name: &str) -> Result<()> {
+    pub async fn delete_at(&self, id: &str, folder: Option<&str>, name: &str) -> Result<()> {
         let _session = self.session.lock().await;
-        self.ensure_inactive(id, name).await?;
-        let location = self.find_location(id)?;
+        let location = self.file_location(id, folder)?;
+        self.ensure_inactive(&location, name).await?;
         let locations = self.locations.clone();
         let name = name.to_owned();
         bounded(
@@ -688,10 +723,11 @@ impl Recorder {
         .map_err(recording_error)
     }
 
-    async fn ensure_inactive(&self, id: &str, name: &str) -> Result<()> {
+    async fn ensure_inactive(&self, location: &Location, name: &str) -> Result<()> {
         let status = self.status.read().await;
         if status.recording
-            && (status.location.id == id || status.location.id.is_empty())
+            && ((status.location.id == location.id && status.location.folder == location.folder)
+                || status.location.id.is_empty())
             && status.file.as_deref() == Some(name)
         {
             return Err(AppError::Conflict(
@@ -905,10 +941,13 @@ mod tests {
         assert_eq!(available.len(), 1);
         assert_eq!(missing[0].reason, Some(Unavailable::Unresponsive));
         drop(stalled);
-        assert_eq!(recorder.open_at("nas:test", &name).await.unwrap().1, 3);
-        recorder.delete_at("nas:test", &name).await.unwrap();
-        assert!(recorder.open_at("local", &name).await.is_ok());
-        assert!(recorder.open_at("nas:test", &name).await.is_err());
+        assert_eq!(
+            recorder.open_at("nas:test", None, &name).await.unwrap().1,
+            3
+        );
+        recorder.delete_at("nas:test", None, &name).await.unwrap();
+        assert!(recorder.open_at("local", None, &name).await.is_ok());
+        assert!(recorder.open_at("nas:test", None, &name).await.is_err());
         std::fs::write(&recorder.locations.mountinfo, "").unwrap();
         let (files, missing) = recorder.files().await;
         assert_eq!(files.len(), 1);
@@ -932,6 +971,7 @@ mod tests {
         let config = crate::config::ConfigStore::new(db.clone_pool());
         config.load().await.unwrap();
         assert_eq!(config.get().recording.location, "local");
+        assert!(config.get().recording.location_folders.is_empty());
         let mut recorder = Recorder::with_config(root.path().join("local"), config.clone());
         recorder.locations = Arc::new(locations::tests::fixture(root.path()));
         recorder
@@ -953,10 +993,150 @@ mod tests {
         config.load().await.unwrap();
         assert_eq!(config.get().recording.location, "local");
         assert_eq!(config.get().recording.folders["nas:test"], "nested/folder");
+        assert_eq!(
+            config.get().recording.location_folders["nas:test"],
+            ["nested/folder", "One-KVM"]
+        );
         assert!(recorder
             .set_location("nas:test".into(), Some("../escape".into()))
             .await
             .is_err());
+    }
+
+    #[test]
+    fn folder_history_migrates_deduplicates_and_evicts_the_least_recent() {
+        let mut config: crate::config::RecordingConfig =
+            serde_json::from_value(serde_json::json!({
+                "location": "nas:test", "folders": {"nas:test": "One-KVM/录像测试"}
+            }))
+            .unwrap();
+        assert!(config.location_folders.is_empty());
+        assert_eq!(
+            config.folders_for_location("nas:test"),
+            ["One-KVM/录像测试"]
+        );
+        config.remember_folder("nas:test", "One-KVM/界面测试".into());
+        config.remember_folder("nas:test", "One-KVM/录像测试".into());
+        assert_eq!(
+            config.location_folders["nas:test"],
+            ["One-KVM/录像测试", "One-KVM/界面测试"]
+        );
+        for i in 0..8 {
+            config.remember_folder("nas:test", format!("folder-{i}"));
+        }
+        config.remember_folder("nas:test", "folder-3".into());
+        assert_eq!(
+            config.location_folders["nas:test"],
+            [
+                "folder-3", "folder-7", "folder-6", "folder-5", "folder-4", "folder-2", "folder-1",
+                "folder-0"
+            ]
+        );
+        config.remember_folder("local", "ignored".into());
+        assert_eq!(config.folders_for_location("local"), [""]);
+        assert!(!config.location_folders.contains_key("local"));
+    }
+
+    #[tokio::test]
+    async fn library_keeps_old_folders_and_scopes_file_operations_to_known_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let db = crate::db::DatabasePool::new(&root.path().join("config.db"))
+            .await
+            .unwrap();
+        db.init_schema().await.unwrap();
+        let config = crate::config::ConfigStore::new(db.clone_pool());
+        // An existing installation has a current folder but no history yet.
+        config
+            .update(|c| {
+                c.recording
+                    .folders
+                    .insert("nas:test".into(), "One-KVM/录像测试".into());
+            })
+            .await
+            .unwrap();
+        let mut recorder = Recorder::with_config(root.path().join("local"), config.clone());
+        recorder.locations = Arc::new(locations::tests::fixture(root.path()));
+        let old = recorder.find_location("nas:test").unwrap();
+        let old_dir = recorder.locations.directory(&old, true).unwrap();
+        let (name, file) = storage::create(&old_dir.path()).unwrap();
+        file.set_len(10).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+        recorder
+            .set_location("nas:test".into(), Some("One-KVM/界面测试".into()))
+            .await
+            .unwrap();
+        let current = recorder.find_location("nas:test").unwrap();
+        let current_dir = recorder.locations.directory(&current, false).unwrap();
+        std::fs::write(current_dir.path().join(&name), b"new").unwrap();
+        config
+            .update(|c| {
+                c.recording
+                    .location_folders
+                    .get_mut("nas:test")
+                    .unwrap()
+                    .push("missing/folder".into());
+            })
+            .await
+            .unwrap();
+        let history = config.get().recording.location_folders.clone();
+        let (files, missing) = recorder.files().await;
+        assert!(missing.is_empty());
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].location.folder, current.folder);
+        assert_eq!(files[1].location.folder, old.folder);
+        assert!(!recorder.locations.mount_root.join("test/missing").exists());
+        assert_eq!(
+            recorder.open_at("nas:test", None, &name).await.unwrap().1,
+            3
+        );
+        assert_eq!(
+            recorder
+                .open_at("nas:test", Some(&old.folder), &name)
+                .await
+                .unwrap()
+                .1,
+            10
+        );
+        for folder in ["unknown", "../escape", "/tmp"] {
+            assert!(matches!(
+                recorder.open_at("nas:test", Some(folder), &name).await,
+                Err(AppError::BadRequest(_))
+            ));
+            assert!(matches!(
+                recorder.delete_at("nas:test", Some(folder), &name).await,
+                Err(AppError::BadRequest(_))
+            ));
+        }
+        // Same filenames in another folder must not inherit the active file lock.
+        *recorder.status.write().await = RecordingStatus {
+            location: current.clone(),
+            recording: true,
+            file: Some(name.clone()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            recorder.open_at("nas:test", None, &name).await,
+            Err(AppError::Conflict(_))
+        ));
+        assert!(matches!(
+            recorder
+                .delete_at("nas:test", Some(&current.folder), &name)
+                .await,
+            Err(AppError::Conflict(_))
+        ));
+        recorder
+            .delete_at("nas:test", Some(&old.folder), &name)
+            .await
+            .unwrap();
+        assert!(current_dir.path().join(&name).exists());
+        let (files, missing) = recorder.files().await;
+        assert!(missing.is_empty());
+        assert_eq!(files.len(), 1);
+        assert_eq!(config.get().recording.location_folders, history);
+        recorder.status.write().await.recording = false;
+        recorder.delete_at("nas:test", None, &name).await.unwrap();
+        assert!(recorder.files().await.0.is_empty());
     }
     #[test]
     fn missing_frames_and_pipeline_restarts_are_not_muxed_as_continuous_video() {
@@ -1006,8 +1186,8 @@ mod tests {
             file: Some(name.clone()),
             ..Default::default()
         };
-        assert!(recorder.open_at("local", &name).await.is_err());
-        assert!(recorder.delete_at("local", &name).await.is_err());
+        assert!(recorder.open_at("local", None, &name).await.is_err());
+        assert!(recorder.delete_at("local", None, &name).await.is_err());
         let cancel = CancellationToken::new();
         let worker_cancel = cancel.clone();
         let (stopping, stopped) = tokio::sync::oneshot::channel();
@@ -1028,11 +1208,11 @@ mod tests {
         request.abort();
         let _ = request.await;
         assert!(recorder.session.lock().await.is_some());
-        assert!(recorder.open_at("local", &name).await.is_err());
+        assert!(recorder.open_at("local", None, &name).await.is_err());
         finalize.send(()).unwrap();
         assert!(!recorder.stop().await.recording);
-        assert!(recorder.open_at("local", &name).await.is_ok());
-        recorder.delete_at("local", &name).await.unwrap();
+        assert!(recorder.open_at("local", None, &name).await.is_ok());
+        recorder.delete_at("local", None, &name).await.unwrap();
         assert!(recorder.files().await.0.is_empty());
     }
 }

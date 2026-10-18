@@ -359,6 +359,7 @@ export interface AppConfig {
 export interface RecordingConfig {
 	location: string;
 	folders: Record<string, string>;
+	location_folders: Record<string, string[]>;
 }
 
 /** Update for a single ATX output binding */
