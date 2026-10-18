@@ -361,6 +361,33 @@ LIST 返回裸数组并保留请求 ID。验证状态：**未上板**。仍需�
 入口、错误文案、重命名、保留进程重接、回放重绘；需实机验证 USB 枚举、串口权限、拔插恢复、
 ttyGS0 主机未打开时的读写及与其他 USB 功能共享端点。
 
+## MCP
+
+设置“扩展 → MCP”开启外部 MCP 服务，供 Claude Code、Codex 等客户端查看屏幕并操作键鼠。
+端点是主 Web 服务的 `/api/mcp`（Streamable HTTP，无状态、纯 JSON 响应），只接受
+`Authorization: Bearer okvm_mcp_…`；网页会话不能代替 Key，Key 也不能访问其他 API，
+跨站 Origin 与超过 1 MiB 的请求被拒。Key 存于 `/var/lib/one-kvm/mcp/credentials.json`（0600），
+关闭服务保留 Key，重新生成立即使旧 Key 失效。页面提供 Claude Code、Codex 和 JSON 配置片段；
+Codex 片段直接写 `~/.codex/config.toml` 的 `http_headers`，因为 `codex mcp add` 只能从环境变量读
+Bearer，从桌面版或其他终端启动时读不到。键鼠工具标记为有副作用，非交互 `codex exec`
+需对该服务器设 `default_tools_approval_mode = "approve"`。
+
+17 个工具沿用 computer use 的成员命名（screenshot、zoom、left_click、left_click_drag、scroll、type、key 等）。
+坐标为截图像素：截图按设置的长边（1280 默认，可选 1568/1920/2560，不放大）缩放，`zoom` 从源分辨率
+裁剪局部；鼠标全部走绝对设备，绝对鼠标或键盘未启用时工具报错而不静默成功。`type` 按 US 布局发送按键，
+被控机启用中文输入法时标点和字母会被输入法改写，需先切到英文布局；单按 Shift 可能切换输入法模式。
+被控机开启自然滚动（macOS 默认）时打开“自然滚动”，否则上下方向相反。
+
+任何手动键鼠（网页、UU、VNC、RustDesk）会取消正在执行的 MCP 操作，只释放 MCP 自己按下的键，
+停手 2 秒且全部松开后 MCP 才能继续；内置 Computer Use 与 MCP 互斥。控制台在 AI 操作时显示
+“<客户端> 正在操作”。最近活动在内存中保留 50 条（含输入文本、按键和最近 20 张、至多 8 MiB 的截图），
+详情可查看截图与点击位置，不写入系统日志，重启清空。
+
+截图在共享采集管线上按需开原始帧分支（valve、队列 1、空闲不持有 DMA），GE2D 缩放后 TurboJPEG
+编码，不新开采集、不请求关键帧、不切编码。厂商 `amlvconv` 的帧率缓存未初始化会随机丢弃单帧，
+单帧转换固定 1/1 帧率并先协商下游 caps。4K H.264 实测见公共工作区
+`docs/bringup/2026-10-18-onekvm-snapshot-fit.md`；验证方法见 `docs/snapshot-validation.md`。
+
 ## 终端、扩展与看门狗
 
 网页终端使用 Ubuntu 的 ttyd，以 khadas 运行，经现有认证代理访问专用 Unix socket。
