@@ -16,6 +16,11 @@ pub struct McpActivity {
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpCallRecord {
+    #[typeshare(serialized_as = "u32")]
+    pub id: u64,
+    pub has_image: bool,
+    #[typeshare(serialized_as = "String", typescript(type = "number | null"))]
+    pub based_on: Option<u64>,
     #[typeshare(serialized_as = "String", typescript(type = "string | null"))]
     pub text: Option<String>,
     pub at: String,
@@ -28,6 +33,23 @@ pub struct McpCallRecord {
     pub duration_ms: u32,
     #[typeshare(serialized_as = "String", typescript(type = "string | null"))]
     pub detail: Option<String>,
+}
+#[typeshare]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct McpCallDetail {
+    pub record: McpCallRecord,
+    #[typeshare(serialized_as = "String", typescript(type = "Record<string, unknown>"))]
+    pub arguments: serde_json::Value,
+    #[typeshare(serialized_as = "String", typescript(type = "string | null"))]
+    pub result_text: Option<String>,
+    #[typeshare(serialized_as = "String", typescript(type = "number | null"))]
+    pub image_width: Option<u32>,
+    #[typeshare(serialized_as = "String", typescript(type = "number | null"))]
+    pub image_height: Option<u32>,
+    #[typeshare(serialized_as = "String", typescript(type = "[number, number] | null"))]
+    pub screen: Option<[u32; 2]>,
+    #[typeshare(serialized_as = "String", typescript(type = "[number, number] | null"))]
+    pub cursor: Option<[u32; 2]>,
 }
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize)]

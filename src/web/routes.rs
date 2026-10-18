@@ -401,6 +401,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         );
 
     let mcp_management = Router::new()
+        .route("/mcp/activity/{id}", get(handlers::mcp::activity_detail))
+        .route(
+            "/mcp/activity/{id}/image",
+            get(handlers::mcp::activity_image),
+        )
         .route("/mcp/status", get(handlers::mcp::status))
         .route(
             "/mcp/activity",

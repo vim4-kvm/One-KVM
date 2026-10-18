@@ -662,6 +662,9 @@ export interface McpActivity {
 }
 
 export interface McpCallRecord {
+	id: number;
+	has_image: boolean;
+	based_on: number | null;
 	text: string | null;
 	at: string;
 	client: string | null;
@@ -670,6 +673,16 @@ export interface McpCallRecord {
 	error: string | null;
 	duration_ms: number;
 	detail: string | null;
+}
+
+export interface McpCallDetail {
+	record: McpCallRecord;
+	arguments: Record<string, unknown>;
+	result_text: string | null;
+	image_width: number | null;
+	image_height: number | null;
+	screen: [number, number] | null;
+	cursor: [number, number] | null;
 }
 
 export interface McpCapabilities {

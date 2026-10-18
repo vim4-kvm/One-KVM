@@ -112,16 +112,30 @@ pub async fn call(state: Arc<AppState>, name: &str, args: Value) -> Value {
         .ok()
         .and_then(|()| argument_detail(name, &args));
     let call_id = state.mcp.begin(name, detail.clone());
+    let mut capture = super::CallCapture {
+        arguments: args.clone(),
+        ..Default::default()
+    };
     let result = match validation {
         Ok(()) => {
             tokio::select! {
                 biased;
                 _ = token.cancelled() => Err(crate::hid::control::DISABLED.into()),
-                result = execute(&state, name, &args, &mut detail) => result,
+                result = execute(&state, name, &args, &mut detail, &mut capture) => result,
             }
         }
         Err(e) => Err(e),
     };
+    capture.result_text = Some(match &result {
+        Ok(value) => value["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(error) => error.clone(),
+    });
     state.mcp.record(
         call_id,
         name,
@@ -134,6 +148,7 @@ pub async fn call(state: Arc<AppState>, name: &str, args: Value) -> Value {
         } else {
             None
         },
+        capture,
     );
     match result {
         Ok(value) => value,
@@ -178,16 +193,41 @@ async fn execute(
     name: &str,
     args: &Value,
     detail: &mut Option<String>,
+    capture: &mut super::CallCapture,
 ) -> Result<Value, String> {
     if name == "wait" {
         tokio::time::sleep(Duration::from_secs_f64(args["duration"].as_f64().unwrap())).await;
         return Ok(text_result("OK"));
     }
     if matches!(name, "screenshot" | "zoom") {
-        return screenshot(state, name, args, detail).await;
+        return screenshot(state, name, args, detail, capture).await;
     }
     let source = state.snapshot.source_size().await;
     let size = source.map(|(w, h)| display_size(w, h, state.config.get().mcp.screenshot_long_edge));
+    capture.screen = size.map(|(w, h)| [w, h]);
+    capture.cursor = size.and_then(|(w, h)| {
+        state.hid.input_control.cursor().map(|(x, y)| {
+            [
+                (x as f64 / 32767.0 * w.saturating_sub(1) as f64).round() as u32,
+                (y as f64 / 32767.0 * h.saturating_sub(1) as f64).round() as u32,
+            ]
+        })
+    });
+    if matches!(
+        name,
+        "mouse_move"
+            | "left_click"
+            | "right_click"
+            | "middle_click"
+            | "double_click"
+            | "triple_click"
+            | "left_click_drag"
+            | "left_mouse_down"
+            | "left_mouse_up"
+    ) || (name == "scroll" && args.get("coordinate").is_some())
+    {
+        capture.based_on = state.mcp.based_on(capture.screen);
+    }
     if name == "cursor_position" {
         let (x, y) = state
             .hid
@@ -454,6 +494,7 @@ async fn screenshot(
     name: &str,
     args: &Value,
     detail: &mut Option<String>,
+    capture: &mut super::CallCapture,
 ) -> Result<Value, String> {
     let long_edge = state.config.get().mcp.screenshot_long_edge;
     let target = if name == "zoom" {
@@ -502,6 +543,10 @@ async fn screenshot(
     if frame.jpeg.len() >= 1024 * 1024 {
         return Err("Screenshot exceeds the 1 MiB response limit.".into());
     }
+    capture.image = Some(frame.jpeg.clone());
+    capture.image_size = Some([frame.width, frame.height]);
+    let (w, h) = display_size(frame.source_width, frame.source_height, long_edge);
+    capture.screen = Some([w, h]);
     let text = if name == "zoom" {
         let (w, h) = display_size(frame.source_width, frame.source_height, long_edge);
         format!(
@@ -576,7 +621,7 @@ mod tests {
         // Guard the private record path against accidental log instrumentation.
         let service = include_str!("mod.rs");
         let record = service
-            .split("pub fn record(")
+            .split("fn record(")
             .nth(1)
             .unwrap()
             .split("pub async fn status")

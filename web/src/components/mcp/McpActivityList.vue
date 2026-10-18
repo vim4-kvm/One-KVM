@@ -3,7 +3,8 @@ import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { ChevronDown, ChevronUp, Trash2 } from 'lucide-vue-next'
+import { ChevronDown, ChevronUp, Trash2, Image } from 'lucide-vue-next'
+import McpActivityDetail from './McpActivityDetail.vue'
 import { formatDetail } from './formatDetail'
 import type { McpCallRecord } from '@/types/generated'
 import { clientName } from './useMcp'
@@ -12,6 +13,7 @@ const props = defineProps<{ records: McpCallRecord[]; busy?: boolean }>()
 defineEmits<{ clear: [] }>()
 const { t, te } = useI18n()
 const expanded = ref(false)
+const selected = ref<number | null>(null)
 const visible = computed(() => expanded.value ? props.records : props.records.slice(0, 10))
 function time(at: string) {
   return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })
@@ -35,9 +37,9 @@ function failure(error: string | null) {
     <CardContent class="min-w-0 space-y-2">
       <p v-if="!records.length" class="text-sm text-muted-foreground">{{ t('extensions.mcp.noActivity') }}</p>
       <ul v-else class="grid gap-x-3 gap-y-3 text-sm sm:grid-cols-[auto_auto_minmax(0,1fr)_minmax(0,8rem)_auto]">
-        <li v-for="(record, index) in visible" :key="`${record.at}-${index}`" class="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-3 gap-y-1 sm:col-span-5 sm:grid-cols-subgrid">
+        <li v-for="record in visible" :key="record.id" tabindex="0" role="button" class="grid min-w-0 cursor-pointer rounded grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-3 gap-y-1 hover:bg-muted focus-visible:outline-ring sm:col-span-5 sm:grid-cols-subgrid" @click="selected = record.id" @keydown.enter.prevent="selected = record.id" @keydown.space.prevent="selected = record.id">
           <time class="hidden tabular-nums text-xs text-muted-foreground sm:block" :datetime="record.at">{{ time(record.at) }}</time>
-          <span>{{ te(`extensions.mcp.tools.${record.tool}`) ? t(`extensions.mcp.tools.${record.tool}`) : record.tool }}</span>
+          <span>{{ te(`extensions.mcp.tools.${record.tool}`) ? t(`extensions.mcp.tools.${record.tool}`) : record.tool }} <Image v-if="record.has_image" class="inline size-3.5 text-muted-foreground" /></span>
           <span class="min-w-0 truncate" :class="['type', 'key', 'hold_key'].includes(record.tool) ? 'font-mono' : 'text-muted-foreground'" :title="content(record)">{{ content(record) }}</span>
           <span class="hidden truncate text-xs text-muted-foreground sm:block">{{ clientName(record.client, t('extensions.mcp.aiClient')) }}</span>
           <span class="hidden text-xs text-destructive sm:block" :title="record.error ?? undefined">{{ record.ok ? '' : failure(record.error) }}</span>
@@ -54,4 +56,5 @@ function failure(error: string | null) {
       </Button>
     </CardContent>
   </Card>
+  <McpActivityDetail v-model="selected" :records="records" />
 </template>

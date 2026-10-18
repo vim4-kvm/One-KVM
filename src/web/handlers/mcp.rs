@@ -20,6 +20,39 @@ pub async fn clear_activity(State(state): State<Arc<AppState>>) -> Response {
     state.mcp.clear_activity();
     no_store(state.mcp.status(&state.snapshot).await)
 }
+pub async fn activity_detail(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<u64>,
+) -> Response {
+    match state.mcp.call_detail(id) {
+        Some(detail) => no_store(detail),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            [(header::CACHE_CONTROL, "no-store")],
+        )
+            .into_response(),
+    }
+}
+pub async fn activity_image(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<u64>,
+) -> Response {
+    match state.mcp.call_image(id) {
+        Some(image) => (
+            [
+                (header::CACHE_CONTROL, "no-store"),
+                (header::CONTENT_TYPE, "image/jpeg"),
+            ],
+            image,
+        )
+            .into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            [(header::CACHE_CONTROL, "no-store")],
+        )
+            .into_response(),
+    }
+}
 pub async fn config(
     State(state): State<Arc<AppState>>,
     Json(update): Json<McpConfigUpdate>,

@@ -31,7 +31,21 @@ struct StatusMemory {
     call_id: u64,
     activity: McpActivity,
     recent: VecDeque<McpCallRecord>,
+    details: VecDeque<McpCallDetail>,
+    images: VecDeque<(u64, bytes::Bytes)>,
+    last_screenshot: Option<(u64, [u32; 2])>,
     last_input: Option<tokio::time::Instant>,
+}
+// Private call data must never be formatted into logs or activity events.
+#[derive(Default)]
+pub(crate) struct CallCapture {
+    arguments: serde_json::Value,
+    result_text: Option<String>,
+    image: Option<bytes::Bytes>,
+    image_size: Option<[u32; 2]>,
+    screen: Option<[u32; 2]>,
+    cursor: Option<[u32; 2]>,
+    based_on: Option<u64>,
 }
 pub fn now() -> String {
     time::OffsetDateTime::now_utc()
@@ -80,6 +94,9 @@ impl McpService {
                     since: now(),
                 },
                 recent: VecDeque::new(),
+                details: VecDeque::new(),
+                images: VecDeque::new(),
+                last_screenshot: None,
                 last_input: None,
             }),
         });
@@ -165,7 +182,7 @@ impl McpService {
         s.activity.detail = detail;
         s.call_id
     }
-    pub fn record(
+    pub(crate) fn record(
         &self,
         call_id: u64,
         tool: &str,
@@ -174,6 +191,7 @@ impl McpService {
         error: Option<String>,
         detail: Option<String>,
         text: Option<String>,
+        capture: CallCapture,
     ) {
         let mut s = self.status.lock();
         // An older concurrent call must not replace the latest call's summary.
@@ -184,6 +202,9 @@ impl McpService {
             s.last_input = Some(tokio::time::Instant::now());
         }
         let record = McpCallRecord {
+            id: call_id,
+            has_image: capture.image.is_some(),
+            based_on: capture.based_on,
             text,
             at: now(),
             client: s.activity.client.clone(),
@@ -193,11 +214,67 @@ impl McpService {
             duration_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32,
             detail,
         };
+        if record.ok && tool == "screenshot" {
+            s.last_screenshot = capture.screen.map(|screen| (call_id, screen));
+        }
+        if let Some(image) = capture.image {
+            s.images.push_back((call_id, image));
+        }
+        s.details.push_front(McpCallDetail {
+            record: record.clone(),
+            arguments: capture.arguments,
+            result_text: capture.result_text,
+            screen: capture.screen,
+            cursor: capture.cursor,
+            image_width: capture.image_size.map(|size| size[0]),
+            image_height: capture.image_size.map(|size| size[1]),
+        });
         s.recent.push_front(record);
         s.recent.truncate(50);
+        s.details.truncate(50);
+        let retained: Vec<_> = s.recent.iter().map(|r| r.id).collect();
+        s.images.retain(|(id, _)| retained.contains(id));
+        while s.images.len() > 20
+            || s.images.iter().map(|(_, image)| image.len()).sum::<usize>() > 8 * 1024 * 1024
+        {
+            let (id, _) = s.images.pop_front().unwrap();
+            if let Some(record) = s.recent.iter_mut().find(|r| r.id == id) {
+                record.has_image = false;
+            }
+            if let Some(detail) = s.details.iter_mut().find(|d| d.record.id == id) {
+                detail.record.has_image = false;
+            }
+        }
+    }
+    pub fn call_detail(&self, id: u64) -> Option<McpCallDetail> {
+        self.status
+            .lock()
+            .details
+            .iter()
+            .find(|d| d.record.id == id)
+            .cloned()
+    }
+    pub fn call_image(&self, id: u64) -> Option<bytes::Bytes> {
+        self.status
+            .lock()
+            .images
+            .iter()
+            .find(|(key, _)| *key == id)
+            .map(|(_, image)| image.clone())
+    }
+    fn based_on(&self, screen: Option<[u32; 2]>) -> Option<u64> {
+        self.status
+            .lock()
+            .last_screenshot
+            .filter(|(_, size)| Some(*size) == screen)
+            .map(|(id, _)| id)
     }
     pub fn clear_activity(&self) {
-        self.status.lock().recent.clear();
+        let mut s = self.status.lock();
+        s.recent.clear();
+        s.details.clear();
+        s.images.clear();
+        s.last_screenshot = None;
     }
     pub async fn status(&self, snapshot: &crate::video::snapshot::SnapshotService) -> McpStatus {
         let cfg = self.config.get();

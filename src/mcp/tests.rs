@@ -14,6 +14,131 @@ fn natural_scrolling_reverses_both_axes() {
     assert_eq!(legacy.screenshot_long_edge, 1280);
 }
 
+fn store_image(service: &McpService, tool: &str, bytes: usize, screen: [u32; 2]) -> u64 {
+    let id = service.begin(tool, None);
+    service.record(
+        id,
+        tool,
+        false,
+        tokio::time::Instant::now(),
+        None,
+        None,
+        None,
+        CallCapture {
+            image: Some(vec![0; bytes].into()),
+            image_size: Some(screen),
+            screen: Some(screen),
+            arguments: json!({}),
+            ..Default::default()
+        },
+    );
+    id
+}
+
+#[tokio::test]
+async fn private_images_obey_both_limits_and_clear_with_details() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = state(temp.path()).await;
+    let service = &state.mcp;
+    let first = store_image(service, "screenshot", 100, [1280, 720]);
+    for _ in 0..20 {
+        store_image(service, "zoom", 100, [1280, 720]);
+    }
+    assert!(service.call_image(first).is_none());
+    assert!(!service.call_detail(first).unwrap().record.has_image);
+    assert_eq!(service.status.lock().images.len(), 20);
+    service.clear_activity();
+    assert!(service.call_detail(first).is_none());
+    assert!(service.status.lock().images.is_empty());
+    assert!(service.based_on(Some([1280, 720])).is_none());
+    let first = store_image(service, "screenshot", 1024 * 1024, [1280, 720]);
+    for _ in 0..7 {
+        store_image(service, "zoom", 1024 * 1024, [1280, 720]);
+    }
+    assert!(service.call_image(first).is_some());
+    let newest = store_image(service, "zoom", 1, [1280, 720]);
+    assert!(service.call_image(first).is_none());
+    assert!(!service.call_detail(first).unwrap().record.has_image);
+    assert!(service.call_image(newest).is_some());
+    assert!(newest > first);
+    for _ in 0..50 {
+        store_image(service, "zoom", 1, [1280, 720]);
+    }
+    assert!(service.call_detail(newest).is_none());
+    assert!(service.call_image(newest).is_none());
+    assert_eq!(service.status.lock().details.len(), 50);
+}
+
+#[tokio::test]
+async fn pointer_reference_uses_last_successful_screenshot_not_zoom() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = state(temp.path()).await;
+    let service = &state.mcp;
+    let first = store_image(service, "screenshot", 1, [1280, 720]);
+    store_image(service, "zoom", 1, [640, 360]);
+    assert_eq!(service.based_on(Some([1280, 720])), Some(first));
+    assert_eq!(service.based_on(Some([640, 360])), None);
+    assert_eq!(service.based_on(None), None);
+    let failed = service.begin("screenshot", None);
+    service.record(
+        failed,
+        "screenshot",
+        false,
+        tokio::time::Instant::now(),
+        Some("No video signal.".into()),
+        None,
+        None,
+        Default::default(),
+    );
+    assert_eq!(service.based_on(Some([1280, 720])), Some(first));
+    let second = store_image(service, "screenshot", 1, [640, 360]);
+    assert_eq!(service.based_on(Some([1280, 720])), None);
+    assert_eq!(service.based_on(Some([640, 360])), Some(second));
+}
+
+#[tokio::test]
+async fn private_activity_routes_require_session_and_return_no_store_including_404() {
+    let temp = tempfile::tempdir().unwrap();
+    let state = state(temp.path()).await;
+    let id = store_image(&state.mcp, "screenshot", 16, [1280, 720]);
+    let session = state.sessions.create("test-user").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = crate::web::create_router(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = reqwest::Client::new();
+    for suffix in ["", "/image"] {
+        let url = format!("http://{address}/api/mcp/activity/{id}{suffix}");
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let response = client
+            .get(&url)
+            .bearer_auth(&session.id)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        if suffix == "/image" {
+            assert_eq!(response.headers()["content-type"], "image/jpeg");
+        }
+    }
+    state.mcp.clear_activity();
+    for suffix in ["", "/image"] {
+        let response = client
+            .get(format!("http://{address}/api/mcp/activity/{id}{suffix}"))
+            .bearer_auth(&session.id)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
+    server.abort();
+}
+
 async fn state(data: &std::path::Path) -> Arc<crate::state::AppState> {
     use crate::{
         audio::AudioController,
@@ -110,6 +235,7 @@ async fn activity_keeps_the_latest_call_summary_when_calls_finish_out_of_order()
         None,
         Some("1280x720".into()),
         None,
+        Default::default(),
     );
     assert_eq!(state.mcp.activity().detail.as_deref(), Some("1280x720"));
 
@@ -123,6 +249,7 @@ async fn activity_keeps_the_latest_call_summary_when_calls_finish_out_of_order()
         None,
         Some("(1, 2)".into()),
         None,
+        Default::default(),
     );
     assert_eq!(state.mcp.activity().detail.as_deref(), Some("(640, 360)"));
     state.mcp.record(
@@ -133,6 +260,7 @@ async fn activity_keeps_the_latest_call_summary_when_calls_finish_out_of_order()
         None,
         Some("(640, 360)".into()),
         None,
+        Default::default(),
     );
     state.mcp.begin("wait", None);
     assert_eq!(state.mcp.activity().detail, None);
@@ -519,6 +647,7 @@ async fn activity_events_exclude_text_but_private_history_keeps_fifty_and_can_cl
         None,
         Some("ctrl+s".into()),
         None,
+        Default::default(),
     );
     tokio::time::advance(Duration::from_secs(3)).await;
     assert_eq!(state.mcp.activity().state, "idle");
@@ -534,6 +663,16 @@ async fn activity_events_exclude_text_but_private_history_keeps_fifty_and_can_cl
         .unwrap()
         .contains(sensitive));
     assert_eq!(status.recent[0].detail.as_deref(), Some("19 chars"));
+    let full_text = "private line\n".repeat(60);
+    let result = tools::call(state.clone(), "type", json!({"text":full_text})).await;
+    let status = state.mcp.status(&state.snapshot).await;
+    let detail = state.mcp.call_detail(status.recent[0].id).unwrap();
+    assert_eq!(detail.arguments["text"], full_text);
+    assert_eq!(
+        detail.result_text.as_deref(),
+        result["content"][0]["text"].as_str()
+    );
+    assert_ne!(detail.record.text.as_deref(), Some(full_text.as_str()));
     state.mcp.clear_activity();
     assert!(state.mcp.status(&state.snapshot).await.recent.is_empty());
 }
