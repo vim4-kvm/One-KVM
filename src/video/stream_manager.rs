@@ -111,6 +111,88 @@ pub struct VideoStreamManager {
 }
 
 impl VideoStreamManager {
+    #[cfg(feature = "vim4")]
+    pub(crate) async fn snapshot_source_size(&self) -> Option<(u32, u32)> {
+        let (source, _) = crate::platform::vim4::signal()?;
+        let output = if *self.mode.read().await == StreamMode::WebRTC {
+            self.webrtc_streamer.vim4_output_settings().await
+        } else {
+            None
+        };
+        let output = match output {
+            Some(output) => output,
+            None => self.streamer.snapshot_output().await,
+        };
+        Some(super::snapshot::output_size(
+            (source.width, source.height),
+            output.height,
+        ))
+    }
+
+    /// A raw consumer must not subscribe to encoded output: subscribing requests an IDR.
+    #[cfg(feature = "vim4")]
+    pub(crate) async fn snapshot_lease(
+        self: &Arc<Self>,
+    ) -> std::result::Result<super::snapshot::vim4::CaptureLease, super::snapshot::SnapshotError>
+    {
+        use super::snapshot::{vim4::CaptureLease, SnapshotError};
+        if self.is_switching() {
+            return Err(SnapshotError::unavailable("video mode is changing"));
+        }
+        let mode = self.mode.read().await;
+        let (tap, mjpeg, output_height) = match *mode {
+            StreamMode::Mjpeg => {
+                let guard = crate::stream::mjpeg::ClientGuard::new(
+                    format!("snapshot-{}", uuid::Uuid::new_v4()),
+                    self.streamer.mjpeg_handler(),
+                );
+                self.streamer
+                    .start()
+                    .await
+                    .map_err(SnapshotError::unavailable)?;
+                (
+                    self.streamer.snapshot_tap.clone(),
+                    Some(guard),
+                    self.streamer.snapshot_output().await.height,
+                )
+            }
+            StreamMode::WebRTC => {
+                if self.streamer.state().await == StreamerState::Uninitialized {
+                    self.streamer
+                        .init_auto()
+                        .await
+                        .map_err(SnapshotError::unavailable)?;
+                }
+                // Only supply device discovery. update_video_config can restart an
+                // encoder, including one a viewer started concurrently with this request.
+                // VIM4 reads its actual source geometry/rate directly from HDMI.
+                if self.webrtc_streamer.get_pipeline_config().await.is_none() {
+                    let (path, _, _, _, quality) = self.streamer.current_capture_config().await;
+                    let path = path.ok_or_else(|| {
+                        SnapshotError::unavailable("no capture device configured")
+                    })?;
+                    self.webrtc_streamer
+                        .set_capture_device(path, quality, self.streamer.current_device().await)
+                        .await;
+                }
+                let pipeline = self
+                    .webrtc_streamer
+                    .ensure_video_pipeline_for_external()
+                    .await
+                    .map_err(SnapshotError::unavailable)?;
+                let height = pipeline.config().await.output.height;
+                (pipeline.snapshot_tap.clone(), None, height)
+            }
+        };
+        let lease = tap.lease();
+        Ok(CaptureLease {
+            tap,
+            output_height,
+            _tap_lease: lease,
+            _mjpeg: mjpeg,
+        })
+    }
+
     /// Create a new video stream manager with WebRtcStreamer
     pub fn with_webrtc_streamer(
         streamer: Arc<Streamer>,

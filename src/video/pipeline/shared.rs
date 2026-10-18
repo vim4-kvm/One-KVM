@@ -550,6 +550,8 @@ struct CachedH26xParameterSets {
 
 /// Universal shared video pipeline
 pub struct SharedVideoPipeline {
+    #[cfg(feature = "vim4")]
+    pub(crate) snapshot_tap: Arc<crate::video::snapshot::vim4::RawTap>,
     config: RwLock<SharedVideoPipelineConfig>,
     #[cfg(feature = "vim4")]
     vim4_applied: watch::Sender<
@@ -621,6 +623,8 @@ impl SharedVideoPipeline {
         let (h264_profile_tx, h264_profile_rx) = watch::channel(None);
 
         let pipeline = Arc::new(Self {
+            #[cfg(feature = "vim4")]
+            snapshot_tap: Arc::new(Default::default()),
             config: RwLock::new(config),
             #[cfg(feature = "vim4")]
             vim4_applied: watch::channel(None).0,

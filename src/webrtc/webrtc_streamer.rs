@@ -231,6 +231,10 @@ impl WebRtcStreamer {
         };
 
         let subscriber_count = pipeline.subscriber_count();
+        #[cfg(feature = "vim4")]
+        if pipeline.snapshot_tap.active() > 0 {
+            return;
+        }
         if Self::should_stop_pipeline(session_count, subscriber_count) {
             info!(
                 "{} stopping video pipeline (sessions={}, subscribers={})",
@@ -1376,6 +1380,11 @@ impl WebRtcStreamer {
 
 #[async_trait::async_trait]
 impl crate::video::traits::VideoOutput for WebRtcStreamer {
+    #[cfg(feature = "vim4")]
+    async fn vim4_output_settings(&self) -> Option<crate::platform::vim4::OutputSettings> {
+        Some(self.config.read().await.output)
+    }
+
     #[cfg(feature = "vim4")]
     async fn set_vim4_encoding(
         &self,

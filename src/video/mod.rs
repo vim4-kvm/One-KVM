@@ -13,6 +13,8 @@ pub mod pipeline;
 pub mod recovery;
 pub mod signal;
 #[cfg(feature = "desktop")]
+pub mod snapshot;
+#[cfg(feature = "desktop")]
 pub mod stream_manager;
 #[cfg(feature = "desktop")]
 pub mod streamer;
@@ -45,4 +47,3 @@ impl From<SignalStatus> for streamer::StreamerState {
         }
     }
 }
-pub mod snapshot;
