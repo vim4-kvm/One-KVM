@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 PACKAGE = 'vim4-onekvm'
 DOWNLOADS = Path('/var/lib/one-kvm/updates')
@@ -47,6 +48,28 @@ def validate_plan(plan):
             raise ValueError('Deploy platform dependencies before updating One-KVM')
 
 
+def install_package(package, lock_timeout=120):
+    deadline = time.monotonic() + lock_timeout
+    while True:
+        try:
+            return run('dpkg', '--force-confdef', '--force-confold', '-i', str(package))
+        except subprocess.CalledProcessError as error:
+            # Only retry dpkg's startup lock failure, never a partial installation
+            # or a failing maintainer script. LC_ALL=C makes these diagnostics stable.
+            output = error.output or ''
+            locked = error.returncode == 2 and any(output.startswith(
+                f'dpkg: error: {name} was locked by another process')
+                for name in ('dpkg frontend lock', 'dpkg database lock'))
+            if not locked:
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError(
+                    f'Package manager remained busy for {lock_timeout} seconds. '
+                    f'Try the update again after other package operations finish.\n{output.strip()}') from error
+            time.sleep(min(1, remaining))
+
+
 def install(source, checksum, version):
     if not re.fullmatch(r'[0-9a-f]{64}', checksum):
         raise ValueError('Invalid SHA256')
@@ -68,7 +91,7 @@ def install(source, checksum, version):
             current = run('dpkg-query', '-W', '-f=${Version}', PACKAGE)
             run('dpkg', '--compare-versions', version, 'gt', current)
             validate_plan(run('apt-get', '--simulate', '--no-remove', 'install', str(package)))
-            run('dpkg', '--force-confdef', '--force-confold', '-i', str(package))
+            install_package(package)
             if run('dpkg', '--verify', PACKAGE):
                 raise ValueError('Installed package verification failed')
             os.sync()
@@ -79,6 +102,9 @@ if __name__ == '__main__':
         if len(sys.argv) != 4:
             raise ValueError('usage: vim4-onekvm-update PACKAGE SHA256 VERSION')
         install(*sys.argv[1:])
+    except subprocess.CalledProcessError as error:
+        print(f'{error}\n{error.output or ""}'.strip(), file=sys.stderr)
+        sys.exit(1)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(error, file=sys.stderr)
         sys.exit(1)
