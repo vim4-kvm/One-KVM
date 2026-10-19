@@ -65,7 +65,7 @@ import type {
 import { AuthMode, EasytierConfigMode, FrpProxyType, FrpcConfigMode } from '@/types/generated'
 import { toConfigFps } from '@/lib/fps'
 import { useClipboard } from '@/composables/useClipboard'
-import { useFeatureVisibility } from '@/composables/useFeatureVisibility'
+import { computerUseEntryEnabled, useFeatureVisibility } from '@/composables/useFeatureVisibility'
 import { useTheme } from '@/composables/useTheme'
 import { useConsoleLayout, type ConsoleLayout } from '@/composables/useConsoleLayout'
 import { useVideoDeviceConfiguration } from '@/composables/useVideoDeviceConfiguration'
@@ -2941,7 +2941,7 @@ watch(isWindows, () => {
                   </Label>
                   <Switch id="feature-web-terminal" v-model="featureVisibility.webTerminal" />
                 </div>
-                <div class="flex items-center justify-between gap-4 px-3 py-3">
+                <div v-if="computerUseEntryEnabled" class="flex items-center justify-between gap-4 px-3 py-3">
                   <Label for="feature-computer-use" class="flex min-w-0 items-center gap-2 font-normal">
                     <Bot class="size-4 shrink-0 text-muted-foreground" />
                     <span class="truncate">{{ t('settings.computerUseAgent') }}</span>

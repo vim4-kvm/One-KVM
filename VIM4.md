@@ -404,7 +404,9 @@ Bearer，从桌面版或其他终端启动时读不到。键鼠工具标记为�
 被控机开启自然滚动（macOS 默认）时打开“自然滚动”，否则上下方向相反。
 
 任何手动键鼠（网页、UU、VNC、RustDesk）会取消正在执行的 MCP 操作，只释放 MCP 自己按下的键，
-停手 2 秒且全部松开后 MCP 才能继续；内置 Computer Use 与 MCP 互斥。控制台在 AI 操作时显示
+停手 2 秒且全部松开后 MCP 才能继续；内置 Computer Use 与 MCP 互斥，其控制台入口与
+“功能展示”设置项当前隐藏（后端接口保留），把 `web/src/composables/useFeatureVisibility.ts`
+的 `computerUseEntryEnabled` 改回 `true` 即恢复。控制台在 AI 操作时显示
 “<客户端> 正在操作”。最近活动在内存中保留 50 条（含输入文本、按键和最近 20 张、至多 8 MiB 的截图），
 详情可查看截图与点击位置，不写入系统日志，重启清空。
 

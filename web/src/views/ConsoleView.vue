@@ -12,7 +12,7 @@ import { useWebRTC } from '@/composables/useWebRTC'
 import { useVideoSession } from '@/composables/useVideoSession'
 import { useVideoScaling, type VideoRotation } from '@/composables/useVideoScaling'
 import { useComputerUseSocket, type ComputerUseServerMessage } from '@/composables/useComputerUseSocket'
-import { useFeatureVisibility } from '@/composables/useFeatureVisibility'
+import { computerUseEntryEnabled, useFeatureVisibility } from '@/composables/useFeatureVisibility'
 import { useTheme } from '@/composables/useTheme'
 import { useConsoleLayout } from '@/composables/useConsoleLayout'
 import { getUnifiedAudio } from '@/composables/useUnifiedAudio'
@@ -268,7 +268,7 @@ provideConsoleAppearance(consoleLayout)
 const terminalAvailable = computed(() => ttydStatus.value?.available !== false)
 const showPower = computed(() => featureVisibility.value.power)
 const showTerminal = computed(() => terminalAvailable.value && featureVisibility.value.webTerminal)
-const showComputerUse = computed(() => featureVisibility.value.computerUse)
+const showComputerUse = computed(() => computerUseEntryEnabled && featureVisibility.value.computerUse)
 const showPasteText = computed(() => featureVisibility.value.pasteText)
 
 const videoStatus = computed<ConnectionStatus>(() => {
