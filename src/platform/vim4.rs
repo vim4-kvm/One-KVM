@@ -68,6 +68,35 @@ pub fn hid_paths(hid: &crate::config::HidConfig) -> crate::otg::HidDevicePaths {
     }
 }
 
+fn validate_wave5_usb(
+    functions: &crate::config::OtgHidFunctions,
+    msd: &crate::config::MsdConfig,
+    network: &crate::config::OtgNetworkConfig,
+    uac: &crate::config::UacConfig,
+    serial: &crate::config::OtgSerialConfig,
+) -> crate::error::Result<()> {
+    if functions.consumer || msd.enabled || network.enabled || uac.enabled || serial.enabled {
+        return Err(crate::error::AppError::BadRequest(
+            "The Wave5 experiment currently supports keyboard and absolute/relative mouse only; consumer keys, virtual media, USB network, microphone and serial are not enabled".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject unvalidated experimental functions before closing active HID handles.
+pub fn validate_usb_config(config: &AppConfig) -> crate::error::Result<()> {
+    if VideoBackend::current() == VideoBackend::Wave5 {
+        let mut functions = config.hid.constrained_otg_functions();
+        if config.hid.backend != HidBackend::Otg {
+            functions = crate::config::OtgHidFunctions {
+                keyboard: false, mouse_absolute: false, mouse_relative: false, consumer: false,
+            };
+        }
+        validate_wave5_usb(&functions, &config.msd, &config.otg_network, &config.uac, &config.otg_serial)?;
+    }
+    Ok(())
+}
+
 pub async fn configure_usb(
     hid: &crate::config::HidConfig,
     msd: &crate::config::MsdConfig,
@@ -98,11 +127,13 @@ pub async fn configure_usb(
         return Err(AppError::BadRequest("VIM4 supports at most 5 USB IN endpoints; disable some HID, network, microphone, serial or virtual media functions".into()));
     }
     if VideoBackend::current() == VideoBackend::Wave5 {
-        return if endpoints == 0 {
-            Ok(())
-        } else {
-            Err(AppError::BadRequest("USB configuration is unavailable in the Wave5 video experiment".into()))
-        };
+        validate_wave5_usb(&functions, msd, network, uac, serial)?;
+        // Keep video usable if USB preparation failed and HID is disabled.
+        // Otherwise use the same restricted configfs helper as production;
+        // it preserves the board-owned HID instances when changing links.
+        if endpoints == 0 && !std::path::Path::new(GADGET).exists() {
+            return Ok(());
+        }
     }
     let profile = serde_json::json!({
         "hid": functions,
@@ -209,7 +240,7 @@ pub fn defaults(config: &mut AppConfig) {
         if VideoBackend::current() == VideoBackend::Wave5 {
             config.video.format = Some("NV12".into());
             config.audio.enabled = false;
-            config.hid.backend = HidBackend::None;
+            config.hid.otg_profile = crate::config::OtgHidProfile::FullNoConsumer;
             config.msd.enabled = false;
             config.otg_network.enabled = false;
             config.uac.enabled = false;
@@ -323,6 +354,29 @@ pub async fn configure_media_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wave5_hid_profiles_do_not_enable_unvalidated_usb_functions() {
+        use crate::config::*;
+        let functions = OtgHidFunctions::full_no_consumer();
+        let mut msd = MsdConfig { enabled: false, ..Default::default() };
+        let mut network = OtgNetworkConfig::default();
+        let mut uac = UacConfig::default();
+        let mut serial = OtgSerialConfig::default();
+        assert!(validate_wave5_usb(&functions, &msd, &network, &uac, &serial).is_ok());
+        assert!(validate_wave5_usb(&OtgHidFunctions::legacy_keyboard(), &msd, &network, &uac, &serial).is_ok());
+        assert!(validate_wave5_usb(&OtgHidFunctions::full(), &msd, &network, &uac, &serial).is_err());
+        msd.enabled = true;
+        assert!(validate_wave5_usb(&functions, &msd, &network, &uac, &serial).is_err());
+        msd.enabled = false;
+        network.enabled = true;
+        assert!(validate_wave5_usb(&functions, &msd, &network, &uac, &serial).is_err());
+        network.enabled = false;
+        uac.enabled = true;
+        assert!(validate_wave5_usb(&functions, &msd, &network, &uac, &serial).is_err());
+        uac.enabled = false;
+        serial.enabled = true;
+        assert!(validate_wave5_usb(&functions, &msd, &network, &uac, &serial).is_err());
+    }
     #[test]
     fn msd_catalog_identity_preserves_source_and_real_lun_path() {
         let make = |source: &str| CatalogEntry {

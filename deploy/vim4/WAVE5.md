@@ -31,16 +31,26 @@ with all video applications stopped to check both codecs after rebuilding the pl
 
 This stage supports fixed RGB8 1080p60/UHD60 input and H.264/H.265 WebRTC video,
 bitrate changes and keyframe requests. Scaling and MJPEG are not enabled.
-Fresh experimental data disables audio and USB functions. EDID/HDR and USB
-updates reject requests rather than invoking 5.15 board helpers. HDMI audio,
-USB integration and dynamic HDMI mode recovery require separate validation.
+Fresh experimental data enables the board-owned keyboard and absolute/relative
+mouse (`full_no_consumer`) and disables audio, media, networking, UAC and serial.
+The matched experimental USB service provisions the three HID instances before
+application startup. HID configuration uses the existing restricted configfs
+helper, preserving the device instances and numbering across reconfiguration.
+Unsupported USB functions are rejected before active HID handles are closed.
+Existing experimental databases keep their saved backend; enable `otg` with the
+`full_no_consumer` profile explicitly when migrating a video-only installation.
+Consumer keys, USB media/network/UAC/serial, HDMI audio, EDID/HDR updates and
+dynamic HDMI mode recovery require separate validation.
 
 Use the main workspace's `packaging/kernel-edge/one-kvm-edge.service` and its
 prepare/launch scripts. The unit requires both the matched kernel and the
 `vim4.one_kvm=1` boot argument. Its executable, database, registry and loopback
 port 8082 are separate from production. The default 5.15 application and its
 systemd service remain installed; returning to the default boot entry starts
-that service normally. Access the test listener through an SSH tunnel.
+that service normally. Access the test listener through an SSH tunnel or the
+separate experimental LAN login gateway on port 8080, using the existing manager
+account. The backend remains on loopback; do not expose managed authentication
+directly to the LAN.
 
 Build and test with the existing Linux ARM64 `vim4` commands in
 [VIM4.md](../../VIM4.md#构建与安装). The plane-view tests exercise allocation bounds
