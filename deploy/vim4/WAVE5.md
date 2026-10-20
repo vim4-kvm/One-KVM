@@ -15,6 +15,10 @@ plane views, without copying pixels. Parent-buffer metadata holds the capture
 pool lease until the encoder releases both views. At 1080p, allocation capacity
 must include the encoder's 1088-row alignment while UV remains after active Y.
 The kernel must support nonzero DMA plane offsets and on-demand keyframes.
+The matched experimental service also requires leased direct VDIN DMA. Capture
+buffers remain owned until AXI completion and encoder release; a failed stop
+quarantines hardware-used allocations until reboot. This removes the kernel's
+private-ring frame copy while keeping the application plane-view lease.
 The encoder's compressed output is copied into cached memory before NAL parsing;
 bytewise parsing directly on the coherent DMA mapping otherwise consumes a large
 amount of CPU. This copy covers the compressed payload only. Raw NV12 plane views
