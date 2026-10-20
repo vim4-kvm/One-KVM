@@ -42,3 +42,10 @@ Build and test with the existing Linux ARM64 `vim4` commands in
 [VIM4.md](../../VIM4.md#构建与安装). The plane-view tests exercise allocation bounds
 and buffer ownership without video hardware; successful tests do not establish
 hardware DMA import, browser decoding, recovery or performance.
+
+The main workspace's `tools/onekvm-local-bench.py` runs the ignored release
+`wave5::benchmark::local_buffer_paths` test, calling the same production helpers
+without opening video devices. It can run in the builder or as a temporary test
+executable on the board's current kernel. File-backed memory timings do not
+represent the VIM4's coherent DMA mappings; see that workspace's
+`docs/local-video-benchmark.md` for workload, comparison and hardware boundaries.

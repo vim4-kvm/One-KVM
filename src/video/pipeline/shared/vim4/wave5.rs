@@ -116,6 +116,10 @@ fn cached_bitstream(
     buffer.copy_deep()
 }
 
+#[cfg(test)]
+#[path = "wave5_bench.rs"]
+mod benchmark;
+
 pub(super) fn configure(
     pipeline: &gst::Pipeline,
     config: &SharedVideoPipelineConfig,
