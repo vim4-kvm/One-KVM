@@ -43,6 +43,11 @@ The matched experimental USB service provisions the three HID instances before
 application startup. HID configuration uses the existing restricted configfs
 helper, preserving the device instances and numbering across reconfiguration.
 Unsupported USB functions are rejected before active HID handles are closed.
+Both codecs use GOP 0 and the standard V4L2 cyclic intra refresh period of 45
+frames. At UHD, the matched Wave5 driver spreads refresh across three AVC MB
+rows or one HEVC CTU row per frame. Explicit recovery and new-viewer keyframes
+remain enabled. Startup checks that the driver exposes the required refresh
+control before starting the encoder; an older module is an error.
 Existing experimental databases keep their saved backend; enable `otg` with the
 `full_no_consumer` profile explicitly when migrating a video-only installation.
 Consumer keys, USB media/network/UAC/serial, EDID/HDR updates and
