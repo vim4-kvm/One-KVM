@@ -15,6 +15,10 @@ plane views, without copying pixels. Parent-buffer metadata holds the capture
 pool lease until the encoder releases both views. At 1080p, allocation capacity
 must include the encoder's 1088-row alignment while UV remains after active Y.
 The kernel must support nonzero DMA plane offsets and on-demand keyframes.
+The encoder's compressed output is copied into cached memory before NAL parsing;
+bytewise parsing directly on the coherent DMA mapping otherwise consumes a large
+amount of CPU. This copy covers the compressed payload only. Raw NV12 plane views
+still retain their DMA allocation without copying pixels in the application.
 GStreamer 1.24.2 also needs the V4L2 bytesused/offset, encoder pool reference and
 EOS buffer ownership patches from the main workspace's `packaging/kernel-edge`.
 Without the lifetime fixes, repeated pipelines retain encoder handles or mapped

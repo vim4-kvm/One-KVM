@@ -108,6 +108,14 @@ fn plane_view(original: &gst::Buffer, width: u32, height: u32) -> Result<gst::Bu
     Ok(view)
 }
 
+fn cached_bitstream(
+    buffer: &gst::BufferRef,
+) -> std::result::Result<gst::Buffer, gst::glib::BoolError> {
+    // Wave5 capture memory is coherent DMA memory. Bytewise NAL scanning on its
+    // uncached mapping is costly; copy only the compressed payload before parsing.
+    buffer.copy_deep()
+}
+
 pub(super) fn configure(
     pipeline: &gst::Pipeline,
     config: &SharedVideoPipelineConfig,
@@ -148,6 +156,21 @@ pub(super) fn configure(
         controls.set("hevc_level", 8i32);
     }
     encoder.set_property("extra-controls", controls);
+    encoder
+        .static_pad("src")
+        .ok_or_else(|| missing("encoder src pad"))?
+        .add_probe(gst::PadProbeType::BUFFER, |_, info| {
+            if let Some(buffer) = info.buffer_mut() {
+                match cached_bitstream(buffer) {
+                    Ok(cached) => *buffer = cached,
+                    Err(error) => {
+                        tracing::error!("Cannot cache Wave5 bitstream: {error}");
+                        return gst::PadProbeReturn::Drop;
+                    }
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
     let input = pipeline
         .by_name("encoder_source")
         .and_then(|e| e.downcast::<AppSrc>().ok())
@@ -233,5 +256,52 @@ mod tests {
         assert!(plane_view(&ordinary, 1920, 1080).is_err());
         assert!(plane_view(&short, 1919, 1080).is_err());
         assert!(plane_view(&short, 1920, 2161).is_err());
+    }
+
+    #[test]
+    fn cached_bitstream_owns_payload_and_preserves_frame_metadata() {
+        use std::os::unix::fs::FileExt;
+
+        gst::init().unwrap();
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(1024 * 1024).unwrap();
+        file.write_all_at(b"encoded-payload!", 128).unwrap();
+        let memory = unsafe { DmaBufAllocator::new().alloc_dmabuf(file, 1024 * 1024) }.unwrap();
+        let mut source = gst::Buffer::new();
+        let b = source.get_mut().unwrap();
+        b.append_memory(memory.share(128..144));
+        b.set_pts(gst::ClockTime::from_mseconds(42));
+        b.set_duration(gst::ClockTime::from_nseconds(16_666_667));
+        b.set_flags(gst::BufferFlags::DELTA_UNIT);
+        assert!(source
+            .peek_memory(0)
+            .downcast_memory_ref::<DmaBufMemory>()
+            .is_some());
+        let cached = cached_bitstream(&source).unwrap();
+        assert_eq!(cached.size(), 16);
+        assert!(cached
+            .peek_memory(0)
+            .downcast_memory_ref::<DmaBufMemory>()
+            .is_none());
+        assert_eq!(cached.pts(), source.pts());
+        assert_eq!(cached.duration(), source.duration());
+        // TAG_MEMORY describes pool memory replacement, not encoded frame type.
+        assert_eq!(
+            cached.flags(),
+            source.flags() & !gst::BufferFlags::TAG_MEMORY
+        );
+        source
+            .get_mut()
+            .unwrap()
+            .map_writable()
+            .unwrap()
+            .as_mut_slice()
+            .fill(0);
+        drop(source);
+        drop(memory);
+        assert_eq!(
+            cached.map_readable().unwrap().as_slice(),
+            b"encoded-payload!"
+        );
     }
 }
