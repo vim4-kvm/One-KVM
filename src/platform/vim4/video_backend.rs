@@ -27,9 +27,10 @@ impl VideoBackend {
     }
 
     pub fn current() -> Self {
-        // RuntimeBuilder validates this setting before opening a configuration DB.
+        // Capability reporting also runs before RuntimeBuilder. Invalid values
+        // remain inert here; startup returns a configuration error before DB access.
         Self::parse(std::env::var("VIM4_VIDEO_BACKEND").ok().as_deref())
-            .expect("VIM4 video backend was validated at startup")
+            .unwrap_or(Self::Vendor)
     }
 
     pub fn input_format(self) -> PixelFormat {
