@@ -32,14 +32,20 @@ with all video applications stopped to check both codecs after rebuilding the pl
 This stage supports fixed RGB8 1080p60/UHD60 input and H.264/H.265 WebRTC video,
 bitrate changes and keyframe requests. Scaling and MJPEG are not enabled.
 Fresh experimental data enables the board-owned keyboard and absolute/relative
-mouse (`full_no_consumer`) and disables audio, media, networking, UAC and serial.
+mouse (`full_no_consumer`) and disables media, networking, UAC and serial.
+The matched audio-test DTB and receiver's `audio_test=1` expose the independent
+`VIM4HDMIRX` ALSA capture card. When present, fresh experimental data enables
+stereo LPCM capture through `hw:VIM4HDMIRX,0` and the existing Opus pipeline.
+Existing databases need their audio device and enabled state changed explicitly.
+The audio EDID retains the fixed RGB8 UHD60 timing and advertises only stereo
+16-bit LPCM at 32/44.1/48 kHz; multichannel, compressed audio and USB UAC are separate.
 The matched experimental USB service provisions the three HID instances before
 application startup. HID configuration uses the existing restricted configfs
 helper, preserving the device instances and numbering across reconfiguration.
 Unsupported USB functions are rejected before active HID handles are closed.
 Existing experimental databases keep their saved backend; enable `otg` with the
 `full_no_consumer` profile explicitly when migrating a video-only installation.
-Consumer keys, USB media/network/UAC/serial, HDMI audio, EDID/HDR updates and
+Consumer keys, USB media/network/UAC/serial, EDID/HDR updates and
 dynamic HDMI mode recovery require separate validation.
 
 Use the main workspace's `packaging/kernel-edge/one-kvm-edge.service` and its

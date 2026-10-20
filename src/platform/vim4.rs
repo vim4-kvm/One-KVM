@@ -239,7 +239,8 @@ pub fn defaults(config: &mut AppConfig) {
         config.audio.device = "hw:AMLAUGESOUND,0".into();
         if VideoBackend::current() == VideoBackend::Wave5 {
             config.video.format = Some("NV12".into());
-            config.audio.enabled = false;
+            config.audio.device = "hw:VIM4HDMIRX,0".into();
+            config.audio.enabled = std::path::Path::new("/proc/asound/VIM4HDMIRX/id").exists();
             config.hid.otg_profile = crate::config::OtgHidProfile::FullNoConsumer;
             config.msd.enabled = false;
             config.otg_network.enabled = false;
