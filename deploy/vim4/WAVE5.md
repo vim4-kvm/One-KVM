@@ -15,7 +15,11 @@ plane views, without copying pixels. Parent-buffer metadata holds the capture
 pool lease until the encoder releases both views. At 1080p, allocation capacity
 must include the encoder's 1088-row alignment while UV remains after active Y.
 The kernel must support nonzero DMA plane offsets and on-demand keyframes.
-GStreamer 1.24.2 also needs the V4L2 bytesused/offset fix from the main workspace.
+GStreamer 1.24.2 also needs the V4L2 bytesused/offset, encoder pool reference and
+EOS buffer ownership patches from the main workspace's `packaging/kernel-edge`.
+Without the lifetime fixes, repeated pipelines retain encoder handles or mapped
+buffers and can exhaust CMA. Use `tools/wave5-lifecycle-check.py` in that workspace
+with all video applications stopped to check both codecs after rebuilding the plugin.
 
 This stage supports fixed RGB8 1080p60/UHD60 input and H.264/H.265 WebRTC video,
 bitrate changes and keyframe requests. Scaling and MJPEG are not enabled.
