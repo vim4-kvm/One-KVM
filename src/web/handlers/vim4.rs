@@ -14,6 +14,14 @@ pub struct BoardVideoStatus {
 }
 
 pub async fn status() -> Result<Json<BoardVideoStatus>> {
+    if crate::platform::vim4::VideoBackend::current() == crate::platform::vim4::VideoBackend::Wave5 {
+        return Ok(Json(BoardVideoStatus {
+            edid: "VIM4-UHD-60".into(),
+            hdr_eotf: "SDR".into(),
+            white: 203,
+            peak: 1000,
+        }));
+    }
     // The helper owns root-only EDID state; permission errors must not look like the default preset.
     let edid = run_helper("/usr/libexec/vim4-edid", &["status".into()]).await?;
     let hdr_eotf = std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/hdmi_hdr_status")
@@ -76,6 +84,9 @@ impl BoardVideoChange {
 }
 
 pub async fn update(Json(change): Json<BoardVideoChange>) -> Result<Json<BoardVideoStatus>> {
+    if crate::platform::vim4::VideoBackend::current() == crate::platform::vim4::VideoBackend::Wave5 {
+        return Err(AppError::BadRequest("EDID and HDR changes are unavailable in the fixed-mode Wave5 experiment".into()));
+    }
     let (helper, args) = change.command()?;
     let _guard = BOARD_CHANGE
         .try_lock()

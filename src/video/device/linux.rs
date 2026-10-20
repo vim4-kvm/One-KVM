@@ -29,11 +29,14 @@ fn vim4_device() -> VideoDeviceInfo {
     VideoDeviceInfo {
         path: crate::platform::vim4::VIDEO_DEVICE.into(),
         name: "VIM4 HDMI Input".into(),
-        driver: "vfm_cap".into(),
+        driver: match crate::platform::vim4::VideoBackend::current() {
+            crate::platform::vim4::VideoBackend::Vendor => "vfm_cap",
+            crate::platform::vim4::VideoBackend::Wave5 => "t7-vdin-test",
+        }.into(),
         bus_info: "platform:vdin0".into(),
         card: "VIM4 HDMI".into(),
         formats: vec![FormatInfo {
-            format: PixelFormat::Nv21,
+            format: crate::platform::vim4::VideoBackend::current().input_format(),
             resolutions: vec![
                 ResolutionInfo::new(3840, 2160, vec![60.0]),
                 ResolutionInfo::new(1920, 1080, vec![60.0]),
@@ -980,7 +983,9 @@ impl VideoDevice {
 /// Enumerate all video capture devices
 pub fn enumerate_devices() -> Result<Vec<VideoDeviceInfo>> {
     #[cfg(feature = "vim4")]
-    if Path::new(crate::platform::vim4::VIDEO_DEVICE).exists() {
+    if Path::new(crate::platform::vim4::VIDEO_DEVICE).exists()
+        || crate::platform::vim4::VideoBackend::current() == crate::platform::vim4::VideoBackend::Wave5
+    {
         return Ok(vec![vim4_device()]);
     }
     debug!("Enumerating video devices...");

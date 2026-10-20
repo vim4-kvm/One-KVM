@@ -85,6 +85,8 @@ impl RuntimeBuilder {
             data_dir,
             web_overrides,
         } = self;
+        #[cfg(feature = "vim4")]
+        crate::platform::vim4::video_backend::validate_runtime(&data_dir)?;
         let (db, config_store, mut config) = load_runtime_config(&data_dir).await?;
         prepare_web_config(&config_store, &mut config, web_overrides).await?;
 

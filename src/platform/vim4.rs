@@ -2,6 +2,9 @@
 use crate::config::{AppConfig, HidBackend, StreamMode};
 use crate::video::format::{PixelFormat, Resolution};
 
+pub mod video_backend;
+pub use video_backend::VideoBackend;
+
 pub const VIDEO_DEVICE: &str = "/dev/video_cap";
 pub const GADGET: &str = "/sys/kernel/config/usb_gadget/kvm";
 
@@ -93,6 +96,13 @@ pub async fn configure_usb(
         + u8::from(msd.enabled);
     if endpoints > 5 {
         return Err(AppError::BadRequest("VIM4 supports at most 5 USB IN endpoints; disable some HID, network, microphone, serial or virtual media functions".into()));
+    }
+    if VideoBackend::current() == VideoBackend::Wave5 {
+        return if endpoints == 0 {
+            Ok(())
+        } else {
+            Err(AppError::BadRequest("USB configuration is unavailable in the Wave5 video experiment".into()))
+        };
     }
     let profile = serde_json::json!({
         "hid": functions,
@@ -196,6 +206,15 @@ pub fn defaults(config: &mut AppConfig) {
         config.msd.enabled = true;
         config.audio.enabled = true;
         config.audio.device = "hw:AMLAUGESOUND,0".into();
+        if VideoBackend::current() == VideoBackend::Wave5 {
+            config.video.format = Some("NV12".into());
+            config.audio.enabled = false;
+            config.hid.backend = HidBackend::None;
+            config.msd.enabled = false;
+            config.otg_network.enabled = false;
+            config.uac.enabled = false;
+            config.otg_serial.enabled = false;
+        }
     }
 }
 
@@ -221,11 +240,18 @@ pub fn parse_signal(info: &str) -> Option<(Resolution, f64)> {
 }
 
 pub fn signal() -> Option<(Resolution, u32)> {
+    if VideoBackend::current() == VideoBackend::Wave5 {
+        let status = video_backend::wave5_input_status();
+        return Some((Resolution::new(status.width?, status.height?), status.fps?.round() as u32));
+    }
     parse_signal(&std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/info").ok()?)
         .map(|(size, fps)| (size, fps.round() as u32))
 }
 
 pub fn input_status() -> crate::video::device::VideoInputStatus {
+    if VideoBackend::current() == VideoBackend::Wave5 {
+        return video_backend::wave5_input_status();
+    }
     let Ok(info) = std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/info") else {
         return crate::video::device::VideoInputStatus::unavailable();
     };

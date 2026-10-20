@@ -4,6 +4,9 @@
 认证、WebRTC、音频和虚拟介质业务。公共板级服务由
 [vim4-kvm 工作区](https://github.com/vim4-kvm/vim4-kvm) 提供。
 
+7.x 的 V4L2/Wave5 视频接入为独立实验后端，安装隔离和边界见
+[Wave5 实验说明](deploy/vim4/WAVE5.md)；默认仍使用 5.15 厂商后端。
+
 ## 硬件映射
 
 | 功能 | 实现 |

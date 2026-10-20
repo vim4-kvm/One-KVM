@@ -3,6 +3,9 @@ use super::*;
 use crate::video::codec::BitratePreset;
 use gst::prelude::*;
 use gstreamer as gst;
+use crate::platform::vim4::VideoBackend;
+
+mod wave5;
 
 struct Capture(gst::Pipeline);
 impl Drop for Capture {
@@ -12,6 +15,9 @@ impl Drop for Capture {
 }
 
 fn description(config: &SharedVideoPipelineConfig, source: Resolution, fps: u32) -> Result<String> {
+    if VideoBackend::current() == VideoBackend::Wave5 {
+        return wave5::description(config, source, fps);
+    }
     let codec = match config.output_codec {
         VideoEncoderType::H264 => "h264",
         VideoEncoderType::H265 => "h265",
@@ -170,6 +176,9 @@ impl SharedVideoPipeline {
             .0
             .bus()
             .ok_or_else(|| AppError::VideoError("Missing bus".into()))?;
+        if VideoBackend::current() == VideoBackend::Wave5 {
+            wave5::configure(&capture.0, config, source.0)?;
+        }
         capture
             .0
             .set_state(gst::State::Playing)
@@ -245,7 +254,7 @@ impl SharedVideoPipeline {
                     let resolution = Resolution::new(width as u32, height as u32);
                     self.notify_state(PipelineStateNotification::streaming(
                         resolution,
-                        PixelFormat::Nv21,
+                        VideoBackend::current().input_format(),
                         fps,
                     ));
                     let mut current = self.config.blocking_write();

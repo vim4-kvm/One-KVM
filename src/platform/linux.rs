@@ -31,6 +31,13 @@ pub fn capabilities() -> PlatformCapabilities {
         capabilities.otg = FeatureCapability::available(["vim4-board-gadget"]);
         capabilities.service_installation =
             FeatureCapability::unsupported("Installed as the vim4-onekvm Ubuntu package");
+        if super::vim4::VideoBackend::current() == super::vim4::VideoBackend::Wave5 {
+            capabilities.video_capture = FeatureCapability::available(["v4l2"]);
+            capabilities.hid = FeatureCapability::available(["none"]);
+            capabilities.msd = FeatureCapability::unsupported("Not enabled in this video experiment");
+            capabilities.otg = FeatureCapability::unsupported("Not enabled in this video experiment");
+            capabilities.audio = FeatureCapability::unsupported("HDMI input audio is not yet available");
+        }
     }
     capabilities
 }
