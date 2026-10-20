@@ -10,6 +10,10 @@ mod wave5;
 struct Capture(gst::Pipeline);
 impl Drop for Capture {
     fn drop(&mut self) {
+        if VideoBackend::current() == VideoBackend::Wave5 {
+            // Release a blocked appsrc bridge even if negotiation never finished.
+            let _ = self.0.send_event(gst::event::FlushStart::new());
+        }
         let _ = self.0.set_state(gst::State::Null);
     }
 }

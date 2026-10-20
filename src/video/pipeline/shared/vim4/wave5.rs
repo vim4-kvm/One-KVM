@@ -124,12 +124,17 @@ pub(super) fn configure(
     let encoder = pipeline
         .by_name("encoder")
         .ok_or_else(|| missing("encoder"))?;
-    encoder.set_property(
-        "device",
-        wave5_device("C&M Wave5 VPU encoder")?
-            .to_string_lossy()
-            .as_ref(),
-    );
+    // Per-device V4L2 factories expose a read-only device property. Verify the
+    // selected node rather than trying to redirect the factory to another VPU.
+    let selected = std::path::PathBuf::from(encoder.property::<String>("device"));
+    let expected = wave5_device("C&M Wave5 VPU encoder")?;
+    if selected != expected {
+        return Err(AppError::VideoError(format!(
+            "V4L2 factory selected {}, expected {}",
+            selected.display(),
+            expected.display()
+        )));
+    }
     let mut controls = gst::Structure::builder("controls")
         .field(
             "video_bitrate",
