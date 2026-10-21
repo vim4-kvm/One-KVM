@@ -4,7 +4,9 @@ use crate::platform::vim4::video_backend::wave5_device;
 use gstreamer_allocators::{DmaBufAllocator, DmaBufAllocatorExtManual, DmaBufMemory};
 use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
 use std::os::fd::{AsRawFd, BorrowedFd};
-use v4l2r::bindings::{v4l2_queryctrl, V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, V4L2_CTRL_FLAG_DISABLED};
+use v4l2r::bindings::{
+    v4l2_queryctrl, V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, V4L2_CTRL_FLAG_DISABLED,
+};
 
 v4l2r::nix::ioctl_readwrite!(query_control, b'V', 36, v4l2_queryctrl);
 const INTRA_REFRESH_PERIOD: i32 = 45;
@@ -15,12 +17,17 @@ fn require_intra_refresh(device: &std::path::Path) -> Result<()> {
     let mut control: v4l2_queryctrl = unsafe { std::mem::zeroed() };
     control.id = V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD;
     unsafe { query_control(file.as_raw_fd(), &mut control) }.map_err(|error| {
-        AppError::VideoError(format!("Wave5 requires the cyclic intra refresh driver: {error}"))
+        AppError::VideoError(format!(
+            "Wave5 requires the cyclic intra refresh driver: {error}"
+        ))
     })?;
     if control.flags & V4L2_CTRL_FLAG_DISABLED != 0
-        || control.minimum > INTRA_REFRESH_PERIOD || control.maximum < INTRA_REFRESH_PERIOD
+        || control.minimum > INTRA_REFRESH_PERIOD
+        || control.maximum < INTRA_REFRESH_PERIOD
     {
-        return Err(AppError::VideoError("Wave5 cyclic refresh period is unavailable".into()));
+        return Err(AppError::VideoError(
+            "Wave5 cyclic refresh period is unavailable".into(),
+        ));
     }
     Ok(())
 }
@@ -199,6 +206,11 @@ pub(super) fn configure(
             }
             gst::PadProbeReturn::Ok
         });
+    attach_plane_bridge(pipeline, source)
+}
+
+fn attach_plane_bridge(pipeline: &gst::Pipeline, source: Resolution) -> Result<()> {
+    let missing = |name| AppError::VideoError(format!("Missing Wave5 element {name}"));
     let input = pipeline
         .by_name("encoder_source")
         .and_then(|e| e.downcast::<AppSrc>().ok())
@@ -207,6 +219,13 @@ pub(super) fn configure(
         .by_name("plane_bridge")
         .and_then(|e| e.downcast::<AppSink>().ok())
         .ok_or_else(|| missing("plane_bridge"))?;
+    // The plane view carries a capture-pool lease. Keeping a rendered sample
+    // after consumption pins that lease when input stops or changes mode.
+    bridge.set_property("enable-last-sample", false);
+    pipeline
+        .by_name("frames")
+        .ok_or_else(|| missing("frames"))?
+        .set_property("enable-last-sample", false);
     let eos_input = input.clone();
     bridge.set_callbacks(
         AppSinkCallbacks::builder()
@@ -284,6 +303,75 @@ mod tests {
         assert!(plane_view(&ordinary, 1920, 1080).is_err());
         assert!(plane_view(&short, 1919, 1080).is_err());
         assert!(plane_view(&short, 1920, 2161).is_err());
+    }
+
+    #[test]
+    fn bridge_releases_capture_after_pipeline_stops() {
+        use std::ffi::c_void;
+        use std::sync::mpsc;
+        use std::time::Duration;
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "appsrc name=source is-live=true format=time ! appsink name=plane_bridge sync=false async=false \
+             appsrc name=encoder_source is-live=true format=time ! appsink name=frames sync=false async=false",
+        ).unwrap().downcast::<gst::Pipeline>().unwrap();
+        let input = pipeline
+            .by_name("source")
+            .unwrap()
+            .downcast::<AppSrc>()
+            .unwrap();
+        let output = pipeline
+            .by_name("frames")
+            .unwrap()
+            .downcast::<AppSink>()
+            .unwrap();
+        attach_plane_bridge(&pipeline, Resolution::new(64, 32)).unwrap();
+        let (released, received) = mpsc::channel::<()>();
+        unsafe extern "C" fn finalized(data: *mut c_void, _object: *mut gst::ffi::GstMiniObject) {
+            let sender = unsafe { Box::from_raw(data.cast::<mpsc::Sender<()>>()) };
+            let _ = sender.send(());
+        }
+        let parent = buffer(64, 32, 64 * 32 * 3 / 2);
+        unsafe {
+            gst::ffi::gst_mini_object_weak_ref(
+                parent.as_ptr() as *mut gst::ffi::GstMiniObject,
+                Some(finalized),
+                Box::into_raw(Box::new(released)).cast(),
+            );
+        }
+        pipeline.set_state(gst::State::Playing).unwrap();
+        input.push_buffer(parent).unwrap();
+        let sample = output
+            .try_pull_sample(gst::ClockTime::from_seconds(2))
+            .unwrap();
+        assert!(sample
+            .buffer()
+            .unwrap()
+            .meta::<gst::ParentBufferMeta>()
+            .is_some());
+        drop(sample);
+        let bridge = pipeline.by_name("plane_bridge").unwrap();
+        let cached = bridge
+            .property::<Option<gst::Sample>>("last-sample")
+            .is_some()
+            || output
+                .property::<Option<gst::Sample>>("last-sample")
+                .is_some();
+        pipeline.send_event(gst::event::FlushStart::new());
+        pipeline.set_state(gst::State::Null).unwrap();
+        drop(bridge);
+        drop(input);
+        drop(output);
+        drop(pipeline);
+        let result = received.recv_timeout(Duration::from_secs(2));
+        assert!(
+            !cached,
+            "Consumed DMA samples must not populate last-sample caches"
+        );
+        assert!(
+            result.is_ok(),
+            "Capture lease was retained after pipeline teardown"
+        );
     }
 
     #[test]
