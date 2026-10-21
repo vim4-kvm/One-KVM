@@ -1336,6 +1336,7 @@ async function handleStreamConfigApplied(_data: any) {
   // Input discovery may arrive before mode_ready. A backend transition already
   // owns this change; restarting a connected peer here starts a second switch.
   if (!_data.transition_id && videoSession.backendSwitching.value && webrtc.isConnected.value) {
+    recoveryEventHandled = false
     return
   }
 

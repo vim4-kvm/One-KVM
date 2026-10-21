@@ -10,7 +10,7 @@ const vue = readFileSync(new URL('../src/views/ConsoleView.vue', import.meta.url
 const script = vue.slice(vue.indexOf('>') + 1, vue.indexOf('</script>'))
 const ast = ts.createSourceFile('console.ts', script, ts.ScriptTarget.Latest, true)
 const names = ['handleStreamRecovered', 'handleStreamConfigApplied',
-  'handleStreamModeSwitching', 'handleStreamModeReady']
+  'handleStreamModeSwitching', 'handleStreamModeReady', 'handleStreamConfigChanging']
 const handlers = ast.statements.filter(s => ts.isFunctionDeclaration(s) && names.includes(s.name?.text))
 assert.equal(handlers.length, names.length)
 const code = ts.transpileModule(handlers.map(s => s.getText(ast)).join('\n'), {
@@ -23,10 +23,12 @@ function fixture() {
     videoMode: { value: 'h265' }, webrtc: {
       isConnected: { value: true }, isConnecting: { value: false },
       state: { value: 'connected' }, connectStage: { value: 'connected' },
+      sessionId: { value: 'existing-peer' },
     },
     videoRestarting: { value: false }, videoLoading: { value: false },
     videoError: { value: false }, videoErrorMessage: { value: '' },
     isModeSwitching: { value: false }, consecutiveErrors: 0,
+    retryTimeoutId: null, retryCount: 0, backendFps: { value: 0 },
     gracePeriodTimeoutId: null, GRACE_PERIOD: 100,
     videoDebugLog() {}, cancelWebRTCRecovery() {}, console: { log() {} },
     window: { setTimeout() { return 1 } },
@@ -76,6 +78,17 @@ test('input discovery before backend mode_ready cannot start a second transition
   await context.handleStreamConfigApplied(input)
   assert.equal(context.videoRestarting.value, false)
   assert.equal(calls.switch, 0)
+})
+
+test('recovery during a backend transition does not suppress a later requested change', async () => {
+  const { context, calls } = fixture()
+  context.handleStreamModeSwitching({ transition_id: 'initial-1', from_mode: 'h264', to_mode: 'h265' })
+  context.handleStreamRecovered({ device: '/dev/video_cap' })
+  await context.handleStreamConfigApplied({ device: '/dev/video_cap' })
+  context.handleStreamModeReady({ transition_id: 'initial-1', mode: 'h265' })
+  context.handleStreamConfigChanging({ reason: 'user configuration' })
+  await context.handleStreamConfigApplied({ device: '/dev/video_cap' })
+  assert.equal(calls.switch, 1)
 })
 
 test('explicit configuration changes and disconnected clients still reconnect', async () => {
