@@ -1,6 +1,6 @@
 //! Wave5 imports two plane views of one capture allocation, retaining its lease.
 use super::*;
-use crate::platform::vim4::video_backend::wave5_device;
+use crate::platform::vim4::video_backend::{output_resolution, wave5_device};
 use gstreamer_allocators::{DmaBufAllocator, DmaBufAllocatorExtManual, DmaBufMemory};
 use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -37,11 +37,7 @@ pub(super) fn description(
     source: Resolution,
     fps: u32,
 ) -> Result<String> {
-    if config.output.height != 0 && config.output.height < source.height {
-        return Err(AppError::VideoError(
-            "Wave5 scaling is not yet available".into(),
-        ));
-    }
+    let output = output_resolution(config.output, source);
     let codec = match config.output_codec {
         VideoEncoderType::H264 => "h264",
         VideoEncoderType::H265 => "h265",
@@ -62,8 +58,8 @@ pub(super) fn description(
          v4l2{codec}enc name=encoder output-io-mode=dmabuf-import ! {hevc}\
          {codec}parse config-interval=-1 ! video/x-{codec},stream-format=byte-stream,alignment=au ! \
          appsink name=frames sync=false max-buffers=2",
-        source.width, source.height, crate::video::snapshot::vim4::BRANCH,
-        source.width, source.height,
+        output.width, output.height, crate::video::snapshot::vim4::BRANCH,
+        output.width, output.height,
     ))
 }
 
@@ -206,7 +202,7 @@ pub(super) fn configure(
             }
             gst::PadProbeReturn::Ok
         });
-    attach_plane_bridge(pipeline, source)
+    attach_plane_bridge(pipeline, output_resolution(config.output, source))
 }
 
 fn attach_plane_bridge(pipeline: &gst::Pipeline, source: Resolution) -> Result<()> {
@@ -266,8 +262,12 @@ mod tests {
 
     #[test]
     fn nv12_plane_views_preserve_capture_lease_and_real_uv_address() {
-        for height in [1080usize, 2160] {
-            let width = 1920usize;
+        for (width, height) in [
+            (1920usize, 1080usize),
+            (3840, 2160),
+            (1280, 720),
+            (640, 360),
+        ] {
             let luma = width * height;
             let aligned = width * ((height + 15) & !15);
             let mut parent = buffer(width, height, luma + aligned / 2);

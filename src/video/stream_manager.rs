@@ -339,12 +339,6 @@ impl VideoStreamManager {
         self: &Arc<Self>,
         new_mode: StreamMode,
     ) -> Result<ModeSwitchTransaction> {
-        #[cfg(feature = "vim4")]
-        if crate::platform::vim4::VideoBackend::current() == crate::platform::vim4::VideoBackend::Wave5
-            && new_mode != StreamMode::WebRTC
-        {
-            return Err(crate::error::AppError::BadRequest("The Wave5 experiment currently supports WebRTC video only".into()));
-        }
         let current_mode = self.mode.read().await.clone();
 
         if current_mode == new_mode {

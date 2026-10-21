@@ -51,6 +51,16 @@ pub fn validate_runtime(data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The VDIN MIF writes 16-byte strides. Never enlarge the HDMI input image.
+pub fn output_resolution(output: OutputSettings, source: Resolution) -> Resolution {
+    if output.height == 0 || output.height >= source.height {
+        return source;
+    }
+    let width =
+        (u64::from(source.width) * u64::from(output.height) / u64::from(source.height)) as u32;
+    Resolution::new((width & !15).max(320), output.height)
+}
+
 fn validate_wave5_location(release: &str, data_dir: &Path) -> Result<()> {
     if !release.starts_with("7.") {
         return Err(AppError::Config(
@@ -160,6 +170,22 @@ fn measured_input_status(timings: v4l2_dv_timings) -> Result<VideoInputStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downscaled_dma_geometry_never_upscales_or_uses_fractional_mif_strides() {
+        for source in [Resolution::new(3840, 2160), Resolution::new(1920, 1080)] {
+            assert_eq!(output_resolution(OutputSettings::default(), source), source);
+            for height in (180..=2160).step_by(2) {
+                let output = output_resolution(OutputSettings { height, fps: 0 }, source);
+                assert!(output.width <= source.width && output.height <= source.height);
+                assert_eq!(output.width % 16, 0);
+                assert_eq!(output.height % 2, 0);
+                let ideal = u64::from(source.width) * u64::from(output.height);
+                let actual = u64::from(output.width) * u64::from(source.height);
+                assert!(ideal >= actual && ideal - actual < 16 * u64::from(source.height));
+            }
+        }
+    }
 
     #[test]
     fn wave5_requires_explicit_selection_and_separate_configuration() {

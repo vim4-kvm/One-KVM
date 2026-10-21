@@ -33,26 +33,50 @@ impl Streamer {
     fn capture_vim4_mjpeg(&self, config: &StreamerConfig) -> anyhow::Result<bool> {
         gst::init()?;
         let source = crate::platform::vim4::signal().unwrap_or((config.resolution, config.fps));
-        let hardware_jpeg = gst::ElementFactory::find("vim4jpegenc").is_some();
+        let wave5 = crate::platform::vim4::VideoBackend::current()
+            == crate::platform::vim4::VideoBackend::Wave5;
+        let hardware_jpeg = gst::ElementFactory::find("vim4jpegenc").is_some()
+            && std::path::Path::new("/dev/jpegenc").exists();
+        if wave5 && !hardware_jpeg {
+            anyhow::bail!("The T7 hardware JPEG driver or vim4jpegenc plugin is unavailable");
+        }
         let fps = config
             .output
             .frame_rate(source.1, if hardware_jpeg { 60 } else { 10 });
-        let filter = config.output.filter(source.0, fps);
+        let (capture, filter) = if wave5 {
+            let output =
+                crate::platform::vim4::video_backend::output_resolution(config.output, source.0);
+            (format!("v4l2src name=source io-mode=dmabuf ! video/x-raw,format=NV12,width={},height={},framerate=60/1 ! ",
+                output.width, output.height),
+             format!("videorate drop-only=true ! video/x-raw,framerate={fps}/1 ! "))
+        } else {
+            (
+                "vfmcapsrc ! ".to_owned(),
+                config.output.filter(source.0, fps),
+            )
+        };
         let encoder = if hardware_jpeg {
             "vim4jpegenc"
         } else {
             "videoconvert ! jpegenc"
         };
         let element = gst::parse::launch(&format!(
-            "vfmcapsrc ! {}{filter}\
+            "{capture}{}{filter}\
              queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! \
-             {encoder} quality={} ! appsink name=frames sync=false max-buffers=1 drop=true",
+             {encoder} quality={} ! appsink name=frames sync=false max-buffers=1 drop=true enable-last-sample=false",
             crate::video::snapshot::vim4::BRANCH,
             config.jpeg_quality.clamp(1, 100)
         ))?;
         let pipeline = element
             .downcast::<gst::Pipeline>()
             .map_err(|_| anyhow::anyhow!("Invalid pipeline"))?;
+        if wave5 {
+            let device = crate::platform::vim4::video_backend::wave5_device("t7-vdin-test")?;
+            pipeline
+                .by_name("source")
+                .ok_or_else(|| anyhow::anyhow!("Missing capture source"))?
+                .set_property("device", device.to_string_lossy().as_ref());
+        }
         let result = (|| -> anyhow::Result<bool> {
             let sink = pipeline
                 .by_name("frames")

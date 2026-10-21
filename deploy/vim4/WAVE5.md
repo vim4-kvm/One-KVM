@@ -32,7 +32,20 @@ buffers and can exhaust CMA. Use `tools/wave5-lifecycle-check.py` in that worksp
 with all video applications stopped to check both codecs after rebuilding the plugin.
 
 This stage supports RGB8 1080p60/UHD60 input and H.264/H.265 WebRTC video,
-bitrate changes and keyframe requests. Scaling and MJPEG are not enabled.
+bitrate changes and keyframe requests. Output height selects the VDIN hardware
+scaler before DMA, preserving the full scene without a raw-frame CPU copy.
+Zero means native input size; smaller outputs preserve aspect ratio with width
+rounded down to a 16-byte stride and even height. Upscaling is not requested.
+The physical input status and HDMI EDID remain independent of output size.
+MJPEG uses the separate T7 HCODEC driver and `vim4jpegenc`, not Wave5. Missing
+hardware/codec plugins are errors on this backend. The matched DTB selects the
+P0 HCODEC clock path, and its OP-TEE integration requires the licensed video
+firmware preload to complete before application startup. Imports are released
+after every JPEG; pipeline errors close the engine before recycling input.
+Exclusive board tests measured approximately 47 fps at 4K and 60 fps at
+1080p/720p, with a 666 MHz JPEG clock. These are content/configuration-specific
+results; hardware JPEG support does not establish 4K60 JPEG throughput.
+UU Remote's existing H.264/H.265 restriction still prevents MJPEG while enabled.
 Input status requires the matching receiver's `VIDIOC_QUERY_DV_TIMINGS` support:
 it reports the measured frame rate instead of assuming exactly 60 Hz. With the
 matching receiver's `dynamic_modes=1`, detected input dimensions are independent
@@ -45,7 +58,8 @@ On-demand screenshots use the shared raw tap and standard `videoconvert` /
 `videoscale` CPU conversion, followed by JPEG compression. Fit and odd-coordinate
 region requests keep their existing geometry and deadline limits; screenshot
 conversion does not change the live DMA capture/encode pipeline. The vendor
-backend retains GE2D conversion. This does not enable scaled live video or MJPEG.
+backend retains GE2D conversion. On the experimental backend, the tap observes
+the active scaled DMA image, so screenshots follow that capture resolution.
 The authenticated `/api/snapshot` endpoint uses a fresh raw-tap frame on Wave5,
 including while WebRTC is active; it does not depend on the MJPEG frame cache.
 Fresh experimental data enables the board-owned keyboard and absolute/relative
