@@ -1,4 +1,5 @@
 use super::*;
+use crate::platform::vim4::VideoBackend;
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_video::VideoFrameExt;
 use parking_lot::Mutex;
@@ -250,6 +251,7 @@ pub(crate) fn encode(
     quality: u8,
     deadline: std::time::Instant,
     output_height: u32,
+    backend: VideoBackend,
 ) -> Result<SnapshotFrame, SnapshotError> {
     if std::time::Instant::now() >= deadline {
         return Err(SnapshotError::Timeout);
@@ -259,14 +261,19 @@ pub(crate) fn encode(
     let info = gstreamer_video::VideoInfo::from_caps(caps).map_err(SnapshotError::unavailable)?;
     let (sw, sh) = output_size((info.width(), info.height()), output_height);
     let g = geometry(target, (sw, sh))?;
-    // Fit scales in DMA memory before any CPU access. Region first converts the full
-    // source to RGB, so odd crop coordinates retain their exact pixel boundaries.
+    let scaler = match backend {
+        VideoBackend::Vendor => "amlvconv",
+        VideoBackend::Wave5 => "videoconvert ! videoscale",
+    };
+    // The vendor path scales in DMA memory. Wave5 screenshots use bounded CPU
+    // conversion; live capture/encoding retains its DMA path. Crop in RGB so odd
+    // coordinates retain their exact pixel boundaries on either backend.
     let transform = match target {
-        SnapshotTarget::Fit { .. } => format!("amlvconv ! video/x-raw,format=NV12,framerate=1/1,width={},height={} ! videoconvert ! video/x-raw,format=RGB ! videoscale ! video/x-raw,width={},height={} ! ",
+        SnapshotTarget::Fit { .. } => format!("{scaler} ! video/x-raw,format=NV12,framerate=1/1,width={},height={} ! videoconvert ! video/x-raw,format=RGB ! videoscale ! video/x-raw,width={},height={} ! ",
             (g.width + 1) & !1, (g.height + 1) & !1, g.width, g.height),
         SnapshotTarget::Region { .. } => {
             let output_scale = if (sw,sh) != (info.width(),info.height()) {
-                format!("amlvconv ! video/x-raw,format=NV12,framerate=1/1,width={sw},height={sh} ! ")
+                format!("{scaler} ! video/x-raw,format=NV12,framerate=1/1,width={sw},height={sh} ! ")
             } else { String::new() };
             format!("{output_scale}videoconvert ! video/x-raw,format=RGB ! videocrop left={} top={} right={} bottom={} ! videoscale ! video/x-raw,width={},height={} ! ",
                 g.x, g.y, sw-g.x-g.w, sh-g.y-g.h, g.width, g.height)
@@ -356,6 +363,81 @@ pub(crate) fn encode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wave5_nv12_screenshots_scale_and_preserve_odd_crop_boundaries() {
+        gst::init().unwrap();
+        let info = gstreamer_video::VideoInfo::builder(gstreamer_video::VideoFormat::Nv12, 64, 48)
+            .fps(gst::Fraction::new(60, 1))
+            .build()
+            .unwrap();
+        let mut pixels = vec![128; info.size()];
+        pixels[..info.offset()[1]].fill(16);
+        for y in 5..12 {
+            for x in 3..14 {
+                pixels[y * info.stride()[0] as usize + x] = 235;
+            }
+        }
+        let sample = gst::Sample::builder()
+            .buffer(&gst::Buffer::from_mut_slice(pixels))
+            .caps(&info.to_caps().unwrap())
+            .build();
+        let region = SnapshotTarget::Region {
+            x: 3,
+            y: 5,
+            w: 11,
+            h: 7,
+            max_long_edge: 64,
+            max_upscale: 1.0,
+        };
+        for (target, output_height, expected, source_size) in [
+            (
+                SnapshotTarget::Fit { max_long_edge: 31 },
+                0,
+                (31, 23),
+                (64, 48),
+            ),
+            (region, 0, (11, 7), (64, 48)),
+            (
+                SnapshotTarget::Fit { max_long_edge: 31 },
+                24,
+                (31, 23),
+                (32, 24),
+            ),
+            (
+                SnapshotTarget::Region {
+                    x: 0,
+                    y: 0,
+                    w: 32,
+                    h: 24,
+                    max_long_edge: 32,
+                    max_upscale: 1.0,
+                },
+                24,
+                (32, 24),
+                (32, 24),
+            ),
+        ] {
+            let frame = encode(
+                sample.clone(),
+                target,
+                95,
+                std::time::Instant::now() + Duration::from_secs(3),
+                output_height,
+                VideoBackend::Wave5,
+            )
+            .unwrap();
+            let decoded = turbojpeg::decompress(&frame.jpeg, turbojpeg::PixelFormat::RGB).unwrap();
+            assert_eq!((decoded.width, decoded.height), expected);
+            assert_eq!((frame.source_width, frame.source_height), source_size);
+            if expected == (11, 7) {
+                assert!(
+                    decoded.pixels.iter().all(|value| *value > 230),
+                    "A crop rounded to chroma boundaries includes the black border"
+                );
+            }
+        }
+    }
 
     #[test]
     fn single_frame_conversion_negotiates_a_rate_without_changing_capture_caps() {
@@ -537,6 +619,7 @@ mod tests {
             100,
             std::time::Instant::now() + Duration::from_secs(3),
             0,
+            VideoBackend::Vendor,
         )
         .unwrap();
         assert!(frame.jpeg.len() < MAX_JPEG_BYTES);
@@ -557,7 +640,14 @@ mod tests {
         };
         let sample = raw_sample(1536, 1536);
         assert!(matches!(
-            encode(sample.clone(), target, 100, std::time::Instant::now(), 0),
+            encode(
+                sample.clone(),
+                target,
+                100,
+                std::time::Instant::now(),
+                0,
+                VideoBackend::Vendor
+            ),
             Err(SnapshotError::Timeout)
         ));
         assert!(matches!(
@@ -566,7 +656,8 @@ mod tests {
                 target,
                 100,
                 std::time::Instant::now() + Duration::from_secs(3),
-                0
+                0,
+                VideoBackend::Vendor,
             ),
             Err(SnapshotError::Unavailable(_))
         ));
@@ -646,6 +737,7 @@ mod tests {
             80,
             std::time::Instant::now() + Duration::from_secs(3),
             0,
+            VideoBackend::Vendor,
         )
         .unwrap();
         let decoded = turbojpeg::decompress(&frame.jpeg, turbojpeg::PixelFormat::RGB).unwrap();

@@ -136,7 +136,14 @@ impl SnapshotService {
                 // and lease through teardown, bounding work after timeout or cancellation.
                 tokio::task::spawn_blocking(move || {
                     let (_permit, _lease) = (permit, lease);
-                    vim4::encode(sample, target, quality, deadline, output_height)
+                    vim4::encode(
+                        sample,
+                        target,
+                        quality,
+                        deadline,
+                        output_height,
+                        crate::platform::vim4::VideoBackend::current(),
+                    )
                 })
                 .await
                 .map_err(SnapshotError::unavailable)?

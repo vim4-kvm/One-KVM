@@ -31,6 +31,11 @@ with all video applications stopped to check both codecs after rebuilding the pl
 
 This stage supports fixed RGB8 1080p60/UHD60 input and H.264/H.265 WebRTC video,
 bitrate changes and keyframe requests. Scaling and MJPEG are not enabled.
+On-demand screenshots use the shared raw tap and standard `videoconvert` /
+`videoscale` CPU conversion, followed by JPEG compression. Fit and odd-coordinate
+region requests keep their existing geometry and deadline limits; screenshot
+conversion does not change the live DMA capture/encode pipeline. The vendor
+backend retains GE2D conversion. This does not enable scaled live video or MJPEG.
 Fresh experimental data enables the board-owned keyboard and absolute/relative
 mouse (`full_no_consumer`) and disables media, networking, UAC and serial.
 The matched audio-test DTB and receiver's `audio_test=1` expose the independent
