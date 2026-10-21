@@ -1334,7 +1334,14 @@ async function handleStreamConfigApplied(_data: any) {
   // A source-following recovery emits `stream.recovered` followed by the
   // actual geometry. The recovered handler already reconnected the current
   // transport; do not initiate a second mode switch for the bookkeeping event.
-  if (recoveryEventHandled) {
+  // Recovery/config discovery can report the same applied input more than once.
+  // Without a pending configuration change or transition, an existing peer is
+  // already receiving the rebuilt pipeline; do not close it for bookkeeping.
+  const inputOnlyUpdate = !_data.transition_id
+    && !videoRestarting.value
+    && !isModeSwitching.value
+    && webrtc.isConnected.value
+  if (recoveryEventHandled || inputOnlyUpdate) {
     recoveryEventHandled = false
     videoRestarting.value = false
     return

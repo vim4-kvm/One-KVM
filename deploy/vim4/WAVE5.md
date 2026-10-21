@@ -80,6 +80,12 @@ separate experimental LAN login gateway on port 8080, using the existing manager
 account. The backend remains on loopback; do not expose managed authentication
 directly to the LAN.
 
+Input-only `stream.config_applied` notifications do not renegotiate an already
+connected peer unless a configuration change or transition is pending. Duplicate
+source recovery/discovery notifications must remain harmless; explicit changes,
+disconnected clients and MJPEG retain their existing recovery paths. Run the
+production-handler event-order regression with `npm --prefix web test`.
+
 Build and test with the existing Linux ARM64 `vim4` commands in
 [VIM4.md](../../VIM4.md#构建与安装). The plane-view tests exercise allocation bounds
 and buffer ownership without video hardware; successful tests do not establish
