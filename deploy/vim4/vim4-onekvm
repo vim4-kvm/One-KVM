@@ -8,6 +8,7 @@ import sys
 import subprocess
 import time
 import uuid
+import platform
 
 sys.path.insert(0, '/usr/lib/vim4-kvm/python')
 import vim4media
@@ -18,10 +19,24 @@ UDC_ROOT = Path('/sys/class/udc')
 LUN = GADGET / 'functions/mass_storage.disk0/lun.0'
 FUNCTIONS = ('ncm.usb0', 'mass_storage.disk0', 'uac2.usb0', 'acm.usb0')
 PROFILE_DIR = Path('/run/vim4-onekvm-usb')
+EDGE = False
 HID_FUNCTIONS = {'keyboard': 'hid.keyboard', 'mouse_absolute': 'hid.mouse_abs',
                  'mouse_relative': 'hid.mouse_rel', 'consumer': 'hid.consumer'}
 DESCRIPTORS = ('idVendor', 'idProduct', 'strings/0x409/manufacturer',
                'strings/0x409/product', 'strings/0x409/serialnumber')
+
+
+def select_environment(executable):
+    """The separately installed edge helper cannot touch production media/state."""
+    global MEDIA, PROFILE_DIR, EDGE
+    if Path(executable).name != 'vim4-onekvm-edge':
+        return
+    if not platform.release().startswith('7.'):
+        raise ValueError('The edge USB helper requires the experimental 7.x kernel')
+    EDGE = True
+    MEDIA = Path('/var/lib/one-kvm-edge/msd')
+    PROFILE_DIR = Path('/run/vim4-onekvm-edge-usb')
+    vim4media.IMAGE_ROOTS = {**vim4media.IMAGE_ROOTS, 'onekvm': MEDIA}
 
 
 def profile_file(name):
@@ -30,6 +45,21 @@ def profile_file(name):
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
         raise ValueError('Invalid USB state directory')
     return PROFILE_DIR / name
+
+
+def enter_board_mount_namespace():
+    if not EDGE:
+        return
+    # systemd bind-mounts StateDirectory inside the application's PrivateTmp
+    # namespace. A backing fd opened there outlives that mount on restart, so
+    # configfs reports a truncated path and ownership checks lose the image.
+    # The board-owned LUN must retain a file from the board's mount namespace.
+    descriptor = os.open('/proc/1/ns/mnt', os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        if os.fstat(descriptor).st_ino != os.stat('/proc/self/ns/mnt').st_ino:
+            os.setns(descriptor, 0)
+    finally:
+        os.close(descriptor)
 
 
 def saved_profile():
@@ -214,6 +244,8 @@ def configure_profile(profile):
     previous = saved_profile()
     if old == target and previous == profile:
         return
+    if EDGE and (LUN / 'file').read_text().strip():
+        raise ValueError('Safely eject virtual media on the controlled computer before changing USB functions')
     if not baseline.exists():
         save_json(baseline, old)
     try:
@@ -242,12 +274,19 @@ def restore_profile():
     baseline = profile_file('baseline.json')
     if not baseline.exists():
         return
+    if EDGE and (LUN / 'file').read_text().strip():
+        # A service stop must not disconnect a writable disk still owned by
+        # the host. Keep the journal for cleanup after host SCSI eject.
+        return
     configure_network('')
     target = json.loads(baseline.read_text())
     # Media is owned by its independent API; stopping the application must
     # not discard a mounted image or re-add NCM alongside it.
     target['links'] = [name for name in target['links'] if name not in FUNCTIONS]
-    target['links'].append('mass_storage.disk0' if (LUN / 'file').read_text().strip() else 'ncm.usb0')
+    if (LUN / 'file').read_text().strip():
+        target['links'].append('mass_storage.disk0')
+    elif not EDGE:
+        target['links'].append('ncm.usb0')
     target['links'].sort()
     replace_usb(target)
     remove_unused_serial()
@@ -287,6 +326,8 @@ def _configure_media(name, cdrom, readonly, expected):
         # again under the shared media lock before touching USB or configfs.
         if old['file'] != expected or (name and old['file']):
             raise ValueError('MSD_EXTERNAL_MEDIA: Safely eject on the controlled computer, then eject in the manager')
+        if EDGE and fd is None and old['file']:
+            raise ValueError('Safely eject virtual media on the controlled computer before detaching it')
         if fd is None and not old['file']:
             return ''
         config = GADGET / 'configs/c.1'
@@ -364,6 +405,8 @@ def main(args):
 
 if __name__ == '__main__':
     try:
+        select_environment(sys.argv[0])
+        enter_board_mount_namespace()
         main(sys.argv[1:])
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(error, file=sys.stderr)

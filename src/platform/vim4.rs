@@ -8,6 +8,13 @@ pub use video_backend::VideoBackend;
 pub const VIDEO_DEVICE: &str = "/dev/video_cap";
 pub const GADGET: &str = "/sys/kernel/config/usb_gadget/kvm";
 
+fn usb_helper() -> &'static str {
+    match VideoBackend::current() {
+        VideoBackend::Wave5 => "/usr/libexec/vim4-onekvm-edge",
+        VideoBackend::Vendor => "/usr/libexec/vim4-onekvm",
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct CatalogEntry {
     id: String,
@@ -37,7 +44,7 @@ impl CatalogEntry {
 pub async fn catalog_images() -> crate::error::Result<Vec<crate::msd::ImageInfo>> {
     use crate::error::AppError;
     let output = tokio::process::Command::new("sudo")
-        .args(["-n", "/usr/libexec/vim4-onekvm", "catalog"])
+        .args(["-n", usb_helper(), "catalog"])
         .output().await.map_err(|e| AppError::Internal(e.to_string()))?;
     if !output.status.success() {
         return Err(AppError::Internal(String::from_utf8_lossy(&output.stderr).trim().into()));
@@ -68,42 +75,41 @@ pub fn hid_paths(hid: &crate::config::HidConfig) -> crate::otg::HidDevicePaths {
     }
 }
 
-fn validate_wave5_usb(
-    functions: &crate::config::OtgHidFunctions,
-    msd: &crate::config::MsdConfig,
-    network: &crate::config::OtgNetworkConfig,
-    uac: &crate::config::UacConfig,
-    serial: &crate::config::OtgSerialConfig,
-) -> crate::error::Result<()> {
-    if functions.consumer || msd.enabled || network.enabled || uac.enabled || serial.enabled {
-        return Err(crate::error::AppError::BadRequest(
-            "The Wave5 experiment currently supports keyboard and absolute/relative mouse only; consumer keys, virtual media, USB network, microphone and serial are not enabled".into(),
-        ));
-    }
-    Ok(())
-}
-
-/// Reject unvalidated experimental functions before closing active HID handles.
-pub fn validate_usb_config(config: &AppConfig) -> crate::error::Result<()> {
+/// Validate endpoint capacity before closing active HID handles.
+pub fn validate_usb_config(previous: &AppConfig, config: &AppConfig) -> crate::error::Result<()> {
+    validate_usb_profile(&config.hid, &config.msd, &config.otg_network, &config.uac,
+        &config.otg_serial, VideoBackend::current())?;
     if VideoBackend::current() == VideoBackend::Wave5 {
-        let mut functions = config.hid.constrained_otg_functions();
-        if config.hid.backend != HidBackend::Otg {
-            functions = crate::config::OtgHidFunctions {
-                keyboard: false, mouse_absolute: false, mouse_relative: false, consumer: false,
-            };
-        }
-        validate_wave5_usb(&functions, &config.msd, &config.otg_network, &config.uac, &config.otg_serial)?;
+        let path = std::path::Path::new(GADGET).join("functions/mass_storage.disk0/lun.0/file");
+        let mounted = match std::fs::read_to_string(path) {
+            Ok(value) => !value.trim().is_empty(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(crate::error::AppError::Config(format!("Cannot check USB media: {error}"))),
+        };
+        validate_mounted_usb_change(previous, config, mounted)?;
     }
     Ok(())
 }
 
-pub async fn configure_usb(
+fn validate_mounted_usb_change(previous: &AppConfig, requested: &AppConfig, mounted: bool)
+    -> crate::error::Result<()> {
+    let old = (&previous.hid, &previous.msd, &previous.otg_network, &previous.uac, &previous.otg_serial);
+    let new = (&requested.hid, &requested.msd, &requested.otg_network, &requested.uac, &requested.otg_serial);
+    if mounted && old != new {
+        return Err(crate::error::AppError::BadRequest(
+            "Safely eject virtual media on the controlled computer before changing USB functions".into()));
+    }
+    Ok(())
+}
+
+fn validate_usb_profile(
     hid: &crate::config::HidConfig,
     msd: &crate::config::MsdConfig,
     network: &crate::config::OtgNetworkConfig,
     uac: &crate::config::UacConfig,
     serial: &crate::config::OtgSerialConfig,
-) -> crate::error::Result<()> {
+    backend: VideoBackend,
+) -> crate::error::Result<(crate::config::OtgHidFunctions, u8)> {
     use crate::error::AppError;
     if !network.bridge_interface.is_empty() {
         return Err(AppError::BadRequest("VIM4 USB networking uses a dedicated shared connection; Ethernet bridging is unavailable".into()));
@@ -126,8 +132,23 @@ pub async fn configure_usb(
     if endpoints > 5 {
         return Err(AppError::BadRequest("VIM4 supports at most 5 USB IN endpoints; disable some HID, network, microphone, serial or virtual media functions".into()));
     }
+    if backend == VideoBackend::Wave5 && serial.enabled {
+        return Err(AppError::BadRequest("USB serial is unavailable in the matched 7.x kernel".into()));
+    }
+    Ok((functions, endpoints))
+}
+
+pub async fn configure_usb(
+    hid: &crate::config::HidConfig,
+    msd: &crate::config::MsdConfig,
+    network: &crate::config::OtgNetworkConfig,
+    uac: &crate::config::UacConfig,
+    serial: &crate::config::OtgSerialConfig,
+) -> crate::error::Result<()> {
+    use crate::error::AppError;
+    let (functions, endpoints) = validate_usb_profile(hid, msd, network, uac, serial,
+        VideoBackend::current())?;
     if VideoBackend::current() == VideoBackend::Wave5 {
-        validate_wave5_usb(&functions, msd, network, uac, serial)?;
         // Keep video usable if USB preparation failed and HID is disabled.
         // Otherwise use the same restricted configfs helper as production;
         // it preserves the board-owned HID instances when changing links.
@@ -152,7 +173,7 @@ pub async fn configure_usb(
     let output = tokio::process::Command::new("sudo")
         .args([
             "-n",
-            "/usr/libexec/vim4-onekvm",
+            usb_helper(),
             "usb",
             &profile.to_string(),
         ])
@@ -325,7 +346,7 @@ pub async fn configure_media_result(
         ));
     }
     let mut command = tokio::process::Command::new("sudo");
-    command.args(["-n", "/usr/libexec/vim4-onekvm", "media"]);
+    command.args(["-n", usb_helper(), "media"]);
     command
         .arg(&config.file)
         .arg(if config.cdrom { "true" } else { "false" })
@@ -356,27 +377,44 @@ pub async fn configure_media_result(
 mod tests {
     use super::*;
     #[test]
-    fn wave5_hid_profiles_do_not_enable_unvalidated_usb_functions() {
+    fn usb_profiles_reserve_media_capacity_and_reject_endpoint_overcommit() {
         use crate::config::*;
-        let functions = OtgHidFunctions::full_no_consumer();
-        let mut msd = MsdConfig { enabled: false, ..Default::default() };
-        let mut network = OtgNetworkConfig::default();
-        let mut uac = UacConfig::default();
-        let mut serial = OtgSerialConfig::default();
-        assert!(validate_wave5_usb(&functions, &msd, &network, &uac, &serial).is_ok());
-        assert!(validate_wave5_usb(&OtgHidFunctions::legacy_keyboard(), &msd, &network, &uac, &serial).is_ok());
-        assert!(validate_wave5_usb(&OtgHidFunctions::full(), &msd, &network, &uac, &serial).is_err());
-        msd.enabled = true;
-        assert!(validate_wave5_usb(&functions, &msd, &network, &uac, &serial).is_err());
-        msd.enabled = false;
-        network.enabled = true;
-        assert!(validate_wave5_usb(&functions, &msd, &network, &uac, &serial).is_err());
-        network.enabled = false;
-        uac.enabled = true;
-        assert!(validate_wave5_usb(&functions, &msd, &network, &uac, &serial).is_err());
-        uac.enabled = false;
-        serial.enabled = true;
-        assert!(validate_wave5_usb(&functions, &msd, &network, &uac, &serial).is_err());
+        for backend in [VideoBackend::Vendor, VideoBackend::Wave5] {
+            for mask in 0u16..256 {
+                let enabled = |bit: u32| mask & (1u16 << bit) != 0u16;
+                let mut config = AppConfig::default();
+                config.hid.backend = HidBackend::Otg;
+                config.hid.otg_profile = OtgHidProfile::Custom;
+                config.hid.otg_functions = OtgHidFunctions {
+                    keyboard: enabled(0), mouse_absolute: enabled(1),
+                    mouse_relative: enabled(2), consumer: enabled(3),
+                };
+                config.msd.enabled = enabled(4);
+                config.otg_network.enabled = enabled(5);
+                config.uac.enabled = enabled(6);
+                config.otg_serial.enabled = enabled(7);
+                let endpoints = (mask & 0x1fu16).count_ones() + u32::from(enabled(5)) * 2
+                    + u32::from(enabled(6)) + u32::from(enabled(7)) * 2;
+                let result = validate_usb_profile(&config.hid, &config.msd,
+                    &config.otg_network, &config.uac, &config.otg_serial, backend);
+                assert_eq!(result.is_ok(), endpoints <= 5 &&
+                    (backend == VideoBackend::Vendor || !enabled(7)), "{backend:?} {mask:#x}");
+            }
+        }
+    }
+    #[test]
+    fn mounted_media_blocks_usb_changes_but_allows_idempotent_or_video_updates() {
+        let original = AppConfig::default();
+        let mut requested = original.clone();
+        assert!(validate_mounted_usb_change(&original, &requested, true).is_ok());
+        requested.video.width = 1920;
+        assert!(validate_mounted_usb_change(&original, &requested, true).is_ok());
+        requested.hid.otg_descriptor.product = "Changed USB identity".into();
+        assert!(validate_mounted_usb_change(&original, &requested, true).is_err());
+        assert!(validate_mounted_usb_change(&original, &requested, false).is_ok());
+        requested = original.clone();
+        requested.msd.enabled = !original.msd.enabled;
+        assert!(validate_mounted_usb_change(&original, &requested, true).is_err());
     }
     #[test]
     fn msd_catalog_identity_preserves_source_and_real_lun_path() {

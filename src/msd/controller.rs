@@ -856,7 +856,16 @@ impl MsdController {
     pub async fn shutdown(&self) -> Result<()> {
         info!("Shutting down MSD controller");
 
-        if let Err(e) = self.disconnect().await {
+        #[cfg(feature = "vim4")]
+        let preserve_attached = crate::platform::vim4::VideoBackend::current()
+            == crate::platform::vim4::VideoBackend::Wave5;
+        #[cfg(not(feature = "vim4"))]
+        let preserve_attached = false;
+        // The edge gadget and its backing-file reference belong to the board,
+        // beyond this process lifetime. Re-enumerating can interrupt host writes.
+        if preserve_attached {
+            info!("Keeping board-owned USB media attached during application shutdown");
+        } else if let Err(e) = self.disconnect().await {
             warn!("Error disconnecting during shutdown: {}", e);
         }
 

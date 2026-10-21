@@ -73,7 +73,22 @@ The audio EDID prefers RGB8 UHD60, includes 1080p60, and advertises only stereo
 The matched experimental USB service provisions the three HID instances before
 application startup. HID configuration uses the existing restricted configfs
 helper, preserving the device instances and numbering across reconfiguration.
-Unsupported USB functions are rejected before active HID handles are closed.
+USB media, consumer keys, NCM/ECM/RNDIS configuration and UAC2 use the separately
+installed `/usr/libexec/vim4-onekvm-edge` helper and its dedicated sudoers rule.
+It uses `/var/lib/one-kvm-edge/msd` and `/run/vim4-onekvm-edge-usb`; production
+media and USB journals remain separate. The preparation service adds unlinked
+NCM and playback-only UAC2 instances without replacing the existing HID devices.
+The API reserves media capacity within the five-IN-endpoint budget and rejects
+USB configuration changes while a host still owns a mounted image. The helper
+checks again under the shared media locks. Service stop preserves mounted media
+and its USB profile; after host SCSI eject the baseline can be restored safely.
+The root helper joins PID 1's mount namespace before opening media; otherwise
+systemd's private StateDirectory mount can disappear while the kernel still
+owns the backing file, changing its reported path after an application restart.
+This edge helper requires the board's Python 3.12 `os.setns` support.
+USB serial remains unavailable in the matched kernel. Actual host acceptance
+and remaining audio/host-platform limits are recorded in the main workspace's
+`docs/bringup/2026-10-21-edge-usb-functions.md`.
 Both codecs use GOP 0 and the standard V4L2 cyclic intra refresh period of 45
 frames. At UHD, the matched Wave5 driver spreads refresh across three AVC MB
 rows or one HEVC CTU row per frame. Explicit recovery and new-viewer keyframes
@@ -81,8 +96,8 @@ remain enabled. Startup checks that the driver exposes the required refresh
 control before starting the encoder; an older module is an error.
 Existing experimental databases keep their saved backend; enable `otg` with the
 `full_no_consumer` profile explicitly when migrating a video-only installation.
-Consumer keys, USB media/network/UAC/serial, EDID/HDR updates and input modes
-outside RGB8 1080p60/UHD60 require separate validation.
+USB serial, EDID/HDR updates and additional input formats require separate
+validation; enabling a USB function is not proof of host data/audio acceptance.
 
 Use the main workspace's `packaging/kernel-edge/one-kvm-edge.service` and its
 prepare/launch scripts. The unit requires both the matched kernel and the

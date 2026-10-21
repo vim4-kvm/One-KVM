@@ -54,6 +54,11 @@ images 目录镜像和 Ventoy 盘也属于外部介质。外部弹出后清除�
 
 ## HID 功能配置
 
+7.x 使用独立 `vim4-onekvm-edge` 助手、媒体目录和运行时日志，默认仍只开启三种 HID；
+虚拟盘、网卡与 UAC2 可按端点预算选择。挂载介质时拒绝更改 USB 配置；停止应用保留
+主机仍在使用的介质，安全弹出后恢复基线。串口仍未启用，主机验收边界见
+[Wave5 实验说明](deploy/vim4/WAVE5.md)。
+
 设置页支持键盘、绝对/相对鼠标、多媒体键、键盘 LED 状态反馈、USB VID/PID、
 厂商/产品名/序列号、虚拟盘及磁盘名称、USB 网卡、麦克风和 USB 串口。`GET/PATCH /api/config/otg`
 包含 `hid`、`msd`、`network`、`uac`、`serial: {enabled}`；可一起提交，应用失败后回滚，避免麦克风单独保存

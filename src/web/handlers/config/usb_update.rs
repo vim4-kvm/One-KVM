@@ -49,7 +49,7 @@ where
     staged_config.enforce_invariants();
     staged_config.hid.validate_otg_functions()?;
     #[cfg(feature = "vim4")]
-    crate::platform::vim4::validate_usb_config(&staged_config)?;
+    crate::platform::vim4::validate_usb_config(&old_config, &staged_config)?;
 
     #[cfg(unix)]
     {

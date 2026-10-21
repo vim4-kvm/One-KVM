@@ -44,6 +44,33 @@ class MediaTest(unittest.TestCase):
         finally:
             os.close(fd)
 
+    def test_edge_helper_isolates_media_and_runtime_state(self):
+        with patch.object(helper, 'EDGE', False), patch.object(helper.platform, 'release', return_value='7.3-test'):
+            helper.select_environment('/usr/libexec/vim4-onekvm-edge')
+            self.assertTrue(helper.EDGE)
+            self.assertEqual(helper.MEDIA, Path('/var/lib/one-kvm-edge/msd'))
+            self.assertEqual(helper.PROFILE_DIR, Path('/run/vim4-onekvm-edge-usb'))
+            self.assertEqual(vim4media.IMAGE_ROOTS['onekvm'], helper.MEDIA)
+            with self.assertRaisesRegex(ValueError, 'catalog'):
+                helper.image_id('/var/lib/one-kvm/msd/images/production.img')
+
+    def test_edge_helper_refuses_the_production_kernel(self):
+        with patch.object(helper.platform, 'release', return_value='5.15-test'):
+            with self.assertRaisesRegex(ValueError, '7.x'):
+                helper.select_environment('/usr/libexec/vim4-onekvm-edge')
+        self.assertEqual(helper.MEDIA, self.media)
+
+    def test_edge_detach_cannot_force_disconnect_host_owned_media(self):
+        lun = self.root / 'lun'
+        lun.mkdir()
+        for key in ('file', 'cdrom', 'ro', 'inquiry_string'):
+            (lun / key).write_text(str(self.image) if key == 'file' else '0')
+        before = {path: path.read_bytes() for path in lun.iterdir()}
+        with patch.object(helper, 'EDGE', True), patch.object(helper, 'LUN', lun):
+            with self.assertRaisesRegex(ValueError, 'Safely eject'):
+                helper._configure_media('', False, True, str(self.image))
+        self.assertEqual(before, {path: path.read_bytes() for path in lun.iterdir()})
+
     def test_rejects_links_and_outside_images(self):
         with self.assertRaises(ValueError):
             helper.open_image('/etc/shadow', False)
@@ -213,6 +240,34 @@ class UsbProfileTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'endpoint limit'):
             helper.configure_profile(self.profile)
         self.assertEqual((self.gadget / 'UDC').read_text(), 'controller')
+
+    def test_edge_profile_changes_refuse_mounted_media_without_unbinding(self):
+        (self.lun / 'file').write_text('/test/active.img')
+        with patch.object(helper, 'EDGE', True):
+            with self.assertRaisesRegex(ValueError, 'Safely eject'):
+                helper.configure_profile(self.profile)
+        self.assertEqual(helper.snapshot_usb(), self.baseline)
+        self.assertEqual((self.gadget / 'UDC').read_text(), 'controller')
+
+    def test_edge_restore_preserves_hid_without_implicitly_enabling_network(self):
+        with patch.object(helper, 'EDGE', True):
+            self.profile['hid']['consumer'] = False
+            helper.configure_profile(self.profile)
+            helper.restore_profile()
+        self.assertEqual(sorted(p.name for p in self.config.iterdir()),
+                         ['hid.keyboard', 'hid.mouse_abs', 'hid.mouse_rel'])
+
+    def test_edge_service_stop_keeps_mounted_usb_configuration_and_cleanup_journal(self):
+        with patch.object(helper, 'EDGE', True):
+            helper.configure_profile(self.profile)
+            before = helper.snapshot_usb()
+            (self.lun / 'file').write_text('/host/writable.img')
+            self.network.reset_mock()
+            helper.restore_profile()
+            self.assertEqual(helper.snapshot_usb(), before)
+            self.assertEqual((self.gadget / 'UDC').read_text(), 'controller')
+            self.assertTrue((helper.PROFILE_DIR / 'baseline.json').exists())
+            self.network.assert_not_called()
 
     def test_clearing_custom_serial_restores_board_identity(self):
         self.profile['descriptor']['strings/0x409/serialnumber'] = 'custom-serial'
