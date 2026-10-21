@@ -85,6 +85,9 @@ connected peer unless a configuration change or transition is pending. Duplicate
 source recovery/discovery notifications must remain harmless; explicit changes,
 disconnected clients and MJPEG retain their existing recovery paths. Run the
 production-handler event-order regression with `npm --prefix web test`.
+Input discovery can precede a backend transition's `mode_ready`. A connected
+peer waits for that transition rather than starting another switch in response
+to the discovery event; the pending transition still finishes normally.
 
 Build and test with the existing Linux ARM64 `vim4` commands in
 [VIM4.md](../../VIM4.md#构建与安装). The plane-view tests exercise allocation bounds

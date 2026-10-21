@@ -1326,10 +1326,18 @@ async function handleStreamConfigApplied(_data: any) {
     data: _data,
     videoMode: videoMode.value,
     isModeSwitching: isModeSwitching.value,
+    backendSwitching: videoSession.backendSwitching.value,
+    videoRestarting: videoRestarting.value,
     webrtcState: webrtc.state.value,
     webrtcStage: webrtc.connectStage.value,
   })
   consecutiveErrors = 0
+
+  // Input discovery may arrive before mode_ready. A backend transition already
+  // owns this change; restarting a connected peer here starts a second switch.
+  if (!_data.transition_id && videoSession.backendSwitching.value && webrtc.isConnected.value) {
+    return
+  }
 
   // A source-following recovery emits `stream.recovered` followed by the
   // actual geometry. The recovered handler already reconnected the current
