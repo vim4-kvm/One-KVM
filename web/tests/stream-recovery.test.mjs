@@ -11,7 +11,7 @@ const script = vue.slice(vue.indexOf('>') + 1, vue.indexOf('</script>'))
 const ast = ts.createSourceFile('console.ts', script, ts.ScriptTarget.Latest, true)
 const names = ['handleStreamRecovered', 'handleStreamConfigApplied',
   'handleStreamModeSwitching', 'handleStreamModeReady', 'handleStreamConfigChanging',
-  'handleStreamStateChanged', 'loadInitialStreamState']
+  'handleStreamStateChanged', 'loadInitialStreamState', 'clearFrameOverlay']
 const handlers = ast.statements.filter(s => ts.isFunctionDeclaration(s) && names.includes(s.name?.text))
 assert.equal(handlers.length, names.length)
 const code = ts.transpileModule(handlers.map(s => s.getText(ast)).join('\n'), {
@@ -37,12 +37,13 @@ function fixture() {
     streamSignalRevision: 0, streamSignalState: { value: 'ok' },
     streamSignalReason: { value: null }, streamNextRetryMs: { value: null },
     systemStore: { setStreamOnline() {} }, webrtcVideoRef: { value: null },
-    async captureFrameOverlay() {},
+    frameOverlayUrl: { value: null },
     async rebindWebRTCVideo() { calls.rebind++ },
     async connectWebRTCSerial() { calls.connect++; return true },
     async switchToWebRTC() { calls.switch++ },
     refreshVideo() { calls.refresh++ },
   })
+  context.captureFrameOverlay = async () => { context.frameOverlayUrl.value = 'data:image/jpeg;test' }
   context.videoSession = {
     backendSwitching: { value: false }, localSwitching: context.isModeSwitching,
     onModeSwitching() { this.backendSwitching.value = true },
@@ -106,6 +107,7 @@ test('input discovery before backend mode_ready cannot start a second transition
   assert.equal(calls.switch, 0)
   context.handleStreamModeReady({ transition_id: 'initial-1', mode: 'h265' })
   assert.equal(context.videoLoading.value, false)
+  assert.equal(context.frameOverlayUrl.value, null)
   await context.handleStreamConfigApplied(input)
   assert.equal(context.videoRestarting.value, false)
   assert.equal(calls.switch, 0)

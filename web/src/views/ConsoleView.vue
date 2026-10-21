@@ -1406,6 +1406,7 @@ function handleStreamModeReady(data: { transition_id: string; mode: string }) {
   // No new connection-state event will dismiss its loading overlay.
   if (data.mode !== 'mjpeg' && data.mode === videoMode.value && webrtc.isConnected.value) {
     videoLoading.value = false
+    clearFrameOverlay()
   }
 }
 
