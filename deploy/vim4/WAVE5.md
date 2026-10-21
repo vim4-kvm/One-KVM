@@ -31,6 +31,11 @@ with all video applications stopped to check both codecs after rebuilding the pl
 
 This stage supports fixed RGB8 1080p60/UHD60 input and H.264/H.265 WebRTC video,
 bitrate changes and keyframe requests. Scaling and MJPEG are not enabled.
+Input status requires the matching receiver's `VIDIOC_QUERY_DV_TIMINGS` support:
+it reports the measured frame rate instead of assuming exactly 60 Hz, and checks
+that the input dimensions match the capture allocation. Unsupported or changing
+timings are not reported as locked. This does not enable automatic mode changes;
+the receiver profile and capture geometry remain fixed for this stage.
 On-demand screenshots use the shared raw tap and standard `videoconvert` /
 `videoscale` CPU conversion, followed by JPEG compression. Fit and odd-coordinate
 region requests keep their existing geometry and deadline limits; screenshot
