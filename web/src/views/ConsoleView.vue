@@ -1401,6 +1401,11 @@ function handleStreamModeReady(data: { transition_id: string; mode: string }) {
     pendingWebRTCReadyGate = false
   }
   videoRestarting.value = false
+  // Source discovery can keep the peer connected through the transition.
+  // No new connection-state event will dismiss its loading overlay.
+  if (data.mode !== 'mjpeg' && data.mode === videoMode.value && webrtc.isConnected.value) {
+    videoLoading.value = false
+  }
 }
 
 function handleStreamModeSwitching(data: { transition_id: string; to_mode: string; from_mode: string }) {

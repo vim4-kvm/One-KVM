@@ -75,6 +75,7 @@ test('input discovery before backend mode_ready cannot start a second transition
   assert.equal(context.videoSession.backendSwitching.value, true)
   assert.equal(calls.switch, 0)
   context.handleStreamModeReady({ transition_id: 'initial-1', mode: 'h265' })
+  assert.equal(context.videoLoading.value, false)
   await context.handleStreamConfigApplied(input)
   assert.equal(context.videoRestarting.value, false)
   assert.equal(calls.switch, 0)
@@ -89,6 +90,16 @@ test('recovery during a backend transition does not suppress a later requested c
   context.handleStreamConfigChanging({ reason: 'user configuration' })
   await context.handleStreamConfigApplied({ device: '/dev/video_cap' })
   assert.equal(calls.switch, 1)
+})
+
+test('mode_ready keeps loading while a peer or a different codec is still pending', () => {
+  for (const mode of ['h264', 'h265', 'mjpeg']) {
+    const { context } = fixture()
+    context.videoLoading.value = true
+    if (mode === 'h265') context.webrtc.isConnected.value = false
+    context.handleStreamModeReady({ transition_id: 'pending-1', mode })
+    assert.equal(context.videoLoading.value, true)
+  }
 })
 
 test('explicit configuration changes and disconnected clients still reconnect', async () => {
