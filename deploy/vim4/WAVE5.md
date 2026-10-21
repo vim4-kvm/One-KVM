@@ -36,6 +36,8 @@ On-demand screenshots use the shared raw tap and standard `videoconvert` /
 region requests keep their existing geometry and deadline limits; screenshot
 conversion does not change the live DMA capture/encode pipeline. The vendor
 backend retains GE2D conversion. This does not enable scaled live video or MJPEG.
+The authenticated `/snapshot` endpoint uses a fresh raw-tap frame on Wave5,
+including while WebRTC is active; it does not depend on the MJPEG frame cache.
 Fresh experimental data enables the board-owned keyboard and absolute/relative
 mouse (`full_no_consumer`) and disables media, networking, UAC and serial.
 The matched audio-test DTB and receiver's `audio_test=1` expose the independent

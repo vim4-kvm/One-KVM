@@ -605,6 +605,34 @@ pub async fn mjpeg_stream(
 
 /// Single JPEG snapshot
 pub async fn snapshot(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    #[cfg(feature = "vim4")]
+    if crate::platform::vim4::VideoBackend::current() == crate::platform::vim4::VideoBackend::Wave5
+    {
+        // Wave5 WebRTC does not populate the MJPEG cache. Capture a fresh frame
+        // through the shared tap so screenshots also work without an MJPEG stream.
+        return match state
+            .snapshot
+            .capture(
+                crate::video::snapshot::SnapshotTarget::Fit {
+                    max_long_edge: 4096,
+                },
+                80,
+                crate::video::snapshot::DEFAULT_TIMEOUT,
+            )
+            .await
+        {
+            Ok(frame) => Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "image/jpeg")
+                .header(header::CACHE_CONTROL, "no-cache")
+                .body(Body::from(frame.jpeg))
+                .unwrap(),
+            Err(error) => Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from(error.to_string()))
+                .unwrap(),
+        };
+    }
     let handler = state.stream_manager.mjpeg_handler();
 
     match handler.current_frame() {
