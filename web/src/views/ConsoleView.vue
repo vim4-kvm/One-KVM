@@ -145,6 +145,7 @@ let recoveryEventHandled = false
 /** From `stream.state_changed`: ok | no_signal | device_lost | device_busy */
 type StreamSignalState = 'ok' | 'no_signal' | 'device_lost' | 'device_busy'
 const streamSignalState = ref<StreamSignalState>('ok')
+let streamSignalRevision = 0
 const streamSignalReason = ref<string | null>(null)
 const streamNextRetryMs = ref<number | null>(null)
 
@@ -1425,6 +1426,7 @@ function handleStreamModeSwitching(data: { transition_id: string; to_mode: strin
 }
 
 function handleStreamStateChanged(data: StreamStateChangedEventData) {
+  streamSignalRevision++
   videoDebugLog('Stream state changed event', {
     data,
     videoMode: videoMode.value,
@@ -3178,6 +3180,16 @@ watch(microphoneTransferEnabled, enabled => {
   if (!enabled) void microphone.stop()
 })
 
+async function loadInitialStreamState() {
+  const revision = streamSignalRevision
+  const status = await streamApi.status().catch(() => null)
+  // A live event received while the HTTP snapshot was in flight is newer.
+  // Reapplying an old busy/lost snapshot can hide an already recovered stream.
+  if (status && revision === streamSignalRevision) {
+    handleStreamStateChanged(status)
+  }
+}
+
 onMounted(async () => {
   await refreshUacAvailability()
 
@@ -3196,10 +3208,7 @@ onMounted(async () => {
   }, { immediate: true })
 
   await systemStore.startStream().catch(() => {})
-  const initialStreamStatus = await streamApi.status().catch(() => null)
-  if (initialStreamStatus) {
-    handleStreamStateChanged(initialStreamStatus)
-  }
+  await loadInitialStreamState()
   await systemStore.fetchSystemInfo().catch(() => {})
   await systemStore.fetchAllStates()
   await configStore.refreshHid().then(() => {

@@ -10,7 +10,8 @@ const vue = readFileSync(new URL('../src/views/ConsoleView.vue', import.meta.url
 const script = vue.slice(vue.indexOf('>') + 1, vue.indexOf('</script>'))
 const ast = ts.createSourceFile('console.ts', script, ts.ScriptTarget.Latest, true)
 const names = ['handleStreamRecovered', 'handleStreamConfigApplied',
-  'handleStreamModeSwitching', 'handleStreamModeReady', 'handleStreamConfigChanging']
+  'handleStreamModeSwitching', 'handleStreamModeReady', 'handleStreamConfigChanging',
+  'handleStreamStateChanged', 'loadInitialStreamState']
 const handlers = ast.statements.filter(s => ts.isFunctionDeclaration(s) && names.includes(s.name?.text))
 assert.equal(handlers.length, names.length)
 const code = ts.transpileModule(handlers.map(s => s.getText(ast)).join('\n'), {
@@ -33,6 +34,9 @@ function fixture() {
     videoDebugLog() {}, cancelWebRTCRecovery() {}, console: { log() {} },
     window: { setTimeout() { return 1 } },
     pendingWebRTCReadyGate: false,
+    streamSignalRevision: 0, streamSignalState: { value: 'ok' },
+    streamSignalReason: { value: null }, streamNextRetryMs: { value: null },
+    systemStore: { setStreamOnline() {} }, webrtcVideoRef: { value: null },
     async captureFrameOverlay() {},
     async rebindWebRTCVideo() { calls.rebind++ },
     async connectWebRTCSerial() { calls.connect++; return true },
@@ -63,6 +67,32 @@ test('input discovery without a requested change does not renegotiate a healthy 
   const { context, calls } = fixture()
   await context.handleStreamConfigApplied({ device: '/dev/video_cap' })
   assert.equal(calls.switch, 0)
+})
+
+test('a delayed initial snapshot cannot overwrite a newer live signal event', async () => {
+  for (const state of ['streaming', 'no_signal']) {
+    const { context, calls } = fixture()
+    let resolveSnapshot
+    context.streamApi = { status: () => new Promise(resolve => { resolveSnapshot = resolve }) }
+    const loading = context.loadInitialStreamState()
+    context.handleStreamStateChanged({ kind: 'video', state })
+    resolveSnapshot({ state: 'device_busy' })
+    await loading
+    assert.equal(context.streamSignalState.value, state === 'streaming' ? 'ok' : 'no_signal')
+    assert.equal(context.videoRestarting.value, false)
+    if (state === 'streaming') {
+      await context.handleStreamConfigApplied({ device: '/dev/video_cap' })
+      assert.equal(calls.switch, 0)
+    }
+  }
+})
+
+test('the initial snapshot still supplies state when no live event supersedes it', async () => {
+  const { context } = fixture()
+  context.streamApi = { async status() { return { state: 'device_busy' } } }
+  await context.loadInitialStreamState()
+  assert.equal(context.streamSignalState.value, 'device_busy')
+  assert.equal(context.videoRestarting.value, true)
 })
 
 test('input discovery before backend mode_ready cannot start a second transition', async () => {
