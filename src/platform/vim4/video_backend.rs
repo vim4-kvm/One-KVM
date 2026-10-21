@@ -111,7 +111,10 @@ pub fn wave5_input_status() -> VideoInputStatus {
         }
         let timings: v4l2_dv_timings = v4l2r::ioctl::query_dv_timings(&file)
             .map_err(|e| AppError::VideoError(e.to_string()))?;
-        measured_input_status(timings, format.width, format.height)
+        // G_FMT describes the old buffer layout until the pipeline releases its
+        // buffers and applies S_FMT. Report the detected input independently so
+        // the existing source monitor can initiate that rebuild.
+        measured_input_status(timings)
     }
     probe().unwrap_or_else(|error| {
         tracing::debug!("Wave5 input status unavailable: {error}");
@@ -119,12 +122,8 @@ pub fn wave5_input_status() -> VideoInputStatus {
     })
 }
 
-fn measured_input_status(
-    timings: v4l2_dv_timings,
-    capture_width: u32,
-    capture_height: u32,
-) -> Result<VideoInputStatus> {
-    let invalid = || AppError::VideoError("HDMI timings do not match the capture layout".into());
+fn measured_input_status(timings: v4l2_dv_timings) -> Result<VideoInputStatus> {
+    let invalid = || AppError::VideoError("Unsupported HDMI input timings".into());
     if timings.type_ != V4L2_DV_BT_656_1120 {
         return Err(invalid());
     }
@@ -134,8 +133,7 @@ fn measured_input_status(
         || bt.width == 0
         || bt.height == 0
         || bt.pixelclock == 0
-        || bt.width != capture_width
-        || bt.height != capture_height
+        || !matches!((bt.width, bt.height), (1920, 1080) | (3840, 2160))
     {
         return Err(invalid());
     }
@@ -175,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn wave5_reports_measured_fractional_rate_and_rejects_stale_layout() {
+    fn wave5_reports_detected_modes_and_measured_fractional_rate() {
         // These are actual wire totals, independent of the output encoder rate.
         let mut mode: v4l2_dv_timings = unsafe { std::mem::zeroed() };
         mode.type_ = V4L2_DV_BT_656_1120;
@@ -190,20 +188,33 @@ mod tests {
         bt.vbackporch = 72;
         bt.pixelclock = 593_406_593;
         mode.__bindgen_anon_1.bt = bt;
-        let measured = measured_input_status(mode, 3840, 2160).unwrap();
+        let measured = measured_input_status(mode).unwrap();
         assert!((measured.fps.unwrap() - 60_000.0 / 1001.0).abs() < 0.0001);
-        assert!(measured_input_status(mode, 1920, 1080).is_err());
+        let mut fhd = bt;
+        fhd.width = 1920;
+        fhd.height = 1080;
+        fhd.hfrontporch = 88;
+        fhd.hsync = 44;
+        fhd.hbackporch = 148;
+        fhd.vfrontporch = 4;
+        fhd.vsync = 5;
+        fhd.vbackporch = 36;
+        fhd.pixelclock = 148_500_000;
+        mode.__bindgen_anon_1.bt = fhd;
+        let changed = measured_input_status(mode).unwrap();
+        assert_eq!((changed.width, changed.height), (Some(1920), Some(1080)));
+        assert!((changed.fps.unwrap() - 60.0).abs() < 0.0001);
         bt.pixelclock = 297_000_000;
         mode.__bindgen_anon_1.bt = bt;
-        assert!(measured_input_status(mode, 3840, 2160).is_err());
+        assert!(measured_input_status(mode).is_err());
         bt.pixelclock = 0;
         mode.__bindgen_anon_1.bt = bt;
-        assert!(measured_input_status(mode, 3840, 2160).is_err());
+        assert!(measured_input_status(mode).is_err());
         bt.pixelclock = 594_000_000;
         bt.interlaced = 1;
         mode.__bindgen_anon_1.bt = bt;
-        assert!(measured_input_status(mode, 3840, 2160).is_err());
+        assert!(measured_input_status(mode).is_err());
         mode.type_ = u32::MAX;
-        assert!(measured_input_status(mode, 3840, 2160).is_err());
+        assert!(measured_input_status(mode).is_err());
     }
 }

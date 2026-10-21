@@ -29,13 +29,16 @@ Without the lifetime fixes, repeated pipelines retain encoder handles or mapped
 buffers and can exhaust CMA. Use `tools/wave5-lifecycle-check.py` in that workspace
 with all video applications stopped to check both codecs after rebuilding the plugin.
 
-This stage supports fixed RGB8 1080p60/UHD60 input and H.264/H.265 WebRTC video,
+This stage supports RGB8 1080p60/UHD60 input and H.264/H.265 WebRTC video,
 bitrate changes and keyframe requests. Scaling and MJPEG are not enabled.
 Input status requires the matching receiver's `VIDIOC_QUERY_DV_TIMINGS` support:
-it reports the measured frame rate instead of assuming exactly 60 Hz, and checks
-that the input dimensions match the capture allocation. Unsupported or changing
-timings are not reported as locked. This does not enable automatic mode changes;
-the receiver profile and capture geometry remain fixed for this stage.
+it reports the measured frame rate instead of assuming exactly 60 Hz. With the
+matching receiver's `dynamic_modes=1`, detected input dimensions are independent
+of the old capture allocation. The existing source monitor rebuilds capture and
+encoding while retaining subscribers; the driver applies the new S_FMT only
+after old buffers are released, then validates geometry again before DMA starts.
+The default driver configuration remains fixed unless that parameter is enabled.
+Unsupported timings are not reported as locked; other input modes remain separate.
 On-demand screenshots use the shared raw tap and standard `videoconvert` /
 `videoscale` CPU conversion, followed by JPEG compression. Fit and odd-coordinate
 region requests keep their existing geometry and deadline limits; screenshot
