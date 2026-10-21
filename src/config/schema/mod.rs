@@ -120,6 +120,11 @@ impl RecordingConfig {
 
 impl AppConfig {
     pub fn enforce_invariants(&mut self) {
+        #[cfg(feature = "vim4")]
+        crate::platform::vim4::resolve_hardware_config(
+            self,
+            crate::platform::vim4::VideoBackend::current(),
+        );
         if self.hid.backend != HidBackend::Otg {
             self.msd.enabled = false;
             self.otg_network.enabled = false;

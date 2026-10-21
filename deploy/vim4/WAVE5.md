@@ -1,9 +1,19 @@
 # Experimental 7.x video backend
 
 The normal `vim4` build keeps the vendor backend by default. Set
-`VIM4_VIDEO_BACKEND=wave5` only for the separately installed 7.x experiment.
-Startup rejects other kernels and the production `/var/lib/one-kvm` data tree
-before opening its database. Unrecognized backend names are errors.
+`VIM4_VIDEO_BACKEND=wave5` for the matched 7.x runtime. By default, startup rejects
+other kernels and the production `/var/lib/one-kvm` data tree before opening its
+database. Unrecognized backend names are errors.
+
+The common board launcher explicitly sets `VIM4_SHARED_DATA=1` for the integrated
+runtime. This permits exactly `/var/lib/one-kvm`, not arbitrary children, and uses
+the normal `one-kvm.service`, port 8081 and `/usr/libexec/vim4-onekvm` USB helper.
+The helper applies mainline mount-namespace and mounted-media guards on 7.x while
+retaining the production media directory and journal. Board-owned HDMI audio names
+and NV12/NV21 are resolved in memory; the saved configuration keeps vendor-compatible
+names so the same application version can use it after a kernel switch. User-selected
+USB audio, accounts, images and other settings are preserved. The independent edge
+service keeps its existing isolated data, helper and port 8082.
 
 Wave5 uses standard V4L2 capture and encoding. Nodes are resolved by their sysfs
 names (`t7-vdin-test` and `C&M Wave5 VPU encoder`), never by assumed video numbers.
@@ -31,7 +41,8 @@ Without the lifetime fixes, repeated pipelines retain encoder handles or mapped
 buffers and can exhaust CMA. Use `tools/wave5-lifecycle-check.py` in that workspace
 with all video applications stopped to check both codecs after rebuilding the plugin.
 
-This stage supports RGB8 1080p60/UHD60 input and H.264/H.265 WebRTC video,
+The matched runtime supports RGB8 and limited BT.709 YUV4448 1080p60/UHD60 input,
+plus the qualified UHD60 YUV42010 HDR10/SDR path, and H.264/H.265 WebRTC video,
 bitrate changes and keyframe requests. Output height selects the VDIN hardware
 scaler before DMA, preserving the full scene without a raw-frame CPU copy.
 Zero means native input size; smaller outputs preserve aspect ratio with width
@@ -67,7 +78,8 @@ mouse (`full_no_consumer`) and disables media, networking, UAC and serial.
 The matched audio-test DTB and receiver's `audio_test=1` expose the independent
 `VIM4HDMIRX` ALSA capture card. When present, fresh experimental data enables
 stereo LPCM capture through `hw:VIM4HDMIRX,0` and the existing Opus pipeline.
-Existing databases need their audio device and enabled state changed explicitly.
+Existing databases retain their enabled state; known board HDMI aliases resolve
+to the current kernel's card without changing user-selected USB audio devices.
 The audio EDID prefers RGB8 UHD60, includes 1080p60, and advertises only stereo
 16-bit LPCM at 32/44.1/48 kHz; multichannel, compressed audio and USB UAC are separate.
 The matched experimental USB service provisions the three HID instances before
@@ -96,8 +108,10 @@ remain enabled. Startup checks that the driver exposes the required refresh
 control before starting the encoder; an older module is an error.
 Existing experimental databases keep their saved backend; enable `otg` with the
 `full_no_consumer` profile explicitly when migrating a video-only installation.
-USB serial, EDID/HDR updates and additional input formats require separate
-validation; enabling a USB function is not proof of host data/audio acceptance.
+USB serial remains unavailable in the matched 7.x kernel. Runtime EDID uses the
+receiver's guarded V4L2 interface; the shared HDR curve uses the native driver
+attribute. Other input formats still require qualification. Enabling a USB
+function is not proof of host data/audio acceptance.
 
 Use the main workspace's `packaging/kernel-edge/one-kvm-edge.service` and its
 prepare/launch scripts. The unit requires both the matched kernel and the

@@ -27,15 +27,18 @@ DESCRIPTORS = ('idVendor', 'idProduct', 'strings/0x409/manufacturer',
 
 
 def select_environment(executable):
-    """The separately installed edge helper cannot touch production media/state."""
+    """Use mainline USB guards; only the edge filename isolates media/state."""
     global MEDIA, PROFILE_DIR, EDGE
-    if Path(executable).name != 'vim4-onekvm-edge':
+    name = Path(executable).name
+    mainline_production = name == 'vim4-onekvm' and platform.release().startswith('7.')
+    if name != 'vim4-onekvm-edge' and not mainline_production:
         return
     if not platform.release().startswith('7.'):
         raise ValueError('The edge USB helper requires the experimental 7.x kernel')
     EDGE = True
-    MEDIA = Path('/var/lib/one-kvm-edge/msd')
-    PROFILE_DIR = Path('/run/vim4-onekvm-edge-usb')
+    if name == 'vim4-onekvm-edge':
+        MEDIA = Path('/var/lib/one-kvm-edge/msd')
+        PROFILE_DIR = Path('/run/vim4-onekvm-edge-usb')
     vim4media.IMAGE_ROOTS = {**vim4media.IMAGE_ROOTS, 'onekvm': MEDIA}
 
 

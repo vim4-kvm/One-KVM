@@ -46,7 +46,7 @@ pub fn validate_runtime(data_dir: &Path) -> Result<()> {
     let backend = VideoBackend::parse(std::env::var("VIM4_VIDEO_BACKEND").ok().as_deref())?;
     if backend == VideoBackend::Wave5 {
         let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")?;
-        validate_wave5_location(&release, data_dir)?;
+        validate_wave5_location(&release, data_dir, shared_data())?;
     }
     Ok(())
 }
@@ -61,7 +61,11 @@ pub fn output_resolution(output: OutputSettings, source: Resolution) -> Resoluti
     Resolution::new((width & !15).max(320), output.height)
 }
 
-fn validate_wave5_location(release: &str, data_dir: &Path) -> Result<()> {
+pub fn shared_data() -> bool {
+    std::env::var("VIM4_SHARED_DATA").as_deref() == Ok("1")
+}
+
+fn validate_wave5_location(release: &str, data_dir: &Path, shared: bool) -> Result<()> {
     if !release.starts_with("7.") {
         return Err(AppError::Config(
             "Wave5 requires the experimental 7.x kernel".into(),
@@ -70,7 +74,10 @@ fn validate_wave5_location(release: &str, data_dir: &Path) -> Result<()> {
     let resolved = data_dir
         .canonicalize()
         .unwrap_or_else(|_| data_dir.to_path_buf());
-    if !resolved.is_absolute() || resolved.starts_with("/var/lib/one-kvm") {
+    let production = Path::new("/var/lib/one-kvm");
+    if !resolved.is_absolute()
+        || (resolved.starts_with(production) && !(shared && resolved == production))
+    {
         return Err(AppError::Config(
             "Wave5 requires a separate absolute data directory".into(),
         ));
@@ -191,11 +198,25 @@ mod tests {
     fn wave5_requires_explicit_selection_and_separate_configuration() {
         assert_eq!(VideoBackend::parse(None).unwrap(), VideoBackend::Vendor);
         assert!(VideoBackend::parse(Some("auto")).is_err());
-        assert!(validate_wave5_location("5.15.137-vim4kvm", Path::new("/var/tmp/edge")).is_err());
-        assert!(validate_wave5_location("7.3.0-rc7", Path::new("/var/lib/one-kvm")).is_err());
-        assert!(validate_wave5_location("7.3.0-rc7", Path::new("/var/lib/one-kvm/child")).is_err());
-        assert!(validate_wave5_location("7.3.0-rc7", Path::new("relative")).is_err());
-        assert!(validate_wave5_location("7.3.0-rc7", Path::new("/var/lib/one-kvm-edge")).is_ok());
+        assert!(
+            validate_wave5_location("5.15.137-vim4kvm", Path::new("/var/tmp/edge"), false).is_err()
+        );
+        assert!(
+            validate_wave5_location("7.3.0-rc7", Path::new("/var/lib/one-kvm"), false).is_err()
+        );
+        assert!(
+            validate_wave5_location("7.3.0-rc7", Path::new("/var/lib/one-kvm/child"), true)
+                .is_err()
+        );
+        assert!(validate_wave5_location("7.3.0-rc7", Path::new("relative"), true).is_err());
+        assert!(
+            validate_wave5_location("7.3.0-rc7", Path::new("/var/lib/one-kvm-edge"), false).is_ok()
+        );
+        assert!(validate_wave5_location("7.3.0-rc7", Path::new("/var/lib/one-kvm"), true).is_ok());
+        assert!(
+            validate_wave5_location("5.15.137-vim4kvm", Path::new("/var/lib/one-kvm"), true)
+                .is_err()
+        );
     }
 
     #[test]

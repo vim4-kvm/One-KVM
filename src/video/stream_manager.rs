@@ -678,6 +678,17 @@ impl VideoStreamManager {
         Ok(())
     }
 
+    /// Hold both capture owners while a shared HDMI setting is applied.
+    #[cfg(feature = "vim4")]
+    pub async fn with_capture_released(
+        self: &Arc<Self>,
+        action: impl std::future::Future<Output = Result<()>> + Send,
+    ) -> Result<()> {
+        self.streamer.with_capture_released(
+            self.webrtc_streamer.with_capture_released(Box::pin(action)),
+        ).await
+    }
+
     /// Stop streaming
     pub async fn stop(&self) -> Result<()> {
         let mode = self.mode.read().await.clone();

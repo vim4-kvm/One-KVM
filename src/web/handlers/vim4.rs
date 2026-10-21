@@ -1,7 +1,9 @@
 //! Board controls use the same privileged helpers and persistent settings as the manager.
 use crate::error::{AppError, Result};
-use axum::Json;
+use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use crate::state::AppState;
 
 static BOARD_CHANGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -14,20 +16,17 @@ pub struct BoardVideoStatus {
 }
 
 pub async fn status() -> Result<Json<BoardVideoStatus>> {
-    if crate::platform::vim4::VideoBackend::current() == crate::platform::vim4::VideoBackend::Wave5 {
-        return Ok(Json(BoardVideoStatus {
-            edid: "VIM4-UHD-60".into(),
-            hdr_eotf: "SDR".into(),
-            white: 203,
-            peak: 1000,
-        }));
-    }
     // The helper owns root-only EDID state; permission errors must not look like the default preset.
     let edid = run_helper("/usr/libexec/vim4-edid", &["status".into()]).await?;
-    let hdr_eotf = std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/hdmi_hdr_status")
+    let hdr_eotf = if crate::platform::vim4::VideoBackend::current() == crate::platform::vim4::VideoBackend::Wave5 {
+        let metadata = run_helper("/usr/libexec/vim4-manager-helper", &["mainline-hardware".into()]).await?;
+        let value: serde_json::Value = serde_json::from_str(&metadata)
+            .map_err(|error| AppError::Internal(format!("Invalid HDMI status: {error}")))?;
+        value.get("hdr").and_then(|value| value.as_str()).unwrap_or("Unknown").to_string()
+    } else { std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/hdmi_hdr_status")
         .unwrap_or_else(|_| "Unknown".into())
         .trim()
-        .to_string();
+        .to_string() };
     let config = std::fs::read_to_string("/etc/default/vim4-kvm-hdr").unwrap_or_default();
     let nits = |key, default| {
         config
@@ -61,7 +60,7 @@ impl BoardVideoChange {
     fn command(&self) -> Result<(&'static str, Vec<String>)> {
         match self {
             Self::Edid { preset }
-                if ["VIM4-4K60", "VIM4-1080P60", "RTK-CONTROL"].contains(&preset.as_str()) =>
+                if ["VIM4-4K60", "VIM4-1080P60", "VIM4-1080P60-SDR8", "RTK-CONTROL"].contains(&preset.as_str()) =>
             {
                 Ok((
                     "/usr/libexec/vim4-edid",
@@ -83,15 +82,35 @@ impl BoardVideoChange {
     }
 }
 
-pub async fn update(Json(change): Json<BoardVideoChange>) -> Result<Json<BoardVideoStatus>> {
-    if crate::platform::vim4::VideoBackend::current() == crate::platform::vim4::VideoBackend::Wave5 {
-        return Err(AppError::BadRequest("EDID and HDR changes are unavailable in the fixed-mode Wave5 experiment".into()));
-    }
+pub async fn update(State(state): State<Arc<AppState>>, Json(change): Json<BoardVideoChange>) -> Result<Json<BoardVideoStatus>> {
     let (helper, args) = change.command()?;
     let _guard = BOARD_CHANGE
         .try_lock()
         .map_err(|_| AppError::BadRequest("A board video change is already in progress".into()))?;
-    run_helper(helper, &args).await?;
+    if crate::platform::vim4::VideoBackend::current() == crate::platform::vim4::VideoBackend::Wave5 && matches!(change, BoardVideoChange::Edid { .. }) {
+        let _video = state.config_apply_locks.video.try_lock()
+            .map_err(|_| AppError::BadRequest("A video configuration change is already in progress".into()))?;
+        state.stream_manager.with_capture_released(async {
+            let audio = state.audio.is_streaming().await;
+            if audio { state.audio.stop_streaming().await?; }
+            let result = run_helper(helper, &args).await.map(|_| ());
+            if result.is_ok() {
+                for _ in 0..50 {
+                    if crate::platform::vim4::video_backend::wave5_input_status().width.is_some() { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+            if audio {
+                if let Err(error) = state.audio.start_streaming().await {
+                    tracing::warn!(%error, "Audio is recovering after HDMI change");
+                }
+                state.stream_manager.reconnect_webrtc_audio_sources().await;
+            }
+            result
+        }).await?;
+    } else {
+        run_helper(helper, &args).await?;
+    }
     status().await
 }
 

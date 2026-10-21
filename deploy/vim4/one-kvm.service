@@ -2,7 +2,7 @@
 Description=One-KVM on VIM4
 After=network.target vim4-kvm-hdmi.service vim4-kvm-gadget.service vim4-kvm-pd.service
 Requires=vim4-kvm-hdmi.service vim4-kvm-gadget.service vim4-kvm-pd.service
-Conflicts=nanokvm.service vim4-kvm.service
+Conflicts=nanokvm.service vim4-kvm.service vim4-pikvm.service
 
 [Service]
 User=khadas
@@ -17,7 +17,7 @@ Environment=GST_PLUGIN_PATH=/usr/lib/vim4-kvm/gstreamer-1.0
 Environment=LD_LIBRARY_PATH=/opt/vim4-onekvm/lib
 Environment=GST_REGISTRY=/var/lib/one-kvm/gstreamer-registry.bin
 ExecStartPre=/usr/bin/test -r /opt/vim4-onekvm/lib/libgst-aml-dma-allocator.so
-ExecStart=/opt/vim4-onekvm/one-kvm --data-dir /var/lib/one-kvm --address 127.0.0.1 --port 8081 --auth-mode managed
+ExecStart=/usr/libexec/vim4-kvm-run onekvm
 ExecStopPost=/usr/bin/sudo -n /usr/libexec/vim4-onekvm usb-restore
 Restart=on-failure
 RestartSec=3

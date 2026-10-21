@@ -60,6 +60,17 @@ class MediaTest(unittest.TestCase):
                 helper.select_environment('/usr/libexec/vim4-onekvm-edge')
         self.assertEqual(helper.MEDIA, self.media)
 
+    def test_mainline_helper_keeps_shared_media_and_enforces_mainline_guards(self):
+        with patch.object(helper, 'EDGE', False), patch.object(helper.platform, 'release', return_value='7.3-test'):
+            helper.select_environment('/usr/libexec/vim4-onekvm')
+            self.assertTrue(helper.EDGE)
+            self.assertEqual(helper.MEDIA, self.media)
+            self.assertEqual(helper.PROFILE_DIR, self.root / 'profile')
+            self.assertEqual(vim4media.IMAGE_ROOTS['onekvm'], self.media)
+        with patch.object(helper, 'EDGE', False), patch.object(helper.platform, 'release', return_value='5.15-test'):
+            helper.select_environment('/usr/libexec/vim4-onekvm')
+            self.assertFalse(helper.EDGE)
+
     def test_edge_detach_cannot_force_disconnect_host_owned_media(self):
         lun = self.root / 'lun'
         lun.mkdir()

@@ -33,10 +33,10 @@ pub fn capabilities() -> PlatformCapabilities {
             FeatureCapability::unsupported("Installed as the vim4-onekvm Ubuntu package");
         if super::vim4::VideoBackend::current() == super::vim4::VideoBackend::Wave5 {
             capabilities.video_capture = FeatureCapability::available(["v4l2"]);
-            capabilities.msd = FeatureCapability::unsupported("Not enabled in this video experiment");
             capabilities.otg = FeatureCapability::available(["vim4-hid-gadget"]);
             if !std::path::Path::new("/proc/asound/VIM4HDMIRX/id").exists() {
-                capabilities.audio = FeatureCapability::unsupported("The VIM4 HDMI capture card is unavailable");
+                capabilities.audio =
+                    FeatureCapability::unsupported("The VIM4 HDMI capture card is unavailable");
             }
         }
     }

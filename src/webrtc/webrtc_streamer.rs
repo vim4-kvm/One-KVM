@@ -251,6 +251,37 @@ impl WebRtcStreamer {
 
     /// Serialize pipeline teardown with creation and return only after V4L2
     /// STREAMOFF, buffer teardown and FD close have completed.
+    /// Serialize HDMI changes against every shared-pipeline start, including
+    /// reconnecting viewers. Existing sessions attach to the replacement source.
+    #[cfg(feature = "vim4")]
+    pub async fn with_capture_released<T>(
+        &self,
+        action: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let mut guard = self.video_pipeline.write().await;
+        let restart = guard.as_ref().is_some_and(|pipeline| pipeline.is_running());
+        if let Some(pipeline) = guard.as_ref().cloned() {
+            pipeline.stop_and_wait(PIPELINE_RELEASE_TIMEOUT).await?;
+            *guard = None;
+        }
+        let result = action.await;
+        drop(guard);
+        if restart {
+            let resumed = async {
+                self.ensure_video_pipeline().await?;
+                self.reconnect_sessions_to_current_pipeline("HDMI board change").await?;
+                Ok::<(), AppError>(())
+            }.await;
+            if let Err(error) = resumed {
+                tracing::warn!(%error, "Shared capture did not resume after board change");
+                if result.is_ok() {
+                    return Err(error);
+                }
+            }
+        }
+        result
+    }
+
     async fn stop_video_pipeline_and_release(&self) -> Result<()> {
         let mut pipeline_guard = self.video_pipeline.write().await;
         let Some(pipeline) = pipeline_guard.as_ref().cloned() else {
@@ -1381,6 +1412,10 @@ impl WebRtcStreamer {
 #[async_trait::async_trait]
 impl crate::video::traits::VideoOutput for WebRtcStreamer {
     #[cfg(feature = "vim4")]
+    async fn with_capture_released(&self, action: crate::video::traits::CaptureChange<'_>) -> Result<()> {
+        self.with_capture_released(action).await
+    }
+    #[cfg(feature = "vim4")]
     async fn vim4_output_settings(&self) -> Option<crate::platform::vim4::OutputSettings> {
         Some(self.config.read().await.output)
     }
@@ -1517,6 +1552,36 @@ impl Default for WebRtcStreamer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "vim4")]
+    #[tokio::test]
+    async fn board_action_blocks_pipeline_acquisition_and_releases_after_error() {
+        let streamer = WebRtcStreamer::new();
+        let mut acquisition = Box::pin(streamer.ensure_video_pipeline_for_external());
+        let result = streamer.with_capture_released(async {
+            std::future::poll_fn(|context| {
+                assert!(std::future::Future::poll(acquisition.as_mut(), context).is_pending());
+                std::task::Poll::Ready(())
+            }).await;
+            Err::<(), _>(AppError::BadRequest("board action rejected".into()))
+        }).await;
+        assert!(result.is_err());
+        drop(acquisition);
+        streamer.with_capture_released(async { Ok(()) }).await.unwrap();
+    }
+
+    #[cfg(feature = "vim4")]
+    #[tokio::test]
+    async fn canceled_board_action_does_not_leave_pipeline_acquisition_locked() {
+        let streamer = WebRtcStreamer::new();
+        let mut change = Box::pin(streamer.with_capture_released(std::future::pending::<Result<()>>()));
+        std::future::poll_fn(|context| {
+            assert!(std::future::Future::poll(change.as_mut(), context).is_pending());
+            std::task::Poll::Ready(())
+        }).await;
+        drop(change);
+        streamer.with_capture_released(async { Ok(()) }).await.unwrap();
+    }
 
     #[test]
     fn test_webrtc_streamer_config_default() {

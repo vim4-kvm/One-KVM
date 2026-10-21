@@ -10,7 +10,8 @@ pub const GADGET: &str = "/sys/kernel/config/usb_gadget/kvm";
 
 fn usb_helper() -> &'static str {
     match VideoBackend::current() {
-        VideoBackend::Wave5 => "/usr/libexec/vim4-onekvm-edge",
+        VideoBackend::Wave5 if !video_backend::shared_data() => "/usr/libexec/vim4-onekvm-edge",
+        VideoBackend::Wave5 => "/usr/libexec/vim4-onekvm",
         VideoBackend::Vendor => "/usr/libexec/vim4-onekvm",
     }
 }
@@ -33,7 +34,13 @@ impl CatalogEntry {
             _ => return Err(crate::error::MsdErrorCode::MsdInvalidRequest.into()),
         };
         // Keep catalog identity in a single URL segment, separate from local IDs.
-        let id = format!("vim4-{}", self.id.bytes().map(|b| format!("{b:02x}")).collect::<String>());
+        let id = format!(
+            "vim4-{}",
+            self.id
+                .bytes()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
         let path = std::path::Path::new(root).join(&self.name);
         let mut image = crate::msd::ImageInfo::new(id, self.name, path, self.size);
         image.source = Some(self.source);
@@ -45,19 +52,32 @@ pub async fn catalog_images() -> crate::error::Result<Vec<crate::msd::ImageInfo>
     use crate::error::AppError;
     let output = tokio::process::Command::new("sudo")
         .args(["-n", usb_helper(), "catalog"])
-        .output().await.map_err(|e| AppError::Internal(e.to_string()))?;
-    if !output.status.success() {
-        return Err(AppError::Internal(String::from_utf8_lossy(&output.stderr).trim().into()));
-    }
-    let entries: Vec<CatalogEntry> = serde_json::from_slice(&output.stdout)
+        .output()
+        .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    entries.into_iter().filter(|entry| entry.source != "onekvm")
-        .map(CatalogEntry::into_image).collect()
+    if !output.status.success() {
+        return Err(AppError::Internal(
+            String::from_utf8_lossy(&output.stderr).trim().into(),
+        ));
+    }
+    let entries: Vec<CatalogEntry> =
+        serde_json::from_slice(&output.stdout).map_err(|e| AppError::Internal(e.to_string()))?;
+    entries
+        .into_iter()
+        .filter(|entry| entry.source != "onekvm")
+        .map(CatalogEntry::into_image)
+        .collect()
 }
 
-pub async fn find_image(manager: &crate::msd::ImageManager, id: &str) -> crate::error::Result<crate::msd::ImageInfo> {
+pub async fn find_image(
+    manager: &crate::msd::ImageManager,
+    id: &str,
+) -> crate::error::Result<crate::msd::ImageInfo> {
     if id.starts_with("vim4-") {
-        return catalog_images().await?.into_iter().find(|image| image.id == id)
+        return catalog_images()
+            .await?
+            .into_iter()
+            .find(|image| image.id == id)
             .ok_or_else(|| crate::error::MsdErrorCode::MsdResourceNotFound.into());
     }
     manager.get(id)
@@ -77,27 +97,54 @@ pub fn hid_paths(hid: &crate::config::HidConfig) -> crate::otg::HidDevicePaths {
 
 /// Validate endpoint capacity before closing active HID handles.
 pub fn validate_usb_config(previous: &AppConfig, config: &AppConfig) -> crate::error::Result<()> {
-    validate_usb_profile(&config.hid, &config.msd, &config.otg_network, &config.uac,
-        &config.otg_serial, VideoBackend::current())?;
+    validate_usb_profile(
+        &config.hid,
+        &config.msd,
+        &config.otg_network,
+        &config.uac,
+        &config.otg_serial,
+        VideoBackend::current(),
+    )?;
     if VideoBackend::current() == VideoBackend::Wave5 {
         let path = std::path::Path::new(GADGET).join("functions/mass_storage.disk0/lun.0/file");
         let mounted = match std::fs::read_to_string(path) {
             Ok(value) => !value.trim().is_empty(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(crate::error::AppError::Config(format!("Cannot check USB media: {error}"))),
+            Err(error) => {
+                return Err(crate::error::AppError::Config(format!(
+                    "Cannot check USB media: {error}"
+                )))
+            }
         };
         validate_mounted_usb_change(previous, config, mounted)?;
     }
     Ok(())
 }
 
-fn validate_mounted_usb_change(previous: &AppConfig, requested: &AppConfig, mounted: bool)
-    -> crate::error::Result<()> {
-    let old = (&previous.hid, &previous.msd, &previous.otg_network, &previous.uac, &previous.otg_serial);
-    let new = (&requested.hid, &requested.msd, &requested.otg_network, &requested.uac, &requested.otg_serial);
+fn validate_mounted_usb_change(
+    previous: &AppConfig,
+    requested: &AppConfig,
+    mounted: bool,
+) -> crate::error::Result<()> {
+    let old = (
+        &previous.hid,
+        &previous.msd,
+        &previous.otg_network,
+        &previous.uac,
+        &previous.otg_serial,
+    );
+    let new = (
+        &requested.hid,
+        &requested.msd,
+        &requested.otg_network,
+        &requested.uac,
+        &requested.otg_serial,
+    );
     if mounted && old != new {
         return Err(crate::error::AppError::BadRequest(
-            "Safely eject virtual media on the controlled computer before changing USB functions".into()));
+            "Safely eject virtual media on the controlled computer before changing USB functions"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -133,7 +180,9 @@ fn validate_usb_profile(
         return Err(AppError::BadRequest("VIM4 supports at most 5 USB IN endpoints; disable some HID, network, microphone, serial or virtual media functions".into()));
     }
     if backend == VideoBackend::Wave5 && serial.enabled {
-        return Err(AppError::BadRequest("USB serial is unavailable in the matched 7.x kernel".into()));
+        return Err(AppError::BadRequest(
+            "USB serial is unavailable in the matched 7.x kernel".into(),
+        ));
     }
     Ok((functions, endpoints))
 }
@@ -146,8 +195,8 @@ pub async fn configure_usb(
     serial: &crate::config::OtgSerialConfig,
 ) -> crate::error::Result<()> {
     use crate::error::AppError;
-    let (functions, endpoints) = validate_usb_profile(hid, msd, network, uac, serial,
-        VideoBackend::current())?;
+    let (functions, endpoints) =
+        validate_usb_profile(hid, msd, network, uac, serial, VideoBackend::current())?;
     if VideoBackend::current() == VideoBackend::Wave5 {
         // Keep video usable if USB preparation failed and HID is disabled.
         // Otherwise use the same restricted configfs helper as production;
@@ -171,12 +220,7 @@ pub async fn configure_usb(
         "inquiry": { "flash": msd.flash_inquiry_string, "cdrom": msd.cdrom_inquiry_string },
     });
     let output = tokio::process::Command::new("sudo")
-        .args([
-            "-n",
-            usb_helper(),
-            "usb",
-            &profile.to_string(),
-        ])
+        .args(["-n", usb_helper(), "usb", &profile.to_string()])
         .output()
         .await
         .map_err(|e| AppError::Config(e.to_string()))?;
@@ -271,6 +315,29 @@ pub fn defaults(config: &mut AppConfig) {
     }
 }
 
+/// Resolve board-owned device names without changing user-selected USB audio.
+pub fn resolve_hardware_config(config: &mut AppConfig, backend: VideoBackend) {
+    if matches!(
+        config.audio.device.as_str(),
+        "hw:AMLAUGESOUND,0" | "hw:VIM4HDMIRX,0"
+    ) {
+        config.audio.device = match backend {
+            VideoBackend::Vendor => "hw:AMLAUGESOUND,0",
+            VideoBackend::Wave5 => "hw:VIM4HDMIRX,0",
+        }
+        .into();
+    }
+    if matches!(config.video.format.as_deref(), Some("NV12" | "NV21")) {
+        config.video.format = Some(
+            match backend {
+                VideoBackend::Vendor => "NV21",
+                VideoBackend::Wave5 => "NV12",
+            }
+            .into(),
+        );
+    }
+}
+
 /// HDMI RX reports the clock-domain width (half-width for YUV420).
 pub fn parse_signal(info: &str) -> Option<(Resolution, f64)> {
     let value = |key: &str| {
@@ -295,7 +362,10 @@ pub fn parse_signal(info: &str) -> Option<(Resolution, f64)> {
 pub fn signal() -> Option<(Resolution, u32)> {
     if VideoBackend::current() == VideoBackend::Wave5 {
         let status = video_backend::wave5_input_status();
-        return Some((Resolution::new(status.width?, status.height?), status.fps?.round() as u32));
+        return Some((
+            Resolution::new(status.width?, status.height?),
+            status.fps?.round() as u32,
+        ));
     }
     parse_signal(&std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/info").ok()?)
         .map(|(size, fps)| (size, fps.round() as u32))
@@ -331,7 +401,9 @@ pub async fn configure_media_expected(
     config: &crate::otg::msd::MsdLunConfig,
     expected: &std::path::Path,
 ) -> crate::error::Result<()> {
-    configure_media_result(lun, config, expected).await.map(|_| ())
+    configure_media_result(lun, config, expected)
+        .await
+        .map(|_| ())
 }
 
 pub async fn configure_media_result(
@@ -368,14 +440,32 @@ pub async fn configure_media_result(
     struct Mounted {
         file: std::path::PathBuf,
     }
-    let result: Mounted = serde_json::from_slice(&output.stdout)
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let result: Mounted =
+        serde_json::from_slice(&output.stdout).map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(result.file)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_config_roundtrip_preserves_user_settings_and_resolves_hardware() {
+        let mut config = AppConfig::default();
+        config.initialized = true;
+        config.audio.device = "hw:AMLAUGESOUND,0".into();
+        config.video.format = Some("NV21".into());
+        config.video.width = 1920;
+        config.audio.enabled = false;
+        let original = serde_json::to_value(&config).unwrap();
+        resolve_hardware_config(&mut config, VideoBackend::Wave5);
+        assert_eq!(config.audio.device, "hw:VIM4HDMIRX,0");
+        assert_eq!(config.video.format.as_deref(), Some("NV12"));
+        resolve_hardware_config(&mut config, VideoBackend::Vendor);
+        assert_eq!(serde_json::to_value(&config).unwrap(), original);
+        config.audio.device = "hw:USB,0".into();
+        resolve_hardware_config(&mut config, VideoBackend::Wave5);
+        assert_eq!(config.audio.device, "hw:USB,0");
+    }
     #[test]
     fn usb_profiles_reserve_media_capacity_and_reject_endpoint_overcommit() {
         use crate::config::*;
@@ -386,19 +476,32 @@ mod tests {
                 config.hid.backend = HidBackend::Otg;
                 config.hid.otg_profile = OtgHidProfile::Custom;
                 config.hid.otg_functions = OtgHidFunctions {
-                    keyboard: enabled(0), mouse_absolute: enabled(1),
-                    mouse_relative: enabled(2), consumer: enabled(3),
+                    keyboard: enabled(0),
+                    mouse_absolute: enabled(1),
+                    mouse_relative: enabled(2),
+                    consumer: enabled(3),
                 };
                 config.msd.enabled = enabled(4);
                 config.otg_network.enabled = enabled(5);
                 config.uac.enabled = enabled(6);
                 config.otg_serial.enabled = enabled(7);
-                let endpoints = (mask & 0x1fu16).count_ones() + u32::from(enabled(5)) * 2
-                    + u32::from(enabled(6)) + u32::from(enabled(7)) * 2;
-                let result = validate_usb_profile(&config.hid, &config.msd,
-                    &config.otg_network, &config.uac, &config.otg_serial, backend);
-                assert_eq!(result.is_ok(), endpoints <= 5 &&
-                    (backend == VideoBackend::Vendor || !enabled(7)), "{backend:?} {mask:#x}");
+                let endpoints = (mask & 0x1fu16).count_ones()
+                    + u32::from(enabled(5)) * 2
+                    + u32::from(enabled(6))
+                    + u32::from(enabled(7)) * 2;
+                let result = validate_usb_profile(
+                    &config.hid,
+                    &config.msd,
+                    &config.otg_network,
+                    &config.uac,
+                    &config.otg_serial,
+                    backend,
+                );
+                assert_eq!(
+                    result.is_ok(),
+                    endpoints <= 5 && (backend == VideoBackend::Vendor || !enabled(7)),
+                    "{backend:?} {mask:#x}"
+                );
             }
         }
     }
@@ -418,18 +521,30 @@ mod tests {
     }
     #[test]
     fn msd_catalog_identity_preserves_source_and_real_lun_path() {
-        let make = |source: &str| CatalogEntry {
-            id: format!("{source}/install disk.img"),
-            name: "install disk.img".into(), source: source.into(), size: 4096,
-        }.into_image().unwrap();
+        let make = |source: &str| {
+            CatalogEntry {
+                id: format!("{source}/install disk.img"),
+                name: "install disk.img".into(),
+                source: source.into(),
+                size: 4096,
+            }
+            .into_image()
+            .unwrap()
+        };
         let data = make("data");
         let foreign = make("pikvm");
         assert_ne!(data.id, foreign.id);
         assert_eq!(data.id, make("data").id);
         assert!(!data.id.contains('/') && !data.id.contains(' '));
-        assert_eq!(data.path, std::path::Path::new("/var/lib/vim4-kvm/usb/install disk.img"));
+        assert_eq!(
+            data.path,
+            std::path::Path::new("/var/lib/vim4-kvm/usb/install disk.img")
+        );
         assert_eq!(foreign.source.as_deref(), Some("pikvm"));
-        assert_eq!(foreign.path, std::path::Path::new("/var/lib/kvmd/msd/install disk.img"));
+        assert_eq!(
+            foreign.path,
+            std::path::Path::new("/var/lib/kvmd/msd/install disk.img")
+        );
     }
 
     #[test]

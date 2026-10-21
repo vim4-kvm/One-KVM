@@ -122,7 +122,8 @@ onMounted(load)
             <SelectItem value="VIM4-4K60">4K 60 Hz</SelectItem>
             <SelectItem value="RTK-CONTROL">RTK UHD HDR 4K60</SelectItem>
             <SelectItem value="VIM4-1080P60">1080p 60 Hz</SelectItem>
-            <SelectItem v-if="board && !['VIM4-4K60', 'RTK-CONTROL', 'VIM4-1080P60'].includes(board.edid)" :value="board.edid" disabled>{{ board.edid }}</SelectItem>
+            <SelectItem value="VIM4-1080P60-SDR8">1080p 60 Hz · SDR 8-bit</SelectItem>
+            <SelectItem v-if="board && !['VIM4-4K60', 'RTK-CONTROL', 'VIM4-1080P60', 'VIM4-1080P60-SDR8'].includes(board.edid)" :value="board.edid" disabled>{{ board.edid }}</SelectItem>
           </SelectContent>
         </Select>
         <p class="text-muted-foreground">{{ t('vim4Video.edidHint') }}</p>

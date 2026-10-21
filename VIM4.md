@@ -4,17 +4,19 @@
 认证、WebRTC、音频和虚拟介质业务。公共板级服务由
 [vim4-kvm 工作区](https://github.com/vim4-kvm/vim4-kvm) 提供。
 
-7.x 的 V4L2/Wave5 视频接入为独立实验后端，安装隔离和边界见
-[Wave5 实验说明](deploy/vim4/WAVE5.md)；默认仍使用 5.15 厂商后端。
+公共 `vim4-kvm-run` 按内核选择 5.15 厂商后端或匹配的 7.x V4L2/Wave5 后端，
+共用 `/var/lib/one-kvm`。账户、镜像与用户设置保留；板载 HDMI 音频与采集格式
+保存为兼容 5.15 的名称，运行时解析为当前设备。须配套 `vim4-runtime-api-1`。
+独立实验服务仍保留自己的目录，安装隔离和边界见 [Wave5 说明](deploy/vim4/WAVE5.md)。
 
 ## 硬件映射
 
 | 功能 | 实现 |
 |---|---|
-| HDMI 输入 | vdin0 → `/dev/video_cap` → `vfmcapsrc`，跟随输入分辨率 |
-| WebRTC 视频 | DMA-buf → `amlvenc` → H.264/H.265 Annex B；使用现有会话及关键帧恢复 |
+| HDMI 输入 | 5.15 使用 `vfmcapsrc`；7.x 使用标准 V4L2，跟随输入分辨率 |
+| WebRTC 视频 | DMA-buf → 5.15 `amlvenc` / 7.x Wave5 → H.264/H.265；共用会话及关键帧恢复 |
 | MJPEG | vim4jpegenc DMA 硬件 JPEG，遵循输出帧率上限；缺少插件时软件回退最高 10 fps |
-| 声音 | ALSA `hw:AMLAUGESOUND,0` → 上游 Opus/WebRTC；板级服务设置 HDMI 音频路由 |
+| 声音 | ALSA `AMLAUGESOUND` / `VIM4HDMIRX` → 上游 Opus/WebRTC；按内核选择设备 |
 | 键盘 / 绝对鼠标 / 相对鼠标 | `/dev/hidg0` / `/dev/hidg1` / `/dev/hidg2` |
 | 多媒体键 | 独立 `/dev/hidg3`，16-bit Consumer usage |
 | ISO/IMG | 板级 `mass_storage.disk0/lun.0`，单 LUN；共享 USB 端点预算 |
@@ -54,7 +56,8 @@ images 目录镜像和 Ventoy 盘也属于外部介质。外部弹出后清除�
 
 ## HID 功能配置
 
-7.x 使用独立 `vim4-onekvm-edge` 助手、媒体目录和运行时日志，默认仍只开启三种 HID；
+7.x 正式服务共用 `vim4-onekvm` 助手、媒体目录与 USB 配置；保留的独立实验服务
+才使用 `vim4-onekvm-edge` 助手和目录，其默认仍只开启三种 HID。
 虚拟盘、网卡与 UAC2 可按端点预算选择。挂载介质时拒绝更改 USB 配置；停止应用保留
 主机仍在使用的介质，安全弹出后恢复基线。串口仍未启用，主机验收边界见
 [Wave5 实验说明](deploy/vim4/WAVE5.md)。
@@ -86,6 +89,10 @@ USB 串口启用时创建并链接 `acm.usb0`，禁用与服务停止时移除�
 输入状态从 HDMI RX sysfs 读取，不打开独占的 VFM 采集节点；显示实际输入分辨率
 与小数帧率。YUV420 输入的时钟域半宽转换为完整画面宽度。NV21 是采集输出格式，
 不代表 HDMI 线上的颜色编码或位深。
+
+7.x 从标准 V4L2 查询物理输入。1080p 建议选 `VIM4-1080P60-SDR8`：
+厂商原始 1080p EDID 允许 Mac 使用尚未适配的 10-bit 输入。原始表与上传文件保留。
+原生 EDID 设置会先释放采集，再重新连接已有观看会话；HDR 曲线可以直接在线修改。
 
 `PATCH /api/config/video` 的 `output: {height, fps}` 独立于跟随源信号的采集参数。
 height 为 0（原尺寸）、720、1080、2160；fps 为 0（跟随输入）、10、15、30、60。

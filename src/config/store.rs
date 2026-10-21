@@ -67,6 +67,19 @@ impl ConfigStore {
     }
 
     async fn save_config_to_db(pool: &Pool<Sqlite>, config: &AppConfig) -> Result<()> {
+        // Keep the existing on-disk device spelling compatible with 5.15.
+        // Each running kernel resolves these board-owned aliases in its cache.
+        #[cfg(feature = "vim4")]
+        let config = {
+            let mut portable = config.clone();
+            crate::platform::vim4::resolve_hardware_config(
+                &mut portable,
+                crate::platform::vim4::VideoBackend::Vendor,
+            );
+            portable
+        };
+        #[cfg(feature = "vim4")]
+        let config = &config;
         let json = serde_json::to_string(config)?;
 
         sqlx::query(
@@ -146,6 +159,30 @@ mod tests {
     use super::*;
     use crate::db::DatabasePool;
     use tempfile::tempdir;
+
+    #[cfg(feature = "vim4")]
+    #[tokio::test]
+    async fn shared_database_stores_portable_devices_without_mutating_runtime_settings() {
+        let dir = tempdir().unwrap();
+        let db = DatabasePool::new(&dir.path().join("shared.db")).await.unwrap();
+        db.init_schema().await.unwrap();
+        let mut running = AppConfig::default();
+        running.initialized = true;
+        running.audio.device = "hw:VIM4HDMIRX,0".into();
+        running.audio.enabled = false;
+        running.video.format = Some("NV12".into());
+        running.video.width = 1920;
+        running.video.fps = 30;
+        ConfigStore::save_config_to_db(db.pool(), &running).await.unwrap();
+        let (json,): (String,) = sqlx::query_as("SELECT value FROM config WHERE key = 'app_config'")
+            .fetch_one(db.pool()).await.unwrap();
+        let mut loaded: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.audio.device, "hw:AMLAUGESOUND,0");
+        assert_eq!(loaded.video.format.as_deref(), Some("NV21"));
+        crate::platform::vim4::resolve_hardware_config(
+            &mut loaded, crate::platform::vim4::VideoBackend::Wave5);
+        assert_eq!(serde_json::to_value(loaded).unwrap(), serde_json::to_value(running).unwrap());
+    }
 
     #[tokio::test]
     async fn test_config_store() {

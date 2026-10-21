@@ -12,6 +12,9 @@ use crate::events::EventBus;
 use crate::hid::HidController;
 use crate::video::device::VideoDeviceInfo;
 
+#[cfg(feature = "vim4")]
+pub type CaptureChange<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
+
 /// Trait for video output consumers that receive encoded video frames.
 ///
 /// Implemented by `WebRtcStreamer`. `VideoStreamManager` depends on this
@@ -19,6 +22,11 @@ use crate::video::device::VideoDeviceInfo;
 /// circular import.
 #[async_trait::async_trait]
 pub trait VideoOutput: Send + Sync {
+    /// Release capture and block new acquisitions while the board action runs.
+    #[cfg(feature = "vim4")]
+    async fn with_capture_released(&self, _action: CaptureChange<'_>) -> Result<()> {
+        Err(crate::error::AppError::VideoError("Capture transactions unavailable".into()))
+    }
     async fn set_event_bus(&self, events: Arc<EventBus>);
     async fn update_video_config(&self, resolution: Resolution, format: PixelFormat, fps: u32);
     async fn set_capture_device(

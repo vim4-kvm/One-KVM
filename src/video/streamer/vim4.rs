@@ -2,6 +2,39 @@ use super::*;
 use gst::prelude::*;
 use gstreamer as gst;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn board_action_blocks_direct_capture_and_releases_after_error() {
+        let streamer = Arc::new(Streamer::default());
+        let mut acquisition = Box::pin(streamer.start());
+        let result = streamer.with_capture_released(async {
+            std::future::poll_fn(|context| {
+                assert!(std::future::Future::poll(acquisition.as_mut(), context).is_pending());
+                std::task::Poll::Ready(())
+            }).await;
+            Err::<(), _>(AppError::BadRequest("board action rejected".into()))
+        }).await;
+        assert!(result.is_err());
+        drop(acquisition);
+        streamer.with_capture_released(async { Ok(()) }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn canceled_board_action_does_not_leave_direct_capture_locked() {
+        let streamer = Arc::new(Streamer::default());
+        let mut change = Box::pin(streamer.with_capture_released(std::future::pending::<Result<()>>()));
+        std::future::poll_fn(|context| {
+            assert!(std::future::Future::poll(change.as_mut(), context).is_pending());
+            std::task::Poll::Ready(())
+        }).await;
+        drop(change);
+        streamer.with_capture_released(async { Ok(()) }).await.unwrap();
+    }
+}
+
 impl Streamer {
     pub(super) fn run_vim4_mjpeg(&self, config: StreamerConfig) {
         while !self.direct_stop.load(Ordering::SeqCst) {

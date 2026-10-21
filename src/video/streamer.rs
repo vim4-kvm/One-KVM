@@ -800,6 +800,30 @@ impl Streamer {
     }
 
     /// Stop streaming
+    /// Release direct capture for a board transaction while blocking new starts.
+    #[cfg(feature = "vim4")]
+    pub async fn with_capture_released<T>(
+        self: &Arc<Self>,
+        action: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let guard = self.start_lock.lock().await;
+        let restart = self.direct_active.load(Ordering::SeqCst);
+        if restart {
+            self.stop().await?;
+        }
+        let result = action.await;
+        drop(guard);
+        if restart {
+            if let Err(error) = self.start().await {
+                tracing::warn!(%error, "Direct capture did not resume after board change");
+                if result.is_ok() {
+                    return Err(error);
+                }
+            }
+        }
+        result
+    }
+
     pub async fn stop(&self) -> Result<()> {
         self.direct_stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.direct_handle.lock().await.take() {
