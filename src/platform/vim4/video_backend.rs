@@ -61,6 +61,12 @@ pub fn output_resolution(output: OutputSettings, source: Resolution) -> Resoluti
     Resolution::new((width & !15).max(320), output.height)
 }
 
+/// HEVC's legacy visible-size alignment is stricter than AVC's crop units.
+pub fn wave5_requires_h264(output: OutputSettings, source: Resolution) -> bool {
+    let visible = output_resolution(output, source);
+    visible.width % 8 != 0 || visible.height % 8 != 0
+}
+
 pub fn shared_data() -> bool {
     std::env::var("VIM4_SHARED_DATA").as_deref() == Ok("1")
 }
@@ -179,6 +185,39 @@ fn measured_input_status(timings: v4l2_dv_timings) -> Result<VideoInputStatus> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hevc_fallback_uses_visible_output_including_scaling() {
+        for source in [
+            Resolution::new(1366, 768),
+            Resolution::new(1440, 900),
+            Resolution::new(1680, 1050),
+        ] {
+            assert!(wave5_requires_h264(OutputSettings::default(), source));
+        }
+        for source in [
+            Resolution::new(640, 480),
+            Resolution::new(720, 400),
+            Resolution::new(1920, 1080),
+            Resolution::new(3840, 2160),
+        ] {
+            assert!(!wave5_requires_h264(OutputSettings::default(), source));
+        }
+        assert!(!wave5_requires_h264(
+            OutputSettings {
+                height: 720,
+                fps: 0
+            },
+            Resolution::new(1366, 768)
+        ));
+        assert!(wave5_requires_h264(
+            OutputSettings {
+                height: 900,
+                fps: 0
+            },
+            Resolution::new(3840, 2160)
+        ));
+    }
 
     #[test]
     fn downscaled_dma_geometry_never_upscales_or_uses_fractional_mif_strides() {

@@ -122,7 +122,7 @@ pub async fn stream_mode_set(
         }
     }
 
-    let requested_mode_str = match (&new_mode, &video_codec) {
+    let mut requested_mode_str = match (&new_mode, &video_codec) {
         (StreamMode::Mjpeg, _) => "mjpeg",
         (StreamMode::WebRTC, Some(VideoCodecType::H264)) => "h264",
         (StreamMode::WebRTC, Some(VideoCodecType::H265)) => "h265",
@@ -146,6 +146,8 @@ pub async fn stream_mode_set(
         if let Err(e) = state.stream_manager.set_video_codec(codec).await {
             warn!("Failed to set video codec: {}", e);
         }
+        // Hardware geometry may have selected a safe codec while rebuilding.
+        requested_mode_str = codec_to_id(state.stream_manager.current_video_codec().await);
     }
 
     // For codec-only switch, emit events directly instead of going through

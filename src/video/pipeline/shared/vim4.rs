@@ -137,6 +137,18 @@ impl SharedVideoPipeline {
                 config.bitrate_preset = current.bitrate_preset;
                 config.output = current.output;
             }
+            if VideoBackend::current() == VideoBackend::Wave5
+                && config.output_codec == VideoEncoderType::H265
+                && crate::platform::vim4::video_backend::wave5_requires_h264(
+                    config.output,
+                    source.0,
+                )
+            {
+                // Stop before opening HEVC. The owner must renegotiate SDP as
+                // well as rebuild the encoder when the source needs AVC.
+                *self.pending_sync_geometry.lock() = Some((source.0, PixelFormat::Nv12));
+                break;
+            }
             match self.capture_vim4(&config, source) {
                 Ok(()) => {}
                 Err(e) => {

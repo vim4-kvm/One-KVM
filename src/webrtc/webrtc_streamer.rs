@@ -358,7 +358,13 @@ impl WebRtcStreamer {
             return Ok(0);
         }
 
+        let previous_codec = self.current_video_codec().await;
         let pipeline = self.ensure_video_pipeline().await?;
+        if previous_codec != self.current_video_codec().await {
+            // A codec fallback closed the old SDP sessions. The frontend opens
+            // fresh sessions following stream.mode_changed.
+            return Ok(0);
+        }
         for (session_id, session) in &sessions_to_reconnect {
             info!(
                 "Reconnecting session {} to pipeline after {}",
@@ -534,6 +540,34 @@ impl WebRtcStreamer {
         }
 
         let codec = *self.video_codec.read().await;
+        #[cfg(feature = "vim4")]
+        let codec = {
+            use crate::platform::vim4::{VideoBackend, video_backend::wave5_requires_h264};
+            let config = self.config.read().await;
+            let source = crate::platform::vim4::signal()
+                .map(|signal| signal.0)
+                .unwrap_or(config.resolution);
+            let fallback = VideoBackend::current() == VideoBackend::Wave5
+                && codec == VideoCodecType::H265
+                && wave5_requires_h264(config.output, source);
+            drop(config);
+            if fallback {
+                warn!("Wave5 HEVC cannot represent this visible size; falling back to H.264");
+                // The pipeline lock is held here; do not use the idle-stop
+                // wrapper, which would acquire that lock again.
+                self.close_sessions().await;
+                *self.video_codec.write().await = VideoCodecType::H264;
+                self.publish_stream_event(SystemEvent::StreamModeChanged {
+                    transition_id: None,
+                    mode: "h264".into(),
+                    previous_mode: "h265".into(),
+                })
+                .await;
+                VideoCodecType::H264
+            } else {
+                codec
+            }
+        };
         let pipeline_config = {
             let config = self.config.read().await;
             SharedVideoPipelineConfig {
@@ -1225,7 +1259,7 @@ impl WebRtcStreamer {
     }
 
     /// Close all sessions
-    pub async fn close_all_sessions(&self) -> usize {
+    async fn close_sessions(&self) -> usize {
         let mut sessions = self.sessions.write().await;
         let count = sessions.len();
 
@@ -1236,7 +1270,11 @@ impl WebRtcStreamer {
             }
         }
 
-        drop(sessions);
+        count
+    }
+
+    pub async fn close_all_sessions(&self) -> usize {
+        let count = self.close_sessions().await;
         self.stop_pipeline_if_idle("After close_all_sessions").await;
 
         count
