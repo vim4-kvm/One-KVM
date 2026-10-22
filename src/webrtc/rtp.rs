@@ -1,7 +1,8 @@
 //! Opus outbound track. Video RTP lives in [`crate::webrtc::video_track`].
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tracing::error;
 use webrtc::media::Sample;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
@@ -29,8 +30,27 @@ fn opus_sample(frame: &OpusFrame, previous_sequence: Option<u64>) -> Sample {
     }
 }
 
+fn opus_restart_gap(
+    frame: &OpusFrame,
+    previous_sequence: Option<u64>,
+    previous: Option<(Instant, Duration)>,
+) -> Duration {
+    if previous_sequence.is_some() {
+        return Duration::ZERO;
+    }
+    previous
+        .map(|(time, duration)| {
+            frame
+                .encoded_at
+                .saturating_duration_since(time)
+                .saturating_sub(duration)
+        })
+        .unwrap_or(Duration::ZERO)
+}
+
 pub struct OpusAudioTrack {
     track: Arc<TrackLocalStaticSample>,
+    previous_encoded: Mutex<Option<(Instant, Duration)>>,
 }
 
 impl OpusAudioTrack {
@@ -49,7 +69,10 @@ impl OpusAudioTrack {
             stream_id.to_string(),
         ));
 
-        Self { track }
+        Self {
+            track,
+            previous_encoded: Mutex::new(None),
+        }
     }
 
     pub fn track(&self) -> Arc<TrackLocalStaticSample> {
@@ -69,7 +92,25 @@ impl OpusAudioTrack {
             return Ok(());
         }
 
+        let mut previous = self.previous_encoded.lock().await;
+        let mut gap = opus_restart_gap(frame, previous_sequence, *previous);
+        // The track/SSRC survives recovery. An empty Opus sample advances the
+        // packetizer clock without emitting a packet or consuming a sequence
+        // number. Keep the actual outage in media time so resumed audio is not
+        // discarded as late. Chunk long outages below the u32 sample limit.
+        while !gap.is_zero() {
+            let duration = gap.min(Duration::from_secs(3600));
+            self.track
+                .write_sample(&Sample {
+                    duration,
+                    ..Default::default()
+                })
+                .await
+                .map_err(|error| AppError::WebRtcError(error.to_string()))?;
+            gap -= duration;
+        }
         let sample = opus_sample(frame, previous_sequence);
+        *previous = Some((frame.encoded_at, sample.duration));
 
         self.track.write_sample(&sample).await.map_err(|e| {
             error!("Failed to write Opus sample: {}", e);
@@ -101,5 +142,47 @@ mod tests {
         assert_eq!(opus_sample(&frame, None).prev_dropped_packets, 0);
         // A restarted encoder has a new sequence origin, not an enormous gap.
         assert_eq!(opus_sample(&frame, Some(500)).prev_dropped_packets, 0);
+    }
+
+    #[test]
+    fn capture_recovery_preserves_elapsed_rtp_time_on_the_existing_track() {
+        let frame = OpusFrame {
+            encoded_at: Instant::now(),
+            data: Bytes::from_static(&[0xf8, 0xff, 0xfe]),
+            duration_ms: 20,
+            sequence: 0,
+        };
+        use webrtc::rtp::codecs::opus::OpusPayloader;
+        use webrtc::rtp::packetizer::{new_packetizer, Packetizer};
+        use webrtc::rtp::sequence::new_fixed_sequencer;
+        let previous = Some((
+            frame.encoded_at - Duration::from_secs(3),
+            Duration::from_millis(20),
+        ));
+        let gap = opus_restart_gap(&frame, None, previous);
+        assert_eq!(gap, Duration::from_millis(2980));
+        assert_eq!(opus_restart_gap(&frame, Some(10), previous), Duration::ZERO);
+        let mut packetizer = new_packetizer(
+            1200,
+            111,
+            1,
+            Box::new(OpusPayloader),
+            Box::new(new_fixed_sequencer(7)),
+            48000,
+        );
+        let first = packetizer.packetize(&frame.data, 960).unwrap().remove(0);
+        assert!(packetizer
+            .packetize(&Bytes::new(), (gap.as_secs_f64() * 48000.0) as u32)
+            .unwrap()
+            .is_empty());
+        let next = packetizer.packetize(&frame.data, 960).unwrap().remove(0);
+        assert_eq!(
+            next.header.sequence_number,
+            first.header.sequence_number.wrapping_add(1)
+        );
+        assert_eq!(
+            next.header.timestamp.wrapping_sub(first.header.timestamp),
+            144000
+        );
     }
 }
