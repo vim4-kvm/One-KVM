@@ -5,7 +5,7 @@ use gstreamer_allocators::{DmaBufAllocator, DmaBufAllocatorExtManual, DmaBufMemo
 use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
 use std::os::fd::{AsRawFd, BorrowedFd};
 use v4l2r::bindings::{
-    v4l2_queryctrl, V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, V4L2_CTRL_FLAG_DISABLED,
+    V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, V4L2_CTRL_FLAG_DISABLED, v4l2_queryctrl,
 };
 
 v4l2r::nix::ioctl_readwrite!(query_control, b'V', 36, v4l2_queryctrl);
@@ -49,7 +49,7 @@ pub(super) fn description(
         ""
     };
     Ok(format!(
-        "v4l2src name=source io-mode=dmabuf ! video/x-raw,format=NV12,width={},height={},framerate=60/1 ! \
+        "v4l2src name=source io-mode=dmabuf ! video/x-raw,format=NV12,width={},height={} ! \
          {}queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! \
          videorate drop-only=true ! video/x-raw,framerate={fps}/1 ! \
          appsink name=plane_bridge emit-signals=false sync=false async=false max-buffers=1 \
@@ -58,8 +58,11 @@ pub(super) fn description(
          v4l2{codec}enc name=encoder output-io-mode=dmabuf-import ! {hevc}\
          {codec}parse config-interval=-1 ! video/x-{codec},stream-format=byte-stream,alignment=au ! \
          appsink name=frames sync=false max-buffers=2",
-        output.width, output.height, crate::video::snapshot::vim4::BRANCH,
-        output.width, output.height,
+        output.width,
+        output.height,
+        crate::video::snapshot::vim4::BRANCH,
+        output.width,
+        output.height,
     ))
 }
 
@@ -74,8 +77,25 @@ fn plane_view(original: &gst::Buffer, width: u32, height: u32) -> Result<gst::Bu
     {
         return Err(fail("unsupported NV12 geometry"));
     }
-    let luma = width as usize * height as usize;
-    let aligned_luma = width as usize * ((height as usize + 15) & !15);
+    let stride = original
+        .meta::<gstreamer_video::VideoMeta>()
+        .map(|meta| meta.stride()[0])
+        .unwrap_or(width as i32);
+    if stride < width as i32 || stride % 16 != 0 {
+        return Err(fail("invalid capture stride"));
+    }
+    let luma = stride as usize * height as usize;
+    let aligned_luma = stride as usize * ((height as usize + 15) & !15);
+    if let Some(meta) = original.meta::<gstreamer_video::VideoMeta>() {
+        if meta.format() != gstreamer_video::VideoFormat::Nv12
+            || meta.width() != width
+            || meta.height() != height
+            || meta.offset() != [0, luma]
+            || meta.stride() != [stride, stride]
+        {
+            return Err(fail("inconsistent capture plane metadata"));
+        }
+    }
     if original.n_memory() != 1 || original.size() != luma * 3 / 2 {
         return Err(fail("expected one packed NV12 allocation"));
     }
@@ -118,7 +138,7 @@ fn plane_view(original: &gst::Buffer, width: u32, height: u32) -> Result<gst::Bu
         width,
         height,
         &[0, aligned_luma],
-        &[width as i32, width as i32],
+        &[stride, stride],
     )
     .map_err(|e| fail(&e.to_string()))?;
     original
@@ -306,6 +326,31 @@ mod tests {
     }
 
     #[test]
+    fn padded_rows_preserve_visible_width_and_chroma_address() {
+        let (width, height, stride) = (1366, 768, 1376);
+        let luma = stride * height;
+        let mut parent = buffer(stride, height, luma * 3 / 2);
+        gstreamer_video::VideoMeta::add_full(
+            parent.get_mut().unwrap(),
+            gstreamer_video::VideoFrameFlags::empty(),
+            gstreamer_video::VideoFormat::Nv12,
+            width as u32,
+            height as u32,
+            &[0, luma],
+            &[stride as i32, stride as i32],
+        )
+        .unwrap();
+        let view = plane_view(&parent, width as u32, height as u32).unwrap();
+        let meta = view.meta::<gstreamer_video::VideoMeta>().unwrap();
+        assert_eq!(meta.width(), width as u32);
+        assert_eq!(meta.stride(), [stride as i32, stride as i32]);
+        assert_eq!(view.peek_memory(1).offset(), luma);
+        assert!(parent.get_mut().is_none());
+        drop(view);
+        assert!(parent.get_mut().is_some());
+    }
+
+    #[test]
     fn bridge_releases_capture_after_pipeline_stops() {
         use std::ffi::c_void;
         use std::sync::mpsc;
@@ -344,11 +389,13 @@ mod tests {
         let sample = output
             .try_pull_sample(gst::ClockTime::from_seconds(2))
             .unwrap();
-        assert!(sample
-            .buffer()
-            .unwrap()
-            .meta::<gst::ParentBufferMeta>()
-            .is_some());
+        assert!(
+            sample
+                .buffer()
+                .unwrap()
+                .meta::<gst::ParentBufferMeta>()
+                .is_some()
+        );
         drop(sample);
         let bridge = pipeline.by_name("plane_bridge").unwrap();
         let cached = bridge
@@ -389,16 +436,20 @@ mod tests {
         b.set_pts(gst::ClockTime::from_mseconds(42));
         b.set_duration(gst::ClockTime::from_nseconds(16_666_667));
         b.set_flags(gst::BufferFlags::DELTA_UNIT);
-        assert!(source
-            .peek_memory(0)
-            .downcast_memory_ref::<DmaBufMemory>()
-            .is_some());
+        assert!(
+            source
+                .peek_memory(0)
+                .downcast_memory_ref::<DmaBufMemory>()
+                .is_some()
+        );
         let cached = cached_bitstream(&source).unwrap();
         assert_eq!(cached.size(), 16);
-        assert!(cached
-            .peek_memory(0)
-            .downcast_memory_ref::<DmaBufMemory>()
-            .is_none());
+        assert!(
+            cached
+                .peek_memory(0)
+                .downcast_memory_ref::<DmaBufMemory>()
+                .is_none()
+        );
         assert_eq!(cached.pts(), source.pts());
         assert_eq!(cached.duration(), source.duration());
         // TAG_MEMORY describes pool memory replacement, not encoded frame type.

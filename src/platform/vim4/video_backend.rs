@@ -6,7 +6,7 @@ use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use v4l2r::bindings::{
-    v4l2_dv_timings, v4l2_input, V4L2_DV_BT_656_1120, V4L2_IN_ST_NO_SIGNAL, V4L2_IN_ST_NO_SYNC,
+    V4L2_DV_BT_656_1120, V4L2_IN_ST_NO_SIGNAL, V4L2_IN_ST_NO_SYNC, v4l2_dv_timings, v4l2_input,
 };
 
 v4l2r::nix::ioctl_readwrite!(query_input, b'V', 26, v4l2_input);
@@ -146,11 +146,13 @@ fn measured_input_status(timings: v4l2_dv_timings) -> Result<VideoInputStatus> {
     }
     // The tagged UAPI union contains BT timings only after the type check.
     let bt = unsafe { timings.__bindgen_anon_1.bt };
+    let (width, height, pixelclock) = (bt.width, bt.height, bt.pixelclock);
     if bt.interlaced != 0
-        || bt.width == 0
-        || bt.height == 0
-        || bt.pixelclock == 0
-        || !matches!((bt.width, bt.height), (1920, 1080) | (3840, 2160))
+        || !(320..=3840).contains(&width)
+        || !(180..=2160).contains(&height)
+        || bt.width % 2 != 0
+        || bt.height % 2 != 0
+        || !(24_000_000..=600_000_000).contains(&pixelclock)
     {
         return Err(invalid());
     }
@@ -163,7 +165,7 @@ fn measured_input_status(timings: v4l2_dv_timings) -> Result<VideoInputStatus> {
         + u64::from(bt.vsync)
         + u64::from(bt.vbackporch);
     let fps = bt.pixelclock as f64 / total_width as f64 / total_height as f64;
-    if !(59.0..=61.0).contains(&fps) {
+    if !(20.0..=120.0).contains(&fps) {
         return Err(invalid());
     }
     Ok(VideoInputStatus::locked(
@@ -253,7 +255,7 @@ mod tests {
         assert!((changed.fps.unwrap() - 60.0).abs() < 0.0001);
         bt.pixelclock = 297_000_000;
         mode.__bindgen_anon_1.bt = bt;
-        assert!(measured_input_status(mode).is_err());
+        assert!((measured_input_status(mode).unwrap().fps.unwrap() - 30.0).abs() < 0.001);
         bt.pixelclock = 0;
         mode.__bindgen_anon_1.bt = bt;
         assert!(measured_input_status(mode).is_err());

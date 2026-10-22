@@ -79,7 +79,7 @@ impl Streamer {
         let (capture, filter) = if wave5 {
             let output =
                 crate::platform::vim4::video_backend::output_resolution(config.output, source.0);
-            (format!("v4l2src name=source io-mode=dmabuf ! video/x-raw,format=NV12,width={},height={},framerate=60/1 ! ",
+            (format!("v4l2src name=source io-mode=dmabuf ! video/x-raw,format=NV12,width={},height={} ! ",
                 output.width, output.height),
              format!("videorate drop-only=true ! video/x-raw,framerate={fps}/1 ! "))
         } else {

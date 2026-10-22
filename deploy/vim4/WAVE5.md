@@ -24,6 +24,9 @@ The Rust appsink/appsrc bridge splits each packed NV12 allocation into two DMA
 plane views, without copying pixels. Parent-buffer metadata holds the capture
 pool lease until the encoder releases both views. At 1080p, allocation capacity
 must include the encoder's 1088-row alignment while UV remains after active Y.
+Plane offsets and encoder alignment use the capture metadata's byte stride;
+native widths such as 1366 keep their visible width while DMA rows are padded
+to 1376 bytes. Both plane views retain the same capture lease.
 The kernel must support nonzero DMA plane offsets and on-demand keyframes.
 The matched experimental service also requires leased direct VDIN DMA. Capture
 buffers remain owned until AXI completion and encoder release; a failed stop
@@ -41,8 +44,13 @@ Without the lifetime fixes, repeated pipelines retain encoder handles or mapped
 buffers and can exhaust CMA. Use `tools/wave5-lifecycle-check.py` in that workspace
 with all video applications stopped to check both codecs after rebuilding the plugin.
 
-The matched runtime supports RGB8 and limited BT.709 YUV4448 1080p60/UHD60 input,
-plus the qualified UHD60 YUV42010 HDR10/SDR path, and H.264/H.265 WebRTC video,
+Input status follows measured progressive V4L2 timings within the matched
+receiver's envelope: even 320–3840 by 180–2160 pixels, 20–120 Hz and a
+24–600 MHz pixel clock. Capture caps let V4L2 report the input frame rate;
+the output frame-rate setting remains an upper limit. The kernel must provide
+the corresponding PHY and colour conversion; status admission alone does not
+establish hardware coverage for every mode or colour depth. The qualified
+UHD60 YUV42010 HDR10/SDR path remains available. H.264/H.265 WebRTC supports
 bitrate changes and keyframe requests. Output height selects the VDIN hardware
 scaler before DMA, preserving the full scene without a raw-frame CPU copy.
 Zero means native input size; smaller outputs preserve aspect ratio with width
