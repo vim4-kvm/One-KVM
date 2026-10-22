@@ -1,21 +1,10 @@
 //! Live HDMI format controls exposed by the T7 receiver. Old kernels retain
-//! their ordinary ALSA capture path; only this card opts into native resampling.
+//! their ordinary ALSA capture path; this card uses native capture and conversion.
 use alsa::ctl::{Ctl, ElemId, ElemIface, ElemType, ElemValue};
 use std::ffi::CString;
 
 use super::AudioConfig;
 use crate::error::{AppError, Result};
-
-pub(super) fn capture_config(config: &AudioConfig) -> AudioConfig {
-    // All supported HDMI rates have integral 20 ms periods. Keep five whole
-    // periods in both sides of ALSA's rate plugin: a 4096-frame 48 kHz buffer
-    // becomes 2730 frames at 32 kHz and corrupts samples at every ring wrap.
-    AudioConfig {
-        period_frames: config.sample_rate / 50,
-        buffer_frames: config.sample_rate / 10,
-        ..config.clone()
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct SourceFormat {
@@ -26,6 +15,18 @@ pub(super) struct SourceFormat {
 }
 
 impl SourceFormat {
+    pub fn capture_config(self, config: &AudioConfig) -> AudioConfig {
+        let rate = self.rate as u32;
+        // Native capture avoids ALSA rate's fractional slave rings. T7 needs
+        // whole DMA periods; all seven rates have integral 20 ms periods.
+        AudioConfig {
+            sample_rate: rate,
+            period_frames: rate / 50,
+            buffer_frames: rate / 10,
+            ..config.clone()
+        }
+    }
+
     pub fn ready(self) -> bool {
         self.state == 1
             && self.channels == 2
@@ -60,7 +61,7 @@ impl HdmiSource {
         }
         let source = Self {
             ctl,
-            pcm_name: format!("plughw:{address}"),
+            pcm_name: format!("hw:{address}"),
         };
         match source.integer("Generation") {
             // A baseline kernel has no live-format ABI. Preserve its old path.
@@ -130,14 +131,17 @@ mod tests {
 
     #[test]
     fn resampling_keeps_whole_periods_on_both_sides_of_the_ring() {
-        let config = capture_config(&AudioConfig::default());
-        for native in [32000u64, 44100, 48000, 88200, 96000, 176400, 192000] {
-            let period = u64::from(config.period_frames) * native;
-            let buffer = u64::from(config.buffer_frames) * native;
-            let client = u64::from(config.sample_rate);
-            assert_eq!(period % client, 0);
-            assert_eq!(buffer % client, 0);
-            assert_eq!((buffer / client) % (period / client), 0);
+        for rate in [32000, 44100, 48000, 88200, 96000, 176400, 192000] {
+            let format = SourceFormat {
+                generation: 1,
+                rate,
+                channels: 2,
+                state: 1,
+            };
+            let config = format.capture_config(&AudioConfig::default());
+            assert_eq!(config.sample_rate, rate as u32);
+            assert_eq!(config.buffer_frames % config.period_frames, 0);
+            assert_eq!(config.period_frames * 50, config.sample_rate);
         }
     }
 }

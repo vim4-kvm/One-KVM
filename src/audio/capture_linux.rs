@@ -39,7 +39,15 @@ pub(super) fn run_capture(
     #[cfg(feature = "vim4")]
     let hdmi_config = hdmi
         .as_ref()
-        .map(|_| crate::audio::hdmi_linux::capture_config(config));
+        .map(|_| format.unwrap().capture_config(config));
+    #[cfg(feature = "vim4")]
+    let mut resampler = if let Some(native) = &hdmi_config {
+        crate::audio::hdmi_resampler::HdmiResampler::new(native.sample_rate, config.sample_rate)?
+    } else {
+        None
+    };
+    #[cfg(feature = "vim4")]
+    let output_rate = config.sample_rate;
     #[cfg(feature = "vim4")]
     let config = hdmi_config.as_ref().unwrap_or(config);
     // Non-blocking mode guarantees that stop() can always join the worker.
@@ -68,7 +76,7 @@ pub(super) fn run_capture(
 
     while !stop_flag.load(Ordering::Acquire) {
         // Check before XRUN recovery too: the old native clock must never be
-        // restarted after a source change. The controller opens a fresh plug PCM.
+        // restarted after a source change. The controller opens a fresh native PCM.
         #[cfg(feature = "vim4")]
         if let Some(source) = &hdmi {
             if Some(source.snapshot()?) != format {
@@ -107,10 +115,25 @@ pub(super) fn run_capture(
                 consecutive_errors = 0;
                 let byte_count = frames_read * config.channels as usize * 2;
                 if frame_tx.receiver_count() > 0 {
+                    #[cfg(feature = "vim4")]
+                    let converted = resampler
+                        .as_mut()
+                        .map(|resampler| resampler.convert(&buffer[..byte_count]))
+                        .transpose()?;
+                    #[cfg(feature = "vim4")]
+                    let (data, rate) = (
+                        converted.as_deref().unwrap_or(&buffer[..byte_count]),
+                        output_rate,
+                    );
+                    #[cfg(not(feature = "vim4"))]
+                    let (data, rate) = (&buffer[..byte_count], config.sample_rate);
+                    if data.is_empty() {
+                        continue;
+                    }
                     let frame = AudioFrame::new_interleaved(
-                        Bytes::copy_from_slice(&buffer[..byte_count]),
+                        Bytes::copy_from_slice(data),
                         config.channels,
-                        config.sample_rate,
+                        rate,
                     );
                     let _ = frame_tx.send(frame);
                 }

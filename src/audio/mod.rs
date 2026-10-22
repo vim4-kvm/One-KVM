@@ -9,6 +9,8 @@ mod device;
 mod encoder;
 #[cfg(all(target_os = "linux", feature = "vim4"))]
 mod hdmi_linux;
+#[cfg(all(target_os = "linux", feature = "vim4"))]
+mod hdmi_resampler;
 mod monitor;
 mod recovery;
 mod streamer;
