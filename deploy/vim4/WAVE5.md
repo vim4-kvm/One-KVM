@@ -24,8 +24,11 @@ The Rust appsink/appsrc bridge splits each packed NV12 allocation into two DMA
 plane views, without copying pixels. Parent-buffer metadata holds the capture
 pool lease until the encoder releases both views. At 1080p, allocation capacity
 must include the encoder's 1088-row alignment while UV remains after active Y.
-Plane offsets and encoder alignment use the capture metadata's byte stride;
-native widths such as 1366 keep their visible width while DMA rows are padded
+Plane offsets and encoder alignment use the capture metadata's byte stride.
+The HDMI NV12 producer pads rows to Wave5's 32-byte requirement. The capture
+allocation query requests VideoMeta before the snapshot tee so padded rows
+remain visible to both the encoder bridge and JPEG snapshots.
+Native widths such as 1366 keep their visible width while DMA rows are padded
 to 1376 bytes. Both plane views retain the same capture lease.
 The kernel must support nonzero DMA plane offsets and on-demand keyframes.
 The matched experimental service also requires leased direct VDIN DMA. Capture

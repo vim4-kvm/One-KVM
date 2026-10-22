@@ -97,7 +97,11 @@ fn plane_view(original: &gst::Buffer, width: u32, height: u32) -> Result<gst::Bu
         }
     }
     if original.n_memory() != 1 || original.size() != luma * 3 / 2 {
-        return Err(fail("expected one packed NV12 allocation"));
+        return Err(fail(&format!(
+            "expected one packed NV12 allocation: memories={}, bytes={}, stride={stride}, geometry={width}x{height}",
+            original.n_memory(),
+            original.size()
+        )));
     }
     let memory = original.peek_memory(0);
     let dma = memory
@@ -238,6 +242,23 @@ fn attach_plane_bridge(pipeline: &gst::Pipeline, source: Resolution) -> Result<(
     // The plane view carries a capture-pool lease. Keeping a rendered sample
     // after consumption pins that lease when input stops or changes mode.
     bridge.set_property("enable-last-sample", false);
+    // V4L2 must attach the real row stride when it pads the active width.
+    // Request at the capture boundary, before the snapshot tee can intersect
+    // downstream allocation answers from separate consumers.
+    pipeline
+        .by_name("source")
+        .and_then(|source| source.static_pad("src"))
+        .and_then(|pad| pad.peer())
+        .ok_or_else(|| missing("capture downstream pad"))?
+        .add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, |_, info| {
+            if let Some(query) = info.query_mut() {
+                if let gst::QueryViewMut::Allocation(allocation) = query.view_mut() {
+                    allocation.add_allocation_meta::<gstreamer_video::VideoMeta>(None);
+                    return gst::PadProbeReturn::Handled;
+                }
+            }
+            gst::PadProbeReturn::Ok
+        });
     pipeline
         .by_name("frames")
         .ok_or_else(|| missing("frames"))?
@@ -385,6 +406,13 @@ mod tests {
             );
         }
         pipeline.set_state(gst::State::Playing).unwrap();
+        let mut allocation = gst::query::Allocation::new(None, false);
+        assert!(input.static_pad("src").unwrap().peer_query(&mut allocation));
+        assert!(
+            allocation
+                .find_allocation_meta::<gstreamer_video::VideoMeta>()
+                .is_some()
+        );
         input.push_buffer(parent).unwrap();
         let sample = output
             .try_pull_sample(gst::ClockTime::from_seconds(2))
