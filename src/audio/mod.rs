@@ -7,6 +7,8 @@ mod controller;
 mod device;
 #[cfg(any(unix, windows))]
 mod encoder;
+#[cfg(all(target_os = "linux", feature = "vim4"))]
+mod hdmi_linux;
 mod monitor;
 mod recovery;
 mod streamer;

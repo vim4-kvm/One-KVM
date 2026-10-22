@@ -16,6 +16,10 @@ use crate::events::{EventBus, StreamKind, SystemEvent};
 
 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
+fn retry_delay(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((1u64 << attempt.min(5)).min(30))
+}
+
 struct RecoveryControl {
     /// Even values are idle; the following odd value is that recovery's token.
     /// A single compare-exchange therefore owns both activity and generation.
@@ -206,16 +210,30 @@ impl AudioRecovery {
                 return;
             }
 
+            // Poll the receiver controls without opening a PCM or repeatedly
+            // enumerating cards while HDMI is absent/unsupported. Reconnect as
+            // soon as its format is stable, independent of the failure backoff.
+            #[cfg(all(target_os = "linux", feature = "vim4"))]
+            match super::hdmi_linux::source_ready(&config.device) {
+                Ok(false) => {
+                    attempt = 0;
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    continue;
+                }
+                Err(error) => debug!("Cannot query HDMI audio source: {error}"),
+                Ok(true) => {}
+            }
+            let delay = retry_delay(attempt);
             attempt = attempt.saturating_add(1);
             self.publish_reconnecting(&lost_device, attempt).await;
             self.publish_state(
                 "device_lost",
                 Some(lost_device.clone()),
                 Some("audio_reconnecting"),
-                Some(RETRY_DELAY.as_millis() as u64),
+                Some(delay.as_millis() as u64),
             )
             .await;
-            tokio::time::sleep(RETRY_DELAY).await;
+            tokio::time::sleep(delay).await;
             if !self.inner.control.is_current(generation) {
                 return;
             }
@@ -389,6 +407,15 @@ mod tests {
 
         control.finish(completed);
         assert!(control.is_current(current));
+    }
+
+    #[test]
+    fn repeated_failure_backoff_is_bounded_even_after_counter_saturation() {
+        let delays: Vec<_> = (0..8)
+            .map(|attempt| retry_delay(attempt).as_secs())
+            .collect();
+        assert_eq!(delays, vec![1, 2, 4, 8, 16, 30, 30, 30]);
+        assert_eq!(retry_delay(u32::MAX).as_secs(), 30);
     }
 
     #[test]

@@ -23,8 +23,21 @@ pub(super) fn run_capture(
     stop_flag: &AtomicBool,
     log_throttler: &LogThrottler,
 ) -> Result<()> {
+    #[cfg(feature = "vim4")]
+    let hdmi = crate::audio::hdmi_linux::HdmiSource::open(&config.device_name)?;
+    #[cfg(feature = "vim4")]
+    let format = hdmi.as_ref().map(|source| source.snapshot()).transpose()?;
+    #[cfg(feature = "vim4")]
+    if format.is_some_and(|format| !format.ready()) {
+        return Err(AppError::AudioError(
+            "HDMI audio source is not ready".into(),
+        ));
+    }
+    let device_name = &config.device_name;
+    #[cfg(feature = "vim4")]
+    let device_name = hdmi.as_ref().map_or(device_name, |source| &source.pcm_name);
     // Non-blocking mode guarantees that stop() can always join the worker.
-    let pcm = PCM::new(&config.device_name, Direction::Capture, true).map_err(|error| {
+    let pcm = PCM::new(device_name, Direction::Capture, true).map_err(|error| {
         AppError::AudioError(format!(
             "Failed to open audio device {}: {}",
             config.device_name, error
@@ -48,6 +61,14 @@ pub(super) fn run_capture(
     let mut consecutive_errors = 0;
 
     while !stop_flag.load(Ordering::Acquire) {
+        // Check before XRUN recovery too: the old native clock must never be
+        // restarted after a source change. The controller opens a fresh plug PCM.
+        #[cfg(feature = "vim4")]
+        if let Some(source) = &hdmi {
+            if Some(source.snapshot()?) != format {
+                return Err(AppError::AudioError("HDMI audio format changed".into()));
+            }
+        }
         match pcm.state() {
             State::XRun => {
                 warn_throttled!(log_throttler, "xrun", "Audio buffer overrun, recovering");

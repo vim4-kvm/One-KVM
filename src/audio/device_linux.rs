@@ -113,7 +113,9 @@ fn query_device_caps(pcm: &PCM) -> (Vec<u32>, Vec<u32>) {
         Err(_) => return (vec![], vec![]),
     };
 
-    let common_rates = [8000, 16000, 22050, 44100, 48000, 96000];
+    let common_rates = [
+        8000, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000,
+    ];
     let mut supported_rates = Vec::new();
 
     for rate in &common_rates {
