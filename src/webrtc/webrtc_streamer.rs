@@ -157,11 +157,29 @@ impl WebRtcStreamer {
         *self.video_codec.read().await
     }
 
+    async fn compatible_video_codec(&self, codec: VideoCodecType) -> VideoCodecType {
+        #[cfg(feature = "vim4")]
+        if codec == VideoCodecType::H265
+            && crate::platform::vim4::VideoBackend::current()
+                == crate::platform::vim4::VideoBackend::Wave5
+        {
+            let config = self.config.read().await;
+            let source = crate::platform::vim4::signal()
+                .map(|signal| signal.0)
+                .unwrap_or(config.resolution);
+            if crate::platform::vim4::video_backend::wave5_requires_h264(config.output, source) {
+                return VideoCodecType::H264;
+            }
+        }
+        codec
+    }
+
     /// Set video codec type
     ///
     /// Supports H264, H265, VP8, VP9. This will restart the video pipeline
     /// and close all existing sessions.
     pub async fn set_video_codec(&self, codec: VideoCodecType) -> Result<()> {
+        let codec = self.compatible_video_codec(codec).await;
         let current = *self.video_codec.read().await;
         if current == codec {
             return Ok(());
@@ -539,19 +557,10 @@ impl WebRtcStreamer {
             }
         }
 
-        let codec = *self.video_codec.read().await;
-        #[cfg(feature = "vim4")]
+        let requested_codec = *self.video_codec.read().await;
+        let codec = self.compatible_video_codec(requested_codec).await;
         let codec = {
-            use crate::platform::vim4::{VideoBackend, video_backend::wave5_requires_h264};
-            let config = self.config.read().await;
-            let source = crate::platform::vim4::signal()
-                .map(|signal| signal.0)
-                .unwrap_or(config.resolution);
-            let fallback = VideoBackend::current() == VideoBackend::Wave5
-                && codec == VideoCodecType::H265
-                && wave5_requires_h264(config.output, source);
-            drop(config);
-            if fallback {
+            if codec != requested_codec {
                 warn!("Wave5 HEVC cannot represent this visible size; falling back to H.264");
                 // The pipeline lock is held here; do not use the idle-stop
                 // wrapper, which would acquire that lock again.
@@ -1147,10 +1156,12 @@ impl WebRtcStreamer {
     /// Create a new WebRTC session
     pub async fn create_session(&self) -> Result<String> {
         let session_id = uuid::Uuid::new_v4().to_string();
-        let codec = *self.video_codec.read().await;
 
         // Ensure video pipeline is running
         let pipeline = self.ensure_video_pipeline().await?;
+        // Creating the pipeline can fall back to a codec compatible with the
+        // measured input. SDP must describe that encoder, not the old request.
+        let codec = *self.video_codec.read().await;
 
         // Create session config
         let config = self.config.read().await;
