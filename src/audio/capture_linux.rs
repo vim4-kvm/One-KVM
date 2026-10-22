@@ -73,6 +73,7 @@ pub(super) fn run_capture(
     let mut buffer = vec![0u8; period_frames * config.channels as usize * 2];
     let io: IO<u8> = pcm.io_bytes();
     let mut consecutive_errors = 0;
+    let mut native_stats = crate::audio::diagnostics::PcmStats::new("native", config.sample_rate);
 
     while !stop_flag.load(Ordering::Acquire) {
         // Check before XRUN recovery too: the old native clock must never be
@@ -85,6 +86,9 @@ pub(super) fn run_capture(
         }
         match pcm.state() {
             State::XRun => {
+                if let Some(stats) = &mut native_stats {
+                    stats.xruns += 1;
+                }
                 warn_throttled!(log_throttler, "xrun", "Audio buffer overrun, recovering");
                 pcm.prepare().map_err(|error| {
                     AppError::AudioError(format!("Failed to recover audio xrun: {error}"))
@@ -114,6 +118,11 @@ pub(super) fn run_capture(
             Ok(frames_read) => {
                 consecutive_errors = 0;
                 let byte_count = frames_read * config.channels as usize * 2;
+                if config.channels == 2 {
+                    if let Some(stats) = &mut native_stats {
+                        stats.observe(&buffer[..byte_count]);
+                    }
+                }
                 if frame_tx.receiver_count() > 0 {
                     #[cfg(feature = "vim4")]
                     let converted = resampler
@@ -138,7 +147,12 @@ pub(super) fn run_capture(
                     let _ = frame_tx.send(frame);
                 }
             }
-            Err(error) if error.errno() == libc::EAGAIN => thread::sleep(RETRY_DELAY),
+            Err(error) if error.errno() == libc::EAGAIN => {
+                if let Some(stats) = &mut native_stats {
+                    stats.eagain += 1;
+                }
+                thread::sleep(RETRY_DELAY);
+            }
             Err(error) if is_device_lost_errno(error.errno()) => {
                 return Err(AppError::AudioError(format!(
                     "Audio device lost while reading {}: {}",
@@ -146,6 +160,9 @@ pub(super) fn run_capture(
                 )));
             }
             Err(error) if error.errno() == libc::EPIPE => {
+                if let Some(stats) = &mut native_stats {
+                    stats.xruns += 1;
+                }
                 warn_throttled!(log_throttler, "buffer_overrun", "Audio buffer overrun");
                 pcm.prepare().map_err(|prepare_error| {
                     AppError::AudioError(format!(

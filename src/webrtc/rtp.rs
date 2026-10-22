@@ -51,6 +51,7 @@ fn opus_restart_gap(
 pub struct OpusAudioTrack {
     track: Arc<TrackLocalStaticSample>,
     previous_encoded: Mutex<Option<(Instant, Duration)>>,
+    stats: Option<Mutex<crate::audio::diagnostics::SendStats>>,
 }
 
 impl OpusAudioTrack {
@@ -72,6 +73,7 @@ impl OpusAudioTrack {
         Self {
             track,
             previous_encoded: Mutex::new(None),
+            stats: crate::audio::diagnostics::SendStats::new().map(Mutex::new),
         }
     }
 
@@ -112,7 +114,17 @@ impl OpusAudioTrack {
         let sample = opus_sample(frame, previous_sequence);
         *previous = Some((frame.encoded_at, sample.duration));
 
-        self.track.write_sample(&sample).await.map_err(|e| {
+        let started = Instant::now();
+        let result = self.track.write_sample(&sample).await;
+        if let Some(stats) = &self.stats {
+            stats.lock().await.observe(
+                frame.encoded_at,
+                started,
+                sample.prev_dropped_packets,
+                result.is_err(),
+            );
+        }
+        result.map_err(|e| {
             error!("Failed to write Opus sample: {}", e);
             AppError::WebRtcError(format!("Failed to write audio sample: {}", e))
         })

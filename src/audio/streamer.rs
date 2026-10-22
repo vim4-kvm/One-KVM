@@ -321,6 +321,7 @@ impl AudioStreamer {
         debug!("Audio stream task started (48 kHz stereo → Opus, mpsc fan-out)");
 
         let mut pending: Vec<i16> = Vec::new();
+        let mut pcm_stats = super::diagnostics::PcmStats::new("encoder-input", 48000);
 
         loop {
             if stop_flag.load(Ordering::Relaxed) {
@@ -366,6 +367,9 @@ impl AudioStreamer {
                     };
                     let mut frames = PcmFrames::new(&mut pending, samples);
                     while let Some(samples) = frames.next_frame() {
+                        if let Some(stats) = &mut pcm_stats {
+                            stats.observe(bytemuck::cast_slice(samples));
+                        }
                         let opus_result = {
                             let mut enc_guard = encoder.lock().await;
                             (*enc_guard).as_mut().map(|enc| enc.encode(samples))

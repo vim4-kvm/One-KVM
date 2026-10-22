@@ -24,6 +24,13 @@
 | USB 网卡 | NCM / ECM / RNDIS，独立 NetworkManager DHCP/NAT 连接 |
 | HDR / EDID | 原生视频菜单和设置页调用共享板级助手，与 vim4-manager 共用 HDR 曲线 |
 
+定位音频连续性时可临时设置 `ONEKVM_AUDIO_STATS=1`：每五秒汇总原生双声道
+PCM、Opus 编码前 PCM 的帧数、相邻样本差及读取间隔，另报 XRUN、非阻塞
+读取 EAGAIN 和每条 WebRTC 音轨的序列缺口、发送耗时。计数占用固定内存，
+不保存 PCM/Opus 载荷，默认关闭。`steps_over_500` 仅是 S16 样本差计数，
+适合已知测试音对照，不能据此判定任意音乐有爆音；读取 EAGAIN 也不是 XRUN。
+采样需独占板子并避开并行构建，结合接收端解码与播放输出区分发送和播放问题。
+
 应用以 khadas 运行，不创建、删除 USB gadget，不重启 HDMI 服务。
 仅用户明确应用 EDID 时调用共享助手重新协商显示器；普通观看、调码率与缩放不触发 HPD。
 虚拟介质经限定 sudo 助手操作 configfs，本地镜像保存在
