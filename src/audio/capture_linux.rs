@@ -36,6 +36,12 @@ pub(super) fn run_capture(
     let device_name = &config.device_name;
     #[cfg(feature = "vim4")]
     let device_name = hdmi.as_ref().map_or(device_name, |source| &source.pcm_name);
+    #[cfg(feature = "vim4")]
+    let hdmi_config = hdmi
+        .as_ref()
+        .map(|_| crate::audio::hdmi_linux::capture_config(config));
+    #[cfg(feature = "vim4")]
+    let config = hdmi_config.as_ref().unwrap_or(config);
     // Non-blocking mode guarantees that stop() can always join the worker.
     let pcm = PCM::new(device_name, Direction::Capture, true).map_err(|error| {
         AppError::AudioError(format!(

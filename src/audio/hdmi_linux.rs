@@ -3,7 +3,19 @@
 use alsa::ctl::{Ctl, ElemId, ElemIface, ElemType, ElemValue};
 use std::ffi::CString;
 
+use super::AudioConfig;
 use crate::error::{AppError, Result};
+
+pub(super) fn capture_config(config: &AudioConfig) -> AudioConfig {
+    // All supported HDMI rates have integral 20 ms periods. Keep five whole
+    // periods in both sides of ALSA's rate plugin: a 4096-frame 48 kHz buffer
+    // becomes 2730 frames at 32 kHz and corrupts samples at every ring wrap.
+    AudioConfig {
+        period_frames: config.sample_rate / 50,
+        buffer_frames: config.sample_rate / 10,
+        ..config.clone()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct SourceFormat {
@@ -114,5 +126,18 @@ mod tests {
         }
         .ready());
         assert!(!SourceFormat { rate: 0, ..valid }.ready());
+    }
+
+    #[test]
+    fn resampling_keeps_whole_periods_on_both_sides_of_the_ring() {
+        let config = capture_config(&AudioConfig::default());
+        for native in [32000u64, 44100, 48000, 88200, 96000, 176400, 192000] {
+            let period = u64::from(config.period_frames) * native;
+            let buffer = u64::from(config.buffer_frames) * native;
+            let client = u64::from(config.sample_rate);
+            assert_eq!(period % client, 0);
+            assert_eq!(buffer % client, 0);
+            assert_eq!((buffer / client) % (period / client), 0);
+        }
     }
 }
