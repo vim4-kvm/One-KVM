@@ -1,9 +1,9 @@
 //! VIM4 keeps capture buffers in DMA memory until the hardware encoder consumes them.
 use super::*;
+use crate::platform::vim4::VideoBackend;
 use crate::video::codec::BitratePreset;
 use gst::prelude::*;
 use gstreamer as gst;
-use crate::platform::vim4::VideoBackend;
 
 mod wave5;
 
@@ -192,9 +192,11 @@ impl SharedVideoPipeline {
             .0
             .bus()
             .ok_or_else(|| AppError::VideoError("Missing bus".into()))?;
-        if VideoBackend::current() == VideoBackend::Wave5 {
-            wave5::configure(&capture.0, config, source.0)?;
-        }
+        let progress = if VideoBackend::current() == VideoBackend::Wave5 {
+            Some(wave5::configure(&capture.0, config, source.0)?)
+        } else {
+            None
+        };
         capture
             .0
             .set_state(gst::State::Playing)
@@ -209,7 +211,16 @@ impl SharedVideoPipeline {
         let mut frames = 0;
         let mut stats_time = Instant::now();
         let mut idle_since = None;
+        let mut total_frames = 0u64;
+        let mut progress_time = Instant::now();
+        info!(?source, codec = ?config.output_codec, "VIM4 capture started");
         while self.running_flag.load(Ordering::Acquire) {
+            if progress_time.elapsed() >= Duration::from_secs(5) {
+                info!(raw = ?progress.as_ref().map(|p| p.counts()), encoded = total_frames,
+                    last_frame_ms = last_frame.elapsed().as_millis() as u64,
+                    pipeline_state = ?capture.0.state(gst::ClockTime::ZERO), "VIM4 capture progress");
+                progress_time = Instant::now();
+            }
             if self.snapshot_idle_expired(&mut idle_since) {
                 self.running_flag.store(false, Ordering::Release);
                 break;
@@ -241,6 +252,10 @@ impl SharedVideoPipeline {
                 }
             }
             if let Some(msg) = bus.pop_filtered(&[gst::MessageType::Error, gst::MessageType::Eos]) {
+                warn!(raw = ?progress.as_ref().map(|p| p.counts()), encoded = total_frames,
+                    last_frame_ms = last_frame.elapsed().as_millis() as u64,
+                    signal = ?crate::platform::vim4::signal(),
+                    pipeline_state = ?capture.0.state(gst::ClockTime::ZERO), "VIM4 capture bus stop");
                 return Err(AppError::VideoError(format!(
                     "Capture stopped: {:?}",
                     msg.view()
@@ -248,6 +263,8 @@ impl SharedVideoPipeline {
             }
             let Some(sample) = sink.try_pull_sample(gst::ClockTime::from_mseconds(100)) else {
                 if last_frame.elapsed() > Duration::from_secs(3) {
+                    warn!(raw = ?progress.as_ref().map(|p| p.counts()), encoded = total_frames,
+                        signal = ?crate::platform::vim4::signal(), "VIM4 capture timeout");
                     return Err(AppError::VideoError("HDMI capture stalled".into()));
                 }
                 continue;
@@ -301,6 +318,7 @@ impl SharedVideoPipeline {
             let reservations = self.reserve_outputs().unwrap_or_default();
             self.broadcast_encoded_batch(vec![frame].into(), reservations);
             frames += 1;
+            total_frames += 1;
             if stats_time.elapsed() >= Duration::from_secs(1) {
                 self.stats.lock().current_fps = frames as f32 / stats_time.elapsed().as_secs_f32();
                 frames = 0;

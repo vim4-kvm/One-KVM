@@ -5,11 +5,26 @@ use gstreamer_allocators::{DmaBufAllocator, DmaBufAllocatorExtManual, DmaBufMemo
 use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
 use std::os::fd::{AsRawFd, BorrowedFd};
 use v4l2r::bindings::{
-    V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, V4L2_CTRL_FLAG_DISABLED, v4l2_queryctrl,
+    v4l2_queryctrl, V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, V4L2_CTRL_FLAG_DISABLED,
 };
 
 v4l2r::nix::ioctl_readwrite!(query_control, b'V', 36, v4l2_queryctrl);
 const INTRA_REFRESH_PERIOD: i32 = 45;
+
+#[derive(Default)]
+pub(super) struct Progress {
+    received: AtomicU64,
+    pushed: AtomicU64,
+}
+
+impl Progress {
+    pub(super) fn counts(&self) -> (u64, u64) {
+        (
+            self.received.load(Ordering::Relaxed),
+            self.pushed.load(Ordering::Relaxed),
+        )
+    }
+}
 
 fn require_intra_refresh(device: &std::path::Path) -> Result<()> {
     let file = std::fs::File::open(device)?;
@@ -171,7 +186,7 @@ pub(super) fn configure(
     pipeline: &gst::Pipeline,
     config: &SharedVideoPipelineConfig,
     source: Resolution,
-) -> Result<()> {
+) -> Result<Arc<Progress>> {
     let missing = |name| AppError::VideoError(format!("Missing Wave5 element {name}"));
     let capture = pipeline
         .by_name("source")
@@ -229,7 +244,7 @@ pub(super) fn configure(
     attach_plane_bridge(pipeline, output_resolution(config.output, source))
 }
 
-fn attach_plane_bridge(pipeline: &gst::Pipeline, source: Resolution) -> Result<()> {
+fn attach_plane_bridge(pipeline: &gst::Pipeline, source: Resolution) -> Result<Arc<Progress>> {
     let missing = |name| AppError::VideoError(format!("Missing Wave5 element {name}"));
     let input = pipeline
         .by_name("encoder_source")
@@ -264,23 +279,30 @@ fn attach_plane_bridge(pipeline: &gst::Pipeline, source: Resolution) -> Result<(
         .ok_or_else(|| missing("frames"))?
         .set_property("enable-last-sample", false);
     let eos_input = input.clone();
+    let progress = Arc::new(Progress::default());
+    let counters = progress.clone();
     bridge.set_callbacks(
         AppSinkCallbacks::builder()
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                counters.received.fetch_add(1, Ordering::Relaxed);
                 let buffer = sample.buffer_owned().ok_or(gst::FlowError::Error)?;
                 let view = plane_view(&buffer, source.width, source.height).map_err(|error| {
                     tracing::error!("{error}");
                     gst::FlowError::Error
                 })?;
-                input.push_buffer(view)
+                let result = input.push_buffer(view);
+                if result.is_ok() {
+                    counters.pushed.fetch_add(1, Ordering::Relaxed);
+                }
+                result
             })
             .eos(move |_| {
                 let _ = eos_input.end_of_stream();
             })
             .build(),
     );
-    Ok(())
+    Ok(progress)
 }
 
 #[cfg(test)]
@@ -408,22 +430,18 @@ mod tests {
         pipeline.set_state(gst::State::Playing).unwrap();
         let mut allocation = gst::query::Allocation::new(None, false);
         assert!(input.static_pad("src").unwrap().peer_query(&mut allocation));
-        assert!(
-            allocation
-                .find_allocation_meta::<gstreamer_video::VideoMeta>()
-                .is_some()
-        );
+        assert!(allocation
+            .find_allocation_meta::<gstreamer_video::VideoMeta>()
+            .is_some());
         input.push_buffer(parent).unwrap();
         let sample = output
             .try_pull_sample(gst::ClockTime::from_seconds(2))
             .unwrap();
-        assert!(
-            sample
-                .buffer()
-                .unwrap()
-                .meta::<gst::ParentBufferMeta>()
-                .is_some()
-        );
+        assert!(sample
+            .buffer()
+            .unwrap()
+            .meta::<gst::ParentBufferMeta>()
+            .is_some());
         drop(sample);
         let bridge = pipeline.by_name("plane_bridge").unwrap();
         let cached = bridge
@@ -464,20 +482,16 @@ mod tests {
         b.set_pts(gst::ClockTime::from_mseconds(42));
         b.set_duration(gst::ClockTime::from_nseconds(16_666_667));
         b.set_flags(gst::BufferFlags::DELTA_UNIT);
-        assert!(
-            source
-                .peek_memory(0)
-                .downcast_memory_ref::<DmaBufMemory>()
-                .is_some()
-        );
+        assert!(source
+            .peek_memory(0)
+            .downcast_memory_ref::<DmaBufMemory>()
+            .is_some());
         let cached = cached_bitstream(&source).unwrap();
         assert_eq!(cached.size(), 16);
-        assert!(
-            cached
-                .peek_memory(0)
-                .downcast_memory_ref::<DmaBufMemory>()
-                .is_none()
-        );
+        assert!(cached
+            .peek_memory(0)
+            .downcast_memory_ref::<DmaBufMemory>()
+            .is_none());
         assert_eq!(cached.pts(), source.pts());
         assert_eq!(cached.duration(), source.duration());
         // TAG_MEMORY describes pool memory replacement, not encoded frame type.
