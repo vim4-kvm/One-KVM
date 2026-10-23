@@ -287,6 +287,9 @@ pub enum AppError {
     #[error("Audio error: {0}")]
     AudioError(String),
 
+    #[error("HDMI audio source changed or is not ready")]
+    AudioSourceChanged,
+
     #[error("HID error [{backend}]: {reason} (code: {error_code})")]
     HidError {
         backend: String,

@@ -61,6 +61,7 @@ pub enum CaptureState {
     Stopped,
     Starting,
     Running,
+    SourceChanged,
     Error,
 }
 
@@ -132,6 +133,10 @@ impl AudioCapturer {
             match imp::run_capture(&config, &state, &frame_tx, &stop_flag, &log_throttler) {
                 Ok(()) => {
                     let _ = state.send(CaptureState::Stopped);
+                }
+                Err(crate::error::AppError::AudioSourceChanged) => {
+                    debug!("HDMI audio capture waiting for source recovery");
+                    let _ = state.send(CaptureState::SourceChanged);
                 }
                 Err(error) => {
                     crate::error_throttled!(

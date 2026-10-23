@@ -15,6 +15,10 @@ pub(super) struct SourceFormat {
 }
 
 impl SourceFormat {
+    pub fn can_open_after(self, current: Self) -> bool {
+        self.ready() && self == current
+    }
+
     pub fn capture_config(self, config: &AudioConfig) -> AudioConfig {
         let rate = self.rate as u32;
         // Native capture avoids ALSA rate's fractional slave rings. T7 needs
@@ -95,7 +99,7 @@ impl HdmiSource {
                 return Ok(format);
             }
         }
-        Err(error("format changed during query"))
+        Err(AppError::AudioSourceChanged)
     }
 }
 
@@ -127,6 +131,29 @@ mod tests {
         }
         .ready());
         assert!(!SourceFormat { rate: 0, ..valid }.ready());
+    }
+
+    #[test]
+    fn loss_or_new_generation_during_qualification_defers_pcm_open() {
+        let ready = SourceFormat {
+            generation: 3,
+            rate: 48000,
+            channels: 2,
+            state: 1,
+        };
+        let lost = SourceFormat { state: 0, ..ready };
+        let reconnected = SourceFormat {
+            generation: 5,
+            ..ready
+        };
+        assert!(!ready.can_open_after(lost));
+        assert!(!ready.can_open_after(reconnected));
+        assert!(!lost.can_open_after(lost));
+        assert!(reconnected.can_open_after(reconnected));
+        assert!(!ready.can_open_after(SourceFormat {
+            rate: 44100,
+            ..ready
+        }));
     }
 
     #[test]

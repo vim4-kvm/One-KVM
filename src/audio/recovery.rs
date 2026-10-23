@@ -238,6 +238,13 @@ impl AudioRecovery {
                 return;
             }
 
+            // Backoff and card enumeration are not a lease on the HDMI link.
+            // Do not open a PCM using a readiness sample taken before sleep.
+            #[cfg(all(target_os = "linux", feature = "vim4"))]
+            if !super::hdmi_linux::source_ready(&config.device).unwrap_or(false) {
+                continue;
+            }
+
             let devices = match enumerate_audio_devices() {
                 Ok(devices) => devices,
                 Err(error) => {

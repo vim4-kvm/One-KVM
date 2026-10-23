@@ -29,9 +29,21 @@ pub(super) fn run_capture(
     let format = hdmi.as_ref().map(|source| source.snapshot()).transpose()?;
     #[cfg(feature = "vim4")]
     if format.is_some_and(|format| !format.ready()) {
-        return Err(AppError::AudioError(
-            "HDMI audio source is not ready".into(),
-        ));
+        return Err(AppError::AudioSourceChanged);
+    }
+    #[cfg(feature = "vim4")]
+    if let Some(source) = &hdmi {
+        // Controls can lag a physical link transition by one receiver-worker
+        // tick. Require the same generation after that qualification window.
+        for _ in 0..40 {
+            if stop_flag.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            thread::sleep(RETRY_DELAY);
+        }
+        if !format.unwrap().can_open_after(source.snapshot()?) {
+            return Err(AppError::AudioSourceChanged);
+        }
     }
     let device_name = &config.device_name;
     #[cfg(feature = "vim4")]
@@ -58,9 +70,13 @@ pub(super) fn run_capture(
         ))
     })?;
 
-    configure_pcm(&pcm, config)?;
+    #[cfg(feature = "vim4")]
+    let native_hdmi = hdmi.is_some();
+    #[cfg(not(feature = "vim4"))]
+    let native_hdmi = false;
+    configure_pcm(&pcm, config, native_hdmi)?;
     pcm.prepare()
-        .map_err(|error| AppError::AudioError(format!("Failed to prepare PCM: {error}")))?;
+        .map_err(|error| pcm_setup_error(error, native_hdmi))?;
     let _ = state.send(CaptureState::Running);
 
     let period_frames = pcm
@@ -80,15 +96,14 @@ pub(super) fn run_capture(
         #[cfg(feature = "vim4")]
         if let Some(source) = &hdmi {
             if Some(source.snapshot()?) != format {
-                return Err(AppError::AudioError("HDMI audio format changed".into()));
+                return Err(AppError::AudioSourceChanged);
             }
         }
         match pcm.state() {
             State::XRun => {
                 warn_throttled!(log_throttler, "xrun", "Audio buffer overrun, recovering");
-                pcm.prepare().map_err(|error| {
-                    AppError::AudioError(format!("Failed to recover audio xrun: {error}"))
-                })?;
+                pcm.prepare()
+                    .map_err(|error| pcm_setup_error(error, native_hdmi))?;
                 consecutive_errors = 0;
                 continue;
             }
@@ -99,9 +114,8 @@ pub(super) fn run_capture(
                     "Audio device suspended, recovering"
                 );
                 if pcm.resume().is_err() {
-                    pcm.prepare().map_err(|error| {
-                        AppError::AudioError(format!("Failed to resume audio capture: {error}"))
-                    })?;
+                    pcm.prepare()
+                        .map_err(|error| pcm_setup_error(error, native_hdmi))?;
                 }
                 consecutive_errors = 0;
                 continue;
@@ -139,6 +153,9 @@ pub(super) fn run_capture(
                 }
             }
             Err(error) if error.errno() == libc::EAGAIN => thread::sleep(RETRY_DELAY),
+            Err(error) if native_hdmi && matches!(error.errno(), libc::ENOLINK | libc::ERANGE) => {
+                return Err(AppError::AudioSourceChanged);
+            }
             Err(error) if is_device_lost_errno(error.errno()) => {
                 return Err(AppError::AudioError(format!(
                     "Audio device lost while reading {}: {}",
@@ -147,11 +164,8 @@ pub(super) fn run_capture(
             }
             Err(error) if error.errno() == libc::EPIPE => {
                 warn_throttled!(log_throttler, "buffer_overrun", "Audio buffer overrun");
-                pcm.prepare().map_err(|prepare_error| {
-                    AppError::AudioError(format!(
-                        "Failed to recover after audio overrun ({error}): {prepare_error}"
-                    ))
-                })?;
+                pcm.prepare()
+                    .map_err(|prepare_error| pcm_setup_error(prepare_error, native_hdmi))?;
                 consecutive_errors = 0;
             }
             Err(error) => {
@@ -171,7 +185,17 @@ pub(super) fn run_capture(
     Ok(())
 }
 
-fn configure_pcm(pcm: &PCM, config: &AudioConfig) -> Result<()> {
+fn pcm_setup_error(error: alsa::Error, native_hdmi: bool) -> AppError {
+    // These errors can race the controls snapshot: let serialized recovery
+    // requalify and reopen, preserving real I/O/configuration errors below.
+    if native_hdmi && matches!(error.errno(), libc::ENOLINK | libc::EAGAIN | libc::ERANGE) {
+        AppError::AudioSourceChanged
+    } else {
+        AppError::AudioError(format!("Failed to configure audio PCM: {error}"))
+    }
+}
+
+fn configure_pcm(pcm: &PCM, config: &AudioConfig, native_hdmi: bool) -> Result<()> {
     let params = HwParams::any(pcm)
         .map_err(|error| AppError::AudioError(format!("Failed to get HwParams: {error}")))?;
     params
@@ -182,7 +206,7 @@ fn configure_pcm(pcm: &PCM, config: &AudioConfig) -> Result<()> {
         .and_then(|_| params.set_buffer_size_near(config.buffer_frames as Frames))
         .and_then(|_| params.set_period_size_near(config.period_frames as Frames, ValueOr::Nearest))
         .and_then(|_| pcm.hw_params(&params))
-        .map_err(|error| AppError::AudioError(format!("Failed to configure audio PCM: {error}")))?;
+        .map_err(|error| pcm_setup_error(error, native_hdmi))?;
 
     let actual = pcm
         .hw_params_current()

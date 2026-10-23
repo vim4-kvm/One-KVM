@@ -202,6 +202,7 @@ impl AudioStreamer {
                 let current_state = *capture_state.borrow();
                 match current_state {
                     CaptureState::Running => return Ok(()),
+                    CaptureState::SourceChanged => return Err(AppError::AudioSourceChanged),
                     CaptureState::Error => {
                         return Err(AppError::AudioError(
                             "Audio capture failed to start".to_string(),
@@ -327,8 +328,8 @@ impl AudioStreamer {
                 break;
             }
 
-            if capturer.state() == CaptureState::Error {
-                error!("Audio capture error, stopping stream");
+            if matches!(capturer.state(), CaptureState::Error | CaptureState::SourceChanged) {
+                debug!("Audio capture ended, waiting for recovery");
                 let _ = state.send(AudioStreamState::Error);
                 break;
             }
