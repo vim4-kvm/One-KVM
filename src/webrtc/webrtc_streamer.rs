@@ -157,29 +157,11 @@ impl WebRtcStreamer {
         *self.video_codec.read().await
     }
 
-    async fn compatible_video_codec(&self, codec: VideoCodecType) -> VideoCodecType {
-        #[cfg(feature = "vim4")]
-        if codec == VideoCodecType::H265
-            && crate::platform::vim4::VideoBackend::current()
-                == crate::platform::vim4::VideoBackend::Wave5
-        {
-            let config = self.config.read().await;
-            let source = crate::platform::vim4::signal()
-                .map(|signal| signal.0)
-                .unwrap_or(config.resolution);
-            if crate::platform::vim4::video_backend::wave5_requires_h264(config.output, source) {
-                return VideoCodecType::H264;
-            }
-        }
-        codec
-    }
-
     /// Set video codec type
     ///
     /// Supports H264, H265, VP8, VP9. This will restart the video pipeline
     /// and close all existing sessions.
     pub async fn set_video_codec(&self, codec: VideoCodecType) -> Result<()> {
-        let codec = self.compatible_video_codec(codec).await;
         let current = *self.video_codec.read().await;
         if current == codec {
             return Ok(());
@@ -379,8 +361,7 @@ impl WebRtcStreamer {
         let previous_codec = self.current_video_codec().await;
         let pipeline = self.ensure_video_pipeline().await?;
         if previous_codec != self.current_video_codec().await {
-            // A codec fallback closed the old SDP sessions. The frontend opens
-            // fresh sessions following stream.mode_changed.
+            // A concurrent codec switch invalidates the captured SDP sessions.
             return Ok(0);
         }
         for (session_id, session) in &sessions_to_reconnect {
@@ -557,26 +538,7 @@ impl WebRtcStreamer {
             }
         }
 
-        let requested_codec = *self.video_codec.read().await;
-        let codec = self.compatible_video_codec(requested_codec).await;
-        let codec = {
-            if codec != requested_codec {
-                warn!("Wave5 HEVC cannot represent this visible size; falling back to H.264");
-                // The pipeline lock is held here; do not use the idle-stop
-                // wrapper, which would acquire that lock again.
-                self.close_sessions().await;
-                *self.video_codec.write().await = VideoCodecType::H264;
-                self.publish_stream_event(SystemEvent::StreamModeChanged {
-                    transition_id: None,
-                    mode: "h264".into(),
-                    previous_mode: "h265".into(),
-                })
-                .await;
-                VideoCodecType::H264
-            } else {
-                codec
-            }
-        };
+        let codec = *self.video_codec.read().await;
         let pipeline_config = {
             let config = self.config.read().await;
             SharedVideoPipelineConfig {
@@ -1159,8 +1121,6 @@ impl WebRtcStreamer {
 
         // Ensure video pipeline is running
         let pipeline = self.ensure_video_pipeline().await?;
-        // Creating the pipeline can fall back to a codec compatible with the
-        // measured input. SDP must describe that encoder, not the old request.
         let codec = *self.video_codec.read().await;
 
         // Create session config
@@ -1601,6 +1561,29 @@ impl Default for WebRtcStreamer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "vim4")]
+    #[tokio::test]
+    async fn hevc_selection_preserves_non_aligned_visible_geometry() {
+        let streamer = WebRtcStreamer::new();
+        for resolution in [
+            Resolution::new(1366, 768),
+            Resolution::new(1440, 900),
+            Resolution::new(1680, 1050),
+        ] {
+            streamer.config.write().await.resolution = resolution;
+            streamer
+                .set_video_codec(VideoCodecType::H264)
+                .await
+                .unwrap();
+            streamer
+                .set_video_codec(VideoCodecType::H265)
+                .await
+                .unwrap();
+            assert_eq!(streamer.current_video_codec().await, VideoCodecType::H265);
+            assert_eq!(streamer.config.read().await.resolution, resolution);
+        }
+    }
 
     #[cfg(feature = "vim4")]
     #[tokio::test]

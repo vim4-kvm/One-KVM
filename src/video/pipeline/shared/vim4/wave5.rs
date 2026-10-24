@@ -370,27 +370,35 @@ mod tests {
 
     #[test]
     fn padded_rows_preserve_visible_width_and_chroma_address() {
-        let (width, height, stride) = (1366, 768, 1376);
-        let luma = stride * height;
-        let mut parent = buffer(stride, height, luma * 3 / 2);
-        gstreamer_video::VideoMeta::add_full(
-            parent.get_mut().unwrap(),
-            gstreamer_video::VideoFrameFlags::empty(),
-            gstreamer_video::VideoFormat::Nv12,
-            width as u32,
-            height as u32,
-            &[0, luma],
-            &[stride as i32, stride as i32],
-        )
-        .unwrap();
-        let view = plane_view(&parent, width as u32, height as u32).unwrap();
-        let meta = view.meta::<gstreamer_video::VideoMeta>().unwrap();
-        assert_eq!(meta.width(), width as u32);
-        assert_eq!(meta.stride(), [stride as i32, stride as i32]);
-        assert_eq!(view.peek_memory(1).offset(), luma);
-        assert!(parent.get_mut().is_none());
-        drop(view);
-        assert!(parent.get_mut().is_some());
+        for (width, height, stride) in [
+            (1366, 768, 1376),
+            (1440, 900, 1440),
+            (1680, 1050, 1696),
+        ] {
+            let luma = stride * height;
+            let aligned = stride * ((height + 15) & !15);
+            let mut parent = buffer(stride, height, luma + aligned / 2);
+            gstreamer_video::VideoMeta::add_full(
+                parent.get_mut().unwrap(),
+                gstreamer_video::VideoFrameFlags::empty(),
+                gstreamer_video::VideoFormat::Nv12,
+                width as u32,
+                height as u32,
+                &[0, luma],
+                &[stride as i32, stride as i32],
+            )
+            .unwrap();
+            let view = plane_view(&parent, width as u32, height as u32).unwrap();
+            let meta = view.meta::<gstreamer_video::VideoMeta>().unwrap();
+            assert_eq!((meta.width(), meta.height()), (width as u32, height as u32));
+            assert_eq!(meta.stride(), [stride as i32, stride as i32]);
+            assert_eq!(meta.offset(), [0, aligned]);
+            assert_eq!(view.peek_memory(1).offset(), luma);
+            assert_eq!(view.peek_memory(1).size(), aligned / 2);
+            assert!(parent.get_mut().is_none());
+            drop(view);
+            assert!(parent.get_mut().is_some());
+        }
     }
 
     #[test]
