@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/dma-heap.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -71,6 +72,51 @@ static void held_buffers_and_shared_views_are_not_recycled(void)
     assert(fcntl(third_fd, F_GETFD) == -1 && errno == EBADF);
 }
 
+typedef struct {
+    GstAllocator *allocator;
+    pthread_barrier_t *barrier;
+    int *descriptors;
+    unsigned index;
+} ConcurrentWorker;
+
+static void *allocate_concurrently(void *argument)
+{
+    ConcurrentWorker *worker = argument;
+    for (unsigned frame = 0; frame < 1000; frame++) {
+        GstMemory *memory = gst_allocator_alloc(worker->allocator, 4096, NULL);
+        assert(memory);
+        worker->descriptors[worker->index] = gst_dmabuf_memory_get_fd(memory);
+        pthread_barrier_wait(worker->barrier);
+        assert(worker->descriptors[0] != worker->descriptors[1]);
+        assert(fcntl(worker->descriptors[0], F_GETFD) >= 0);
+        assert(fcntl(worker->descriptors[1], F_GETFD) >= 0);
+        pthread_barrier_wait(worker->barrier);
+        gst_memory_unref(memory);
+        pthread_barrier_wait(worker->barrier);
+    }
+    return NULL;
+}
+
+static void concurrent_stages_keep_exclusive_buffer_ownership(void)
+{
+    GstAllocator *allocator = gst_amldma_allocator_obtain("heap-codecmm");
+    pthread_barrier_t barrier;
+    assert(pthread_barrier_init(&barrier, NULL, 2) == 0);
+    int descriptors[2];
+    pthread_t threads[2];
+    ConcurrentWorker workers[2];
+    for (unsigned index = 0; index < G_N_ELEMENTS(workers); index++) {
+        workers[index] = (ConcurrentWorker){ allocator, &barrier, descriptors, index };
+        assert(pthread_create(&threads[index], NULL, allocate_concurrently, &workers[index]) == 0);
+    }
+    for (unsigned index = 0; index < G_N_ELEMENTS(workers); index++)
+        assert(pthread_join(threads[index], NULL) == 0);
+    assert(pthread_barrier_destroy(&barrier) == 0);
+    gst_object_unref(allocator);
+    for (unsigned index = 0; index < G_N_ELEMENTS(workers); index++)
+        assert(fcntl(descriptors[index], F_GETFD) == -1 && errno == EBADF);
+}
+
 static void cache_is_bounded_and_allocation_failure_is_recoverable(void)
 {
     GstAllocator *allocator = gst_amldma_allocator_obtain("heap-codecmm");
@@ -109,6 +155,7 @@ int main(int argc, char **argv)
 {
     gst_init(&argc, &argv);
     held_buffers_and_shared_views_are_not_recycled();
+    concurrent_stages_keep_exclusive_buffer_ownership();
     cache_is_bounded_and_allocation_failure_is_recoverable();
     for (int i = 0; i < 100; i++) {
         GstAllocator *allocator = gst_amldma_allocator_obtain("heap-codecmm");
