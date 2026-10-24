@@ -7,11 +7,17 @@
 #include <linux/dma-buf.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <stdio.h>
 #include <gst/allocators/gstdmabuf.h>
 
 typedef struct {
     GstDmaBufAllocator parent;
     int heap_fd;
+    GMutex lock;
+    gint64 stats_at;
+    guint64 allocations;
+    guint64 allocation_us;
+    guint64 max_allocation_us;
 } GstVim4DmaAllocator;
 typedef GstDmaBufAllocatorClass GstVim4DmaAllocatorClass;
 G_DEFINE_TYPE(GstVim4DmaAllocator, gst_vim4_dma_allocator, GST_TYPE_DMABUF_ALLOCATOR)
@@ -26,12 +32,30 @@ int aml_dmabuf_sync(int fd, int phase)
 static GstMemory *allocate(GstAllocator *allocator, gsize size, GstAllocationParams *params)
 {
     GstVim4DmaAllocator *self = (GstVim4DmaAllocator *)allocator;
+    gint64 started = self->stats_at ? g_get_monotonic_time() : 0;
     if (size > G_MAXSIZE - params->prefix || size + params->prefix > G_MAXSIZE - params->padding)
         return NULL;
     gsize total = size + params->prefix + params->padding;
     struct dma_heap_allocation_data data = { .len = total, .fd_flags = O_RDWR | O_CLOEXEC };
     if (ioctl(self->heap_fd, DMA_HEAP_IOCTL_ALLOC, &data) < 0)
         return NULL;
+    if (started) {
+        gint64 now = g_get_monotonic_time();
+        guint64 elapsed = now - started;
+        g_mutex_lock(&self->lock);
+        self->allocations++;
+        self->allocation_us += elapsed;
+        self->max_allocation_us = MAX(self->max_allocation_us, elapsed);
+        if (now - self->stats_at >= 5 * G_USEC_PER_SEC) {
+            fprintf(stderr, "VIM4 DMA allocations count=%" G_GUINT64_FORMAT
+                    " mean_us=%" G_GUINT64_FORMAT " max_us=%" G_GUINT64_FORMAT " bytes=%zu\n",
+                    self->allocations, self->allocation_us / self->allocations,
+                    self->max_allocation_us, total);
+            self->stats_at = now;
+            self->allocations = self->allocation_us = self->max_allocation_us = 0;
+        }
+        g_mutex_unlock(&self->lock);
+    }
     GstMemory *memory = gst_dmabuf_allocator_alloc(allocator, data.fd, total);
     if (!memory) {
         close(data.fd);
@@ -46,6 +70,7 @@ static void finalize(GObject *object)
     GstVim4DmaAllocator *self = (GstVim4DmaAllocator *)object;
     if (self->heap_fd >= 0)
         close(self->heap_fd);
+    g_mutex_clear(&self->lock);
     G_OBJECT_CLASS(gst_vim4_dma_allocator_parent_class)->finalize(object);
 }
 
@@ -59,6 +84,9 @@ static void gst_vim4_dma_allocator_class_init(GstVim4DmaAllocatorClass *klass)
 static void gst_vim4_dma_allocator_init(GstVim4DmaAllocator *self)
 {
     self->heap_fd = -1;
+    g_mutex_init(&self->lock);
+    self->stats_at = g_strcmp0(g_getenv("ONEKVM_VIDEO_STATS"), "1") == 0
+        ? g_get_monotonic_time() : 0;
 }
 
 GstAllocator *gst_amldma_allocator_obtain(const char *name)
