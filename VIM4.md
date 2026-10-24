@@ -168,9 +168,21 @@ VIM4 网页 H.264/H.265 协商 RTP `playout-delay` 扩展，每帧首包请求�
 排查交互延迟时同时比较视频的实际、目标和最低 jitter buffer
 驻留时间：音视频同步增加的等待不能仅靠网络 jitter 或平均帧率判断。
 GE2D 缩放使用私有 `libgst-aml-dma-allocator.so`，仅实现 amlvconv 调用的
-分配器入口，将 DMA fd 的关闭权交给标准 GstDmaBufMemory。厂商版本同时在
-附属 qdata 中关闭 fd，反复缩放/切编码会误关复用的 fd。服务的 LD_LIBRARY_PATH
-只为 One-KVM 加载此兼容库；不替换系统库或影响其他 KVM。构建包含 fd 生命周期测试。
+分配器入口。DMA 内存及其共享视图全部释放后，才按分配大小复用 fd；每个分配器
+最多缓存四个空闲缓冲，销毁时全部关闭。GstDmaBufMemory 仍负责映射和引用生命周期，
+不再同时从厂商 qdata 关闭 fd，避免误关复用的描述符。缩放与编码之间使用一个
+非丢帧的有界队列，让两个硬件阶段并行；原尺寸不插入缩放器或这个队列。
+服务的 LD_LIBRARY_PATH 只为 One-KVM 加载此兼容库；不替换系统库。
+构建包含持有缓冲、共享视图、缓存上限、分配失败和 fd 关闭的生命周期测试。
+
+5.15 的 T7 MultiEnc 驱动在打开编码器时，把与 GE2D 共用的 VAPB 时钟降到
+400MHz，即使 GE2D 驱动已按芯片配置初始化为约 666.7MHz。缩小尺寸的首个编码帧
+产生后，程序调用限定助手 `vim4-onekvm video-clock` 恢复这个已验证的总线频率。
+助手只允许 5.15、T7 GE2D 和不低于该频率的 VPU，并核验实际频率；需要内核已有的
+debugfs 时钟接口，不修改内核、编码核心时钟或默认启动项。缺少接口时明确报错，
+不能把目标 60fps 冒充实际吞吐。原尺寸不调用助手；7.3 的 VDIN/Wave5 路径不受影响。
+`ONEKVM_VIDEO_STATS=1` 可临时启用五秒汇总：采集、缩放和编码进出速率、阶段耗时
+分布、峰值在途数及阶段重叠；默认关闭，不能用 strace/ptrace 代替实时计数。
 
 工作区 `build onekvm` 输出 `build/onekvm`；`vim4-onekvm` deb 安装到
 `/opt/vim4-onekvm`，数据目录为 `/var/lib/one-kvm`。安装不创建账户，首次网页
