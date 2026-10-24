@@ -8,6 +8,24 @@ use gstreamer as gst;
 mod stats;
 mod wave5;
 
+#[cfg(test)]
+mod queue_tests;
+
+fn restore_scaler_clock() -> Result<()> {
+    let output = std::process::Command::new("sudo")
+        .args(["-n", "/usr/libexec/vim4-onekvm", "video-clock"])
+        .output()
+        .map_err(|error| AppError::VideoError(format!("Restore scaler clock: {error}")))?;
+    if !output.status.success() {
+        return Err(AppError::VideoError(format!(
+            "Restore scaler clock: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    info!(actual = %String::from_utf8_lossy(&output.stdout).trim(), "VIM4 scaler clock restored");
+    Ok(())
+}
+
 struct Capture(gst::Pipeline);
 impl Drop for Capture {
     fn drop(&mut self) {
@@ -281,6 +299,13 @@ impl SharedVideoPipeline {
                 continue;
             };
             last_frame = Instant::now();
+            if total_frames == 0
+                && VideoBackend::current() == VideoBackend::Vendor
+                && config.output.height > 0
+                && config.output.height < source.0.height
+            {
+                restore_scaler_clock()?;
+            }
             let buffer = sample
                 .buffer()
                 .ok_or_else(|| AppError::VideoError("Missing video buffer".into()))?;

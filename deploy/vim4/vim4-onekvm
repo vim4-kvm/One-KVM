@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Restricted USB profiles on the existing board-owned VIM4 gadget."""
+"""Restricted board operations for the VIM4 One-KVM service."""
 import json
 import os
 from pathlib import Path
@@ -20,6 +20,8 @@ LUN = GADGET / 'functions/mass_storage.disk0/lun.0'
 FUNCTIONS = ('ncm.usb0', 'mass_storage.disk0', 'uac2.usb0', 'acm.usb0')
 PROFILE_DIR = Path('/run/vim4-onekvm-usb')
 EDGE = False
+GE2D_DEVICE = Path('/sys/devices/platform/ff040000.ge2d/of_node/compatible')
+CLOCK_ROOT = Path('/sys/kernel/debug/clk')
 HID_FUNCTIONS = {'keyboard': 'hid.keyboard', 'mouse_absolute': 'hid.mouse_abs',
                  'mouse_relative': 'hid.mouse_rel', 'consumer': 'hid.consumer'}
 DESCRIPTORS = ('idVendor', 'idProduct', 'strings/0x409/manufacturer',
@@ -388,7 +390,29 @@ def _configure_media(name, cdrom, readonly, expected):
             os.close(fd)
 
 
+def restore_scaler_clock():
+    """Restore the T7 GE2D bus rate after the vendor encoder lowers it on open."""
+    if EDGE or not platform.release().startswith('5.15.'):
+        return
+    if b'amlogic, ge2d-t7' not in GE2D_DEVICE.read_bytes().split(b'\0'):
+        raise ValueError('Unsupported GE2D device for scaler clock restoration')
+    target = 666666667
+    tolerance = 10000
+    if int((CLOCK_ROOT / 'vpu/clk_rate').read_text()) + tolerance < target:
+        raise ValueError('VPU clock is below the validated T7 scaler bus rate')
+    clock = CLOCK_ROOT / 'ge2d_gate/clk_rate'
+    if int(clock.read_text()) + tolerance < target:
+        clock.write_text(str(target))
+    actual = int(clock.read_text())
+    if abs(actual - target) > tolerance:
+        raise ValueError(f'GE2D bus clock restoration failed: {actual} Hz')
+    print(json.dumps({'ge2d_hz': actual}))
+
+
 def main(args):
+    if args == ['video-clock']:
+        restore_scaler_clock()
+        return
     if args == ['catalog']:
         print(json.dumps(vim4media.catalog()))
         return

@@ -23,6 +23,44 @@ helper = importlib.util.module_from_spec(spec)
 loader.exec_module(helper)
 
 
+class ScalerClockTest(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.compatible = self.root / 'compatible'
+        self.compatible.write_bytes(b'amlogic, ge2d-t7\0')
+        for name, rate in [('vpu', 666666656), ('ge2d_gate', 399999994)]:
+            directory = self.root / name
+            directory.mkdir()
+            (directory / 'clk_rate').write_text(str(rate))
+        self.enterContext(patch.object(helper, 'GE2D_DEVICE', self.compatible))
+        self.enterContext(patch.object(helper, 'CLOCK_ROOT', self.root))
+        self.enterContext(patch.object(helper, 'EDGE', False))
+        self.enterContext(patch.object(helper.platform, 'release', return_value='5.15.137-vim4kvm'))
+
+    def test_restores_shared_bus_after_encoder_open(self):
+        with redirect_stdout(io.StringIO()) as output:
+            helper.main(['video-clock'])
+        self.assertEqual(json.loads(output.getvalue())['ge2d_hz'], 666666667)
+        self.assertEqual((self.root / 'vpu/clk_rate').read_text(), '666666656')
+
+    def test_refuses_unvalidated_hardware_or_insufficient_vpu_clock(self):
+        clock = self.root / 'ge2d_gate/clk_rate'
+        for compatible, vpu in [(b'amlogic, ge2d-g12a\0', 666666656),
+                                (b'amlogic, ge2d-t7\0', 399999994)]:
+            with self.subTest(compatible=compatible, vpu=vpu):
+                self.compatible.write_bytes(compatible)
+                (self.root / 'vpu/clk_rate').write_text(str(vpu))
+                with self.assertRaises(ValueError):
+                    helper.main(['video-clock'])
+                self.assertEqual(clock.read_text(), '399999994')
+
+    def test_mainline_does_not_touch_vendor_clocks(self):
+        self.compatible.unlink()
+        with patch.object(helper.platform, 'release', return_value='7.3.0-vim4kvm-uhd1+'):
+            helper.main(['video-clock'])
+        self.assertEqual((self.root / 'ge2d_gate/clk_rate').read_text(), '399999994')
+
+
 class MediaTest(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()

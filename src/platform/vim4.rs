@@ -282,7 +282,8 @@ impl OutputSettings {
                 / u64::from(source.height)) as u32
                 & !1;
             filter.push_str(&format!(
-                "amlvconv name=scaler ! video/x-raw,format=NV12,width={},height={} ! ",
+                "amlvconv name=scaler ! video/x-raw,format=NV12,width={},height={} ! \
+                 queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! ",
                 width.max(2),
                 self.height
             ));
