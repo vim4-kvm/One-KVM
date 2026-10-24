@@ -274,14 +274,15 @@ impl OutputSettings {
     }
 
     pub fn filter(self, source: Resolution, fps: u32) -> String {
-        let mut filter = format!("videorate drop-only=true ! video/x-raw,framerate={fps}/1 ! ");
+        let mut filter =
+            format!("videorate name=output_rate drop-only=true ! video/x-raw,framerate={fps}/1 ! ");
         if self.height > 0 && self.height < source.height {
             // GE2D keeps scaling in DMA memory. Preserve aspect ratio and even chroma dimensions.
             let width = (u64::from(source.width) * u64::from(self.height)
                 / u64::from(source.height)) as u32
                 & !1;
             filter.push_str(&format!(
-                "amlvconv ! video/x-raw,format=NV12,width={},height={} ! ",
+                "amlvconv name=scaler ! video/x-raw,format=NV12,width={},height={} ! ",
                 width.max(2),
                 self.height
             ));

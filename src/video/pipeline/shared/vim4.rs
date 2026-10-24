@@ -5,6 +5,7 @@ use crate::video::codec::BitratePreset;
 use gst::prelude::*;
 use gstreamer as gst;
 
+mod stats;
 mod wave5;
 
 struct Capture(gst::Pipeline);
@@ -42,7 +43,7 @@ fn description(config: &SharedVideoPipelineConfig, source: Resolution, fps: u32)
         3
     };
     let filter = config.output.filter(source, fps);
-    Ok(format!("vfmcapsrc ! {}queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! {filter}\
+    Ok(format!("vfmcapsrc name=source ! {}queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! {filter}\
         amlvenc name=encoder bitrate={} gop=0 framerate={} intra-refresh-rows={refresh_rows} min-force-key-unit-interval=250000000 ! \
         video/x-{codec} ! {codec}parse config-interval=-1 ! \
         video/x-{codec},stream-format=byte-stream,alignment=au ! appsink name=frames sync=false max-buffers=2",
@@ -197,6 +198,13 @@ impl SharedVideoPipeline {
         } else {
             None
         };
+        let video_stats = if VideoBackend::current() == VideoBackend::Vendor
+            && std::env::var("ONEKVM_VIDEO_STATS").as_deref() == Ok("1")
+        {
+            Some(stats::VideoStats::attach(&capture.0)?)
+        } else {
+            None
+        };
         capture
             .0
             .set_state(gst::State::Playing)
@@ -216,6 +224,9 @@ impl SharedVideoPipeline {
         info!(?source, codec = ?config.output_codec, "VIM4 capture started");
         while self.running_flag.load(Ordering::Acquire) {
             if progress_time.elapsed() >= Duration::from_secs(5) {
+                if let Some(stats) = &video_stats {
+                    stats.report(&capture.0);
+                }
                 info!(raw = ?progress.as_ref().map(|p| p.counts()), encoded = total_frames,
                     last_frame_ms = last_frame.elapsed().as_millis() as u64,
                     pipeline_state = ?capture.0.state(gst::ClockTime::ZERO), "VIM4 capture progress");
