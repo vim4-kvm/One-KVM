@@ -3,6 +3,7 @@
 #[cfg(any(unix, windows))]
 mod capture;
 mod controller;
+pub(crate) mod diagnostics;
 #[cfg(any(unix, windows))]
 mod device;
 #[cfg(any(unix, windows))]
