@@ -9,6 +9,7 @@ struct Stage {
     max_us: u64,
     peak_active: u64,
     overlaps: u64,
+    histogram: [[u64; 32]; 4],
 }
 
 impl Stage {
@@ -25,7 +26,25 @@ impl Stage {
             let elapsed = now.duration_since(started).as_micros() as u64;
             self.total_us += elapsed;
             self.max_us = self.max_us.max(elapsed);
+            let bucket = (elapsed / 500).min(127) as usize;
+            self.histogram[bucket / 32][bucket % 32] += 1;
         }
+    }
+
+    fn percentile_upper_us(&self, percent: u64) -> Option<u64> {
+        let total: u64 = self.histogram.iter().flatten().sum();
+        if total == 0 {
+            return None;
+        }
+        let target = (total * percent).div_ceil(100);
+        let mut cumulative = 0;
+        for (bucket, count) in self.histogram.iter().flatten().enumerate() {
+            cumulative += count;
+            if cumulative >= target {
+                return (bucket < 127).then_some((bucket as u64 + 1) * 500);
+            }
+        }
+        None
     }
 }
 
@@ -98,20 +117,44 @@ impl VideoStats {
         let rate_dropped = pipeline
             .by_name("output_rate")
             .map(|rate| rate.property::<u64>("drop"));
-        info!(capture_fps = rates[0], scale_in_fps = rates[1], scale_out_fps = rates[2],
-            encoder_in_fps = rates[3], encoder_out_fps = rates[4], ?rate_dropped,
-            captured = counts[0], encoder_in = counts[3], encoder_out = counts[4],
-            "VIM4 video rates");
+        let encoder_caps = pipeline
+            .by_name("encoder")
+            .and_then(|encoder| encoder.static_pad("sink"))
+            .and_then(|pad| pad.current_caps());
+        info!(
+            capture_fps = rates[0],
+            scale_in_fps = rates[1],
+            scale_out_fps = rates[2],
+            encoder_in_fps = rates[3],
+            encoder_out_fps = rates[4],
+            ?rate_dropped,
+            captured = counts[0],
+            encoder_in = counts[3],
+            encoder_out = counts[4],
+            ?encoder_caps,
+            "VIM4 video rates"
+        );
         for (index, name) in ["scale", "encode"].iter().enumerate() {
             let stage = &mut counters.stages[index];
             let completed = counts[2 + index * 2] - previous.1[2 + index * 2];
-            info!(stage = name, completed, mean_us = stage.total_us.checked_div(completed),
-                max_us = stage.max_us, peak_active = stage.peak_active, overlaps = stage.overlaps,
-                "VIM4 video stage");
+            info!(
+                stage = name,
+                completed,
+                mean_us = stage.total_us.checked_div(completed),
+                max_us = stage.max_us,
+                peak_active = stage.peak_active,
+                overlaps = stage.overlaps,
+                p50_upper_us = stage.percentile_upper_us(50),
+                p95_upper_us = stage.percentile_upper_us(95),
+                p99_upper_us = stage.percentile_upper_us(99),
+                histogram_overflow = stage.histogram[3][31],
+                "VIM4 video stage"
+            );
             stage.total_us = 0;
             stage.max_us = 0;
             stage.peak_active = stage.entered - stage.completed;
             stage.overlaps = 0;
+            stage.histogram = [[0; 32]; 4];
         }
         *previous = (now, counts);
     }
@@ -135,5 +178,19 @@ mod tests {
         assert_eq!(stage.max_us, 1234);
         assert_eq!(stage.overlaps, 1);
         assert!(stage.started.is_none());
+    }
+
+    #[test]
+    fn histogram_does_not_report_an_overflowing_tail_as_a_fast_sample() {
+        let mut stage = Stage::default();
+        assert_eq!(stage.percentile_upper_us(99), None);
+        let start = Instant::now();
+        for elapsed in [100, 250, 750, 1250, 35_000, 70_000] {
+            stage.enter(start, false);
+            stage.complete(start + Duration::from_micros(elapsed));
+        }
+        assert_eq!(stage.percentile_upper_us(50), Some(1000));
+        assert_eq!(stage.percentile_upper_us(99), None);
+        assert_eq!(stage.max_us, 70_000);
     }
 }
