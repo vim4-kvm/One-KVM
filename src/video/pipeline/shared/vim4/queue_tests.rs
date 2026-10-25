@@ -4,6 +4,23 @@ use gstreamer_app::{AppSink, AppSrc};
 use gstreamer_video::{VideoFormat, VideoInfo};
 
 #[test]
+fn lowest_hevc_tier_keeps_recovery_keyframes_without_cyclic_refresh_overhead() {
+    let mut config = SharedVideoPipelineConfig::default();
+    config.output_codec = VideoEncoderType::H265;
+    config.bitrate_preset = BitratePreset::Custom(1000);
+    let source = Resolution::new(3840, 2160);
+    let low = description(&config, source, 60).unwrap();
+    assert!(low.contains("bitrate=1000 gop=0 framerate=60 intra-refresh-rows=0"));
+    assert!(low.contains("min-force-key-unit-interval=250000000"));
+    config.bitrate_preset = BitratePreset::Balanced;
+    let normal = description(&config, source, 60).unwrap();
+    assert!(normal.contains("bitrate=4000 gop=0 framerate=60 intra-refresh-rows=1"));
+    config.output_codec = VideoEncoderType::H264;
+    let avc = description(&config, source, 60).unwrap();
+    assert!(avc.contains("intra-refresh-rows=3"));
+}
+
+#[test]
 fn secondary_capture_negotiates_full_resolution_sdr_and_rejects_invalid_selection() {
     gst::init().unwrap();
     let source = vendor_capture(Some("1"), Resolution::new(3840, 2160), 60).unwrap();

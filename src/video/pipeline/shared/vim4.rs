@@ -64,7 +64,14 @@ fn description(config: &SharedVideoPipelineConfig, source: Resolution, fps: u32)
     // GOP 0 still emits the initial I-frame and honors force-key-unit events:
     // UU/WebRTC/RTSP request one on subscription; PLI/FIR recover lost references.
     let refresh_rows = if config.output_codec == VideoEncoderType::H265 {
-        1
+        // At 1 Mbps a 4K HEVC intra-refresh row alone exceeds the residual
+        // budget: measured 1.55 Mbps, versus 1.00 Mbps without refresh at 60fps.
+        // Keep GOP 0 and explicit subscription/PLI/FIR keyframes in this tier.
+        if config.bitrate_kbps() <= 1000 {
+            0
+        } else {
+            1
+        }
     } else {
         3
     };
