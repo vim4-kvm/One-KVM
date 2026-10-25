@@ -106,7 +106,7 @@ fn frame_extensions() -> [rtp::extension::HeaderExtension; 2] {
     ]
 }
 
-fn now_secs() -> u64 {
+pub(super) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
