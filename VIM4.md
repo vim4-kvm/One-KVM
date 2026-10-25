@@ -29,8 +29,9 @@
 的完整尺寸 NV21 SDR DMA-buf；未设置仍是原来的 vfmcapsrc，不自动改变 EDID 或主 RX。
 它要求配套候选驱动提供 VDIN1 的同源 HDMI frontend 隔离与 HDR→SDR，不能直接用于原厂
 video71（原厂仅声明 VIU 回写输入）。显示由 VDIN0 高位深原生路径负责，不从采集帧伪造 HDR。
-原生 HDR10 显示与 SDR H.264/H.265 4K60 已实测；HLG 无真实源/显示器现场验收，
-MJPEG 独立路径尚未接入。原生模式不依赖显示器回写采集。
+原生 HDR10 显示与 SDR H.264/H.265 4K60 已实测；HLG 无真实源/显示器现场验收。
+MJPEG 独立路径通过公共采集插件 `vim4vdin1src` 接入同一 VDIN1，须安装配套
+板级、采集与编码包。原生模式不依赖显示器回写采集。
 `deploy/vim4/probe-vdin.c` 是先于应用接入的有界 V4L2 诊断，显式传 device/input/尺寸/帧数，
 输出实际协商、DMA 完成帧率与序号；不能将驱动不递增的旧序号当成零丢帧证明。
 需要私有的标准 `video4linux2` 插件：系统厂商版本链接 `libamlv4l2src`，会调用

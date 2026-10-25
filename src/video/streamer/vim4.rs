@@ -84,7 +84,11 @@ impl Streamer {
              format!("videorate drop-only=true ! video/x-raw,framerate={fps}/1 ! "))
         } else {
             (
-                "vfmcapsrc ! ".to_owned(),
+                if std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").as_deref() == Ok("1") {
+                    "vim4vdin1src ! ".to_owned()
+                } else {
+                    "vfmcapsrc ! ".to_owned()
+                },
                 config.output.filter(source.0, fps),
             )
         };
