@@ -317,40 +317,56 @@ async fn disconnect_closes_upload_fds_even_if_file_channel_never_opened() {
 
 #[tokio::test(start_paused = true)]
 async fn timed_out_rpc_does_not_leave_a_pending_reply_slot() {
-    let (_dir,connection,mut output)=fixture();
-    let sending=connection.clone();
-    let task=tokio::spawn(async move {
-        sending.request(3,&Id {task:35,file:1}.payload(),&CancellationToken::new()).await
+    let (_dir, connection, mut output) = fixture();
+    let sending = connection.clone();
+    let task = tokio::spawn(async move {
+        sending
+            .request(
+                3,
+                &Id { task: 35, file: 1 }.payload(),
+                &CancellationToken::new(),
+            )
+            .await
     });
     output.recv().await.unwrap();
-    assert_eq!(connection.pending.lock().len(),1);
+    assert_eq!(connection.pending.lock().len(), 1);
     tokio::time::advance(Duration::from_secs(21)).await;
-    assert!(matches!(task.await.unwrap(),Err(IO)));
+    assert!(matches!(task.await.unwrap(), Err(IO)));
     assert!(connection.pending.lock().is_empty());
     connection.close().await;
 }
 
 #[tokio::test]
 async fn duplicate_skip_and_invalid_resume_preserve_the_existing_file() {
-    let (dir,connection,mut output)=fixture();
-    let root=dir.path().join("files");std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("keep.bin"),b"original").unwrap();
-    for (task,strategy,code) in [(40,3,OK),(41,4,PROTOCOL),(42,2,OK)] {
-        reply(&connection,&mut output,1,&manifest(task,"keep.bin",3,strategy)).await;
-        let id=Id {task,file:1};
-        let (_,body)=reply(&connection,&mut output,3,&status(id.payload(),3,3)).await;
-        let fields=wire::decode(&body).unwrap();assert_eq!(number(&fields,3),code);
-        if strategy==3 {
-            assert_eq!(number(&fields,2),1);
+    let (dir, connection, mut output) = fixture();
+    let root = dir.path().join("files");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("keep.bin"), b"original").unwrap();
+    for (task, strategy, code) in [(40, 3, OK), (41, 4, PROTOCOL), (42, 2, OK)] {
+        reply(
+            &connection,
+            &mut output,
+            1,
+            &manifest(task, "keep.bin", 3, strategy),
+        )
+        .await;
+        let id = Id { task, file: 1 };
+        let (_, body) = reply(&connection, &mut output, 3, &status(id.payload(), 3, 3)).await;
+        let fields = wire::decode(&body).unwrap();
+        assert_eq!(number(&fields, 3), code);
+        if strategy == 3 {
+            assert_eq!(number(&fields, 2), 1);
             assert!(!connection.uploads.lock().await.contains_key(&task));
         }
-        if strategy==2 {
-            let mut block=id.payload();wire::put_varint(2,0,&mut block);wire::put_bytes(3,b"new",&mut block);
-            reply(&connection,&mut output,4,&block).await;
-            reply(&connection,&mut output,9,&status(id.payload(),2,OK)).await;
-            assert_eq!(std::fs::read(root.join("keep (1).bin")).unwrap(),b"new");
+        if strategy == 2 {
+            let mut block = id.payload();
+            wire::put_varint(2, 0, &mut block);
+            wire::put_bytes(3, b"new", &mut block);
+            reply(&connection, &mut output, 4, &block).await;
+            reply(&connection, &mut output, 9, &status(id.payload(), 2, OK)).await;
+            assert_eq!(std::fs::read(root.join("keep (1).bin")).unwrap(), b"new");
         }
-        assert_eq!(std::fs::read(root.join("keep.bin")).unwrap(),b"original");
+        assert_eq!(std::fs::read(root.join("keep.bin")).unwrap(), b"original");
     }
     connection.close().await;
 }
