@@ -6,7 +6,8 @@ use std::time::Duration;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use tokio::time::{sleep_until, Instant};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
@@ -70,6 +71,47 @@ pub enum SignalingEvent {
 const REFRESH_FIRST: Duration = Duration::from_secs(30);
 const REFRESH_RETRY: Duration = Duration::from_secs(30);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(300);
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn enqueue<T>(sender: &mpsc::Sender<T>, value: T) -> Result<(), String> {
+    tokio::time::timeout(DELIVERY_TIMEOUT, sender.send(value))
+        .await
+        .map_err(|_| "UU signaling delivery timed out".to_owned())?
+        .map_err(|_| "UU signaling queue closed".to_owned())
+}
+
+/// Socket liveness must not depend on the room consumer draining its event queue.
+async fn supervise_connection(
+    mut reader: JoinHandle<()>,
+    mut writer: JoinHandle<()>,
+    mut heartbeat: watch::Receiver<Instant>,
+    events: mpsc::Sender<SignalingEvent>,
+) {
+    loop {
+        let deadline = *heartbeat.borrow_and_update();
+        tokio::select! {
+            _ = &mut reader => break,
+            _ = &mut writer => break,
+            _ = events.closed() => break,
+            changed = heartbeat.changed() => if changed.is_err() { break; },
+            _ = sleep_until(deadline) => {
+                warn!("UU signaling heartbeat lost; reconnecting");
+                break;
+            }
+        }
+    }
+    reader.abort();
+    writer.abort();
+    if !reader.is_finished() {
+        let _ = reader.await;
+    }
+    if !writer.is_finished() {
+        let _ = writer.await;
+    }
+    // Close the socket first. A full queue may delay this notification, but must
+    // neither keep the old socket alive nor silently lose the reconnect request.
+    let _ = events.send(SignalingEvent::Disconnected).await;
+}
 
 /// A refresh ack is `["success", {"reconnect_key": "..."}]`; anything else is a failure.
 fn refresh_succeeded(ack: &Value) -> bool {
@@ -131,19 +173,25 @@ impl SignalingClient {
         info!("UU signaling connected");
         let (mut write, mut read) = stream.split();
         let (outgoing, mut outgoing_rx) = mpsc::channel::<String>(64);
+        let (heartbeat_tx, heartbeat_rx) = watch::channel(Instant::now() + Duration::from_secs(45));
 
         let writer = tokio::spawn(async move {
             while let Some(text) = outgoing_rx.recv().await {
-                if let Err(e) = write.send(Message::Text(text.into())).await {
-                    warn!("UU signaling send failed: {e}");
+                if !matches!(
+                    tokio::time::timeout(DELIVERY_TIMEOUT, write.send(Message::Text(text.into())))
+                        .await,
+                    Ok(Ok(()))
+                ) {
+                    warn!("UU signaling send failed or timed out");
                     break;
                 }
             }
-            let _ = write.close().await;
         });
 
         let replies = outgoing.clone();
-        tokio::spawn(async move {
+        let reader_events = events.clone();
+        let reader = tokio::spawn(async move {
+            let events = reader_events;
             let mut ack_id = 10u64;
             // Socket.IO binary event awaiting its attachment: (event name, header JSON).
             let mut pending_binary: Option<(String, Value)> = None;
@@ -154,23 +202,17 @@ impl SignalingClient {
             // Engine.IO v4 requires a ping within pingInterval + pingTimeout.
             // TCP can remain half-open after a NAT drop without a read error.
             let mut ping_window = Duration::from_secs(45);
-            let mut ping_deadline = Instant::now() + ping_window;
             loop {
                 let message = tokio::select! {
                     // The room loop dropped its receiver: this room is obsolete.
                     _ = events.closed() => break,
-                    _ = sleep_until(ping_deadline) => {
-                        warn!("UU signaling heartbeat lost; reconnecting");
-                        let _ = events.send(SignalingEvent::Disconnected).await;
-                        break;
-                    }
                     _ = sleep_until(next_refresh), if connected => {
                         ack_id += 1;
                         refresh_acks.push_back(ack_id);
                         if refresh_acks.len() > 16 {
                             refresh_acks.pop_front();
                         }
-                        if replies.send(format!("42{ack_id}[\"refresh_reconnect_key\"]")).await.is_err() {
+                        if enqueue(&replies, format!("42{ack_id}[\"refresh_reconnect_key\"]")).await.is_err() {
                             break;
                         }
                         next_refresh = Instant::now() + REFRESH_RETRY;
@@ -179,10 +221,7 @@ impl SignalingClient {
                     }
                     message = read.next() => match message {
                         Some(message) => message,
-                        None => {
-                            let _ = events.send(SignalingEvent::Disconnected).await;
-                            break;
-                        }
+                        None => break,
                     },
                 };
                 match message {
@@ -197,19 +236,28 @@ impl SignalingClient {
                                     ping_window = Duration::from_millis(
                                         interval.saturating_add(timeout).clamp(5_000, 300_000),
                                     );
-                                    ping_deadline = Instant::now() + ping_window;
+                                    heartbeat_tx.send_replace(Instant::now() + ping_window);
                                 }
                             }
-                            let _ = replies.send("40".into()).await; // Engine.IO open -> Socket.IO connect
+                            if enqueue(&replies, "40".into()).await.is_err() {
+                                break;
+                            }
                         } else if text == "2" {
-                            ping_deadline = Instant::now() + ping_window;
-                            let _ = replies.send("3".into()).await; // ping -> pong
+                            heartbeat_tx.send_replace(Instant::now() + ping_window);
+                            if enqueue(&replies, "3".into()).await.is_err() {
+                                break;
+                            }
                         } else if text.starts_with("40") {
                             connected = true;
                             next_refresh = Instant::now() + REFRESH_FIRST;
                             ack_id += 1;
-                            let _ = replies.send(format!("42{ack_id}[\"room_info\"]")).await;
-                            let _ = events.send(SignalingEvent::Connected).await;
+                            if enqueue(&replies, format!("42{ack_id}[\"room_info\"]"))
+                                .await
+                                .is_err()
+                                || enqueue(&events, SignalingEvent::Connected).await.is_err()
+                            {
+                                break;
+                            }
                         } else if let Some(ack) = text.strip_prefix("43") {
                             let begin = ack.find('[').unwrap_or(ack.len());
                             let id = ack[..begin].parse::<u64>().ok();
@@ -292,7 +340,7 @@ impl SignalingClient {
                                 _ => None,
                             };
                             if let Some(event) = event {
-                                if events.send(event).await.is_err() {
+                                if enqueue(&events, event).await.is_err() {
                                     break;
                                 }
                             }
@@ -326,30 +374,29 @@ impl SignalingClient {
                             ice_id,
                             transport: SessionIce::from_header(&header),
                         };
-                        if events.send(event).await.is_err() {
+                        if enqueue(&events, event).await.is_err() {
                             break;
                         }
                     }
                     Ok(Message::Close(_)) | Err(_) => {
-                        let _ = events.send(SignalingEvent::Disconnected).await;
                         break;
                     }
                     _ => {}
                 }
             }
-            // Peer callbacks may still hold this client's sender; stop writing to the old room.
-            writer.abort();
             debug!("UU signaling receiver stopped");
         });
+        tokio::spawn(supervise_connection(reader, writer, heartbeat_rx, events));
 
         Ok(Self { outgoing })
     }
 
     pub async fn emit_event(&self, event: &str, payload: Value) -> Result<(), String> {
-        self.outgoing
-            .send(format!("42{}", serde_json::json!([event, payload])))
-            .await
-            .map_err(|e| e.to_string())
+        enqueue(
+            &self.outgoing,
+            format!("42{}", serde_json::json!([event, payload])),
+        )
+        .await
     }
 
     pub async fn emit_soac(&self, soac: SoacMessage) -> Result<(), String> {
@@ -365,6 +412,82 @@ impl SignalingClient {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_closes_blocked_delivery_before_reporting_disconnect() {
+        let (events, mut received) = mpsc::channel(1);
+        events.send(SignalingEvent::Connected).await.unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (reader_life, reader_closed) = tokio::sync::oneshot::channel::<()>();
+        let blocked = events.clone();
+        let reader = tokio::spawn(async move {
+            let _life = reader_life;
+            started_tx.send(()).unwrap();
+            let _ = enqueue(&blocked, SignalingEvent::DeviceInfoChanged(Value::Null)).await;
+        });
+        let (writer_life, writer_closed) = tokio::sync::oneshot::channel::<()>();
+        let writer = tokio::spawn(async move {
+            let _life = writer_life;
+            std::future::pending::<()>().await;
+        });
+        let (_heartbeat, deadline) = watch::channel(Instant::now() + Duration::from_secs(1));
+        let supervisor = tokio::spawn(supervise_connection(reader, writer, deadline, events));
+        started_rx.await.unwrap();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(reader_closed.await.is_err());
+        assert!(writer_closed.await.is_err());
+        assert!(matches!(
+            received.recv().await,
+            Some(SignalingEvent::Connected)
+        ));
+        assert!(matches!(
+            received.recv().await,
+            Some(SignalingEvent::Disconnected)
+        ));
+        supervisor.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_delivery_requests_reconnect_without_waiting_for_ping_deadline() {
+        let (events, mut received) = mpsc::channel(1);
+        events.send(SignalingEvent::Connected).await.unwrap();
+        let blocked = events.clone();
+        let reader = tokio::spawn(async move {
+            assert!(
+                enqueue(&blocked, SignalingEvent::DeviceInfoChanged(Value::Null))
+                    .await
+                    .is_err()
+            );
+        });
+        let (writer_life, writer_closed) = tokio::sync::oneshot::channel::<()>();
+        let writer = tokio::spawn(async move {
+            let _life = writer_life;
+            std::future::pending::<()>().await;
+        });
+        let (_heartbeat, deadline) = watch::channel(Instant::now() + Duration::from_secs(60));
+        let supervisor = tokio::spawn(supervise_connection(reader, writer, deadline, events));
+        // Awaiting the guard drives paused time to the delivery deadline.
+        assert!(writer_closed.await.is_err());
+        assert!(matches!(
+            received.recv().await,
+            Some(SignalingEvent::Connected)
+        ));
+        assert!(matches!(
+            received.recv().await,
+            Some(SignalingEvent::Disconnected)
+        ));
+        supervisor.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn producer_has_a_bounded_wait_when_writer_queue_is_full() {
+        let (outgoing, mut received) = mpsc::channel(1);
+        outgoing.send("already queued".into()).await.unwrap();
+        let client = SignalingClient::with_test_sender(outgoing);
+        assert!(client.emit_event("soac", Value::Null).await.is_err());
+        assert_eq!(received.recv().await.unwrap(), "already queued");
+        assert!(received.try_recv().is_err());
+    }
 
     #[tokio::test]
     async fn heartbeat_keeps_socket_alive_then_detects_silent_half_open_connection() {
