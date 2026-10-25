@@ -1085,6 +1085,7 @@ async fn stream_video(
         let mut last_request = Instant::now();
         let mut report_at = Instant::now();
         let mut report_frames = 0u64;
+        let mut report_encoded_bytes = 0u64;
         let mut send_us = 0u128;
         let mut max_send_us = 0u128;
         let mut max_gap_us = 0u128;
@@ -1155,6 +1156,7 @@ async fn stream_video(
             send_us += elapsed_us;
             max_send_us = max_send_us.max(elapsed_us);
             report_frames += 1;
+            report_encoded_bytes += frame.data.len() as u64;
             if report_at.elapsed() >= Duration::from_secs(5) {
                 let fps = report_frames as f64 / report_at.elapsed().as_secs_f64();
                 shared.video_diagnostics.lock().await.sender = Some((
@@ -1176,6 +1178,10 @@ async fn stream_video(
                     - i128::from(frame.pts_ms.saturating_sub(pts_start));
                 info!(
                     fps,
+                    encoded_bytes = report_encoded_bytes,
+                    encoded_kbps = report_encoded_bytes as f64 * 8.0
+                        / report_at.elapsed().as_secs_f64()
+                        / 1000.0,
                     mean_send_us = send_us / u128::from(report_frames),
                     max_send_us,
                     max_gap_us,
@@ -1189,6 +1195,7 @@ async fn stream_video(
                 );
                 report_at = Instant::now();
                 report_frames = 0;
+                report_encoded_bytes = 0;
                 send_us = 0;
                 max_send_us = 0;
                 max_gap_us = 0;
@@ -1664,7 +1671,7 @@ async fn apply_capture_setting(
     request.quality = Some(quality);
     if request.custom_bitrate.is_none() {
         let kbps = shared.custom_kbps.load(Ordering::Relaxed);
-        request.custom_bitrate = Some(if kbps == 1000 { 1 } else { kbps });
+        request.custom_bitrate = Some(kbps * 1_000);
     }
     let preset = if quality == wire::quality::AUTO {
         shared.default_bitrate

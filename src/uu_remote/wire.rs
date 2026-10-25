@@ -334,7 +334,7 @@ pub mod quality {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CaptureRequest {
     pub quality: Option<u64>,
-    /// Viewer max_custom_bitrate: Mbit/s, or kbit/s above 1000.
+    /// Viewer max_custom_bitrate in bits/s, normalized when decoding the RPC.
     pub custom_bitrate: Option<u64>,
     pub fps: Option<u64>,
     /// None leaves the size unchanged; Some(None) restores native HDMI size.
@@ -350,17 +350,20 @@ impl CaptureRequest {
             quality::GENERAL => 2_000,
             quality::HD => 8_000,
             quality::BLURAY => 20_000,
-            quality::CUSTOM => {
-                let value = self.custom_bitrate.filter(|v| *v > 0)?;
-                if value > 1_000 {
-                    value
-                } else {
-                    value * 1_000
-                }
-            }
+            quality::CUSTOM => self.custom_bitrate.filter(|v| *v > 0)? / 1_000,
             _ => return None,
         };
         Some(kbps.min(u64::from(u32::MAX)) as u32)
+    }
+}
+
+/// Current viewers use bit/s. Legacy values below 1000 were Mbit/s;
+/// 1000..200000 were kbit/s (current viewers do not offer rates below 200 kbit/s).
+fn custom_bitrate_bits(value: u64) -> u64 {
+    match value {
+        0..1_000 => value * 1_000_000,
+        1_000..200_000 => value * 1_000,
+        _ => value,
     }
 }
 
@@ -373,7 +376,9 @@ pub fn capture_setting_rpc(rpc: &[WireField]) -> Option<(CaptureRequest, Vec<u8>
     if let Some(body) = message(rpc, 2) {
         let fields = decode(body).ok()?;
         request.quality = number(&fields, 2).filter(|v| *v > 0);
-        request.custom_bitrate = number(&fields, 8).filter(|v| *v > 0);
+        request.custom_bitrate = number(&fields, 8)
+            .filter(|v| *v > 0)
+            .map(custom_bitrate_bits);
         request.fps = number(&fields, 18)
             .filter(|v| *v > 0)
             .or_else(|| number(&fields, 1).and_then(fps_from_option));
@@ -482,12 +487,7 @@ pub fn capture_sync(fps: u32, quality: u64, size: Rect) -> Vec<u8> {
 pub fn capture_sync_with_bitrate(fps: u32, quality: u64, size: Rect, kbps: u32) -> Vec<u8> {
     let mut out = capture_sync(fps, quality, size);
     if quality == quality::CUSTOM {
-        // The client accepts Mbps, or kbps above 1000. Exactly 1000 must be encoded as 1 Mbps.
-        put_varint(
-            4,
-            u64::from(if kbps % 1000 == 0 { kbps / 1000 } else { kbps }),
-            &mut out,
-        );
+        put_varint(4, u64::from(kbps) * 1_000, &mut out);
     }
     out
 }
@@ -660,8 +660,21 @@ mod tests {
     }
 
     #[test]
-    fn custom_bitrate_sync_preserves_fractional_mbps_and_minimum() {
-        for (kbps, expected) in [(1000, 1), (12500, 12500), (60000, 60)] {
+    fn custom_bitrate_request_and_sync_use_bits_per_second() {
+        for (wire_value, kbps) in [
+            (1_000_000, 1_000),
+            (12_500_000, 12_500),
+            (60_000_000, 60_000),
+            (12, 12_000),
+            (15_000, 15_000),
+        ] {
+            let mut body = Vec::new();
+            put_varint(2, quality::CUSTOM, &mut body);
+            put_varint(8, wire_value, &mut body);
+            let mut rpc_body = Vec::new();
+            put_bytes(2, &body, &mut rpc_body);
+            let (request, _) = capture_setting_rpc(&decode(&rpc_body).unwrap()).unwrap();
+            assert_eq!(request.bitrate_kbps(), Some(kbps));
             let sync = capture_sync_with_bitrate(
                 30,
                 quality::CUSTOM,
@@ -671,19 +684,21 @@ mod tests {
                 },
                 kbps,
             );
-            assert_eq!(number(&decode(&sync).unwrap(), 4), Some(expected));
+            assert_eq!(
+                number(&decode(&sync).unwrap(), 4),
+                Some(u64::from(kbps) * 1_000)
+            );
         }
     }
 
     #[test]
-    fn custom_bitrate_accepts_mbps_or_kbps_and_auto_keeps_current() {
+    fn custom_bitrate_clamps_before_narrowing_and_auto_keeps_current() {
         let custom = |v| CaptureRequest {
             quality: Some(quality::CUSTOM),
             custom_bitrate: v,
             ..Default::default()
         };
-        assert_eq!(custom(Some(12)).bitrate_kbps(), Some(12_000));
-        assert_eq!(custom(Some(15_000)).bitrate_kbps(), Some(15_000));
+        assert_eq!(custom(Some(u64::MAX)).bitrate_kbps(), Some(u32::MAX));
         assert_eq!(custom(None).bitrate_kbps(), None);
         assert_eq!(
             CaptureRequest {
