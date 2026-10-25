@@ -38,6 +38,34 @@ fn secondary_capture_negotiates_full_resolution_sdr_and_rejects_invalid_selectio
     assert!(vendor_capture(Some("unexpected"), Resolution::new(3840, 2160), 60).is_err());
 }
 
+#[test]
+fn secondary_dma_allocation_retains_real_video_meta_across_snapshot_branches() {
+    gst::init().unwrap();
+    let pipeline = gst::parse::launch(&format!(
+        "appsrc name=source ! {} fakesink",
+        crate::video::snapshot::vim4::BRANCH
+    ))
+    .unwrap()
+    .downcast::<gst::Pipeline>()
+    .unwrap();
+    secondary_allocation(&pipeline, Resolution::new(3840, 2160)).unwrap();
+    let mut query = gst::query::Allocation::new(None, true);
+    assert!(pipeline
+        .by_name("source")
+        .unwrap()
+        .static_pad("src")
+        .unwrap()
+        .peer_query(&mut query));
+    assert!(query
+        .find_allocation_meta::<gstreamer_video::VideoMeta>()
+        .is_some());
+    let pools: Vec<_> = query.allocation_pools().collect();
+    assert_eq!(pools.len(), 1);
+    let (_, bytes, minimum, maximum) = &pools[0];
+    assert_eq!(*bytes, 3840 * 2160 * 3 / 2);
+    assert!(*minimum >= 6 && *maximum >= *minimum);
+}
+
 fn pipeline_with_software_scaler(
     resolution: Resolution,
     output: OutputSettings,

@@ -95,6 +95,31 @@ fn vendor_capture(secondary: Option<&str>, source: Resolution, fps: u32) -> Resu
     }
 }
 
+fn secondary_allocation(pipeline: &gst::Pipeline, source: Resolution) -> Result<()> {
+    let pad = pipeline
+        .by_name("source")
+        .and_then(|source| source.static_pad("src"))
+        .and_then(|pad| pad.peer())
+        .ok_or_else(|| AppError::VideoError("Missing secondary capture boundary".into()))?;
+    let bytes = source
+        .width
+        .checked_mul(source.height)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .map(|bytes| bytes / 2)
+        .ok_or_else(|| AppError::VideoError("Secondary capture geometry overflow".into()))?;
+    pad.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, move |_, info| {
+        if let Some(query) = info.query_mut() {
+            if let gst::QueryViewMut::Allocation(allocation) = query.view_mut() {
+                allocation.add_allocation_meta::<gstreamer_video::VideoMeta>(None);
+                allocation.add_allocation_pool(None::<&gst::BufferPool>, bytes, 6, 8);
+                return gst::PadProbeReturn::Handled;
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
+    Ok(())
+}
+
 impl SharedVideoPipeline {
     /// Reconfigure the DMA pipeline without dropping its subscribers or peer connections.
     pub async fn set_vim4_encoding(
@@ -250,6 +275,11 @@ impl SharedVideoPipeline {
         } else {
             None
         };
+        if VideoBackend::current() == VideoBackend::Vendor
+            && std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").as_deref() == Ok("1")
+        {
+            secondary_allocation(&capture.0, source.0)?;
+        }
         capture
             .0
             .set_state(gst::State::Playing)
