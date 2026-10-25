@@ -69,11 +69,30 @@ fn description(config: &SharedVideoPipelineConfig, source: Resolution, fps: u32)
         3
     };
     let filter = config.output.filter(source, fps);
-    Ok(format!("vfmcapsrc name=source ! {}queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! {filter}\
+    let capture = vendor_capture(
+        std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").ok().as_deref(),
+        source,
+        fps,
+    )?;
+    Ok(format!("{capture} ! {}queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! {filter}\
         amlvenc name=encoder bitrate={} gop=0 framerate={} intra-refresh-rows={refresh_rows} min-force-key-unit-interval=250000000 ! \
         video/x-{codec} ! {codec}parse config-interval=-1 ! \
         video/x-{codec},stream-format=byte-stream,alignment=au ! appsink name=frames sync=false max-buffers=2",
         crate::video::snapshot::vim4::BRANCH, config.bitrate_kbps().clamp(1000, 60000), fps))
+}
+
+fn vendor_capture(secondary: Option<&str>, source: Resolution, fps: u32) -> Result<String> {
+    match secondary {
+        None | Some("0") => Ok("vfmcapsrc name=source".into()),
+        Some("1") => Ok(format!(
+            "v4l2src name=source device=/dev/video71 io-mode=dmabuf do-timestamp=true ! \
+             video/x-raw,format=NV21,width={},height={},framerate={fps}/1,colorimetry=bt709",
+            source.width, source.height
+        )),
+        _ => Err(AppError::VideoError(
+            "VIM4_SECONDARY_HDMI_CAPTURE must be 0 or 1".into(),
+        )),
+    }
 }
 
 impl SharedVideoPipeline {

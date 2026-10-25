@@ -3,6 +3,41 @@ use crate::platform::vim4::OutputSettings;
 use gstreamer_app::{AppSink, AppSrc};
 use gstreamer_video::{VideoFormat, VideoInfo};
 
+#[test]
+fn secondary_capture_negotiates_full_resolution_sdr_and_rejects_invalid_selection() {
+    gst::init().unwrap();
+    let source = vendor_capture(Some("1"), Resolution::new(3840, 2160), 60).unwrap();
+    let pipeline = gst::parse::launch(&format!("{source} ! fakesink"))
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+    assert_eq!(
+        pipeline
+            .by_name("source")
+            .unwrap()
+            .property::<String>("device"),
+        "/dev/video71"
+    );
+    let filter = pipeline
+        .iterate_elements()
+        .into_iter()
+        .filter_map(|element| element.ok())
+        .find(|element| {
+            element
+                .factory()
+                .is_some_and(|factory| factory.name() == "capsfilter")
+        })
+        .unwrap();
+    let caps = filter.property::<gst::Caps>("caps");
+    let info = VideoInfo::from_caps(&caps).unwrap();
+    assert_eq!(
+        (info.width(), info.height(), info.fps()),
+        (3840, 2160, gst::Fraction::new(60, 1))
+    );
+    assert_eq!(info.format(), VideoFormat::Nv21);
+    assert!(vendor_capture(Some("unexpected"), Resolution::new(3840, 2160), 60).is_err());
+}
+
 fn pipeline_with_software_scaler(
     resolution: Resolution,
     output: OutputSettings,
