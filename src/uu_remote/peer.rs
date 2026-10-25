@@ -706,15 +706,21 @@ impl Peer {
                         &context.client_id,
                         context.ice_id.as_ref().and_then(|v| v.as_str()),
                     ) {
-                        let fps = shared.screen.borrow().1;
+                        let (size, fps) = *shared.screen.borrow();
                         if let Err(e) = signal
                             .emit_event(
                                 FORWARD_SETTING_EVENT,
-                                device_capability(client, ice, fps, codec),
+                                device_capability(client, ice, native_screen(size), fps, codec),
                             )
                             .await
                         {
                             warn!("UU device capability notification failed: {e}");
+                        }
+                        if let Err(e) = signal
+                            .emit_event(FORWARD_SETTING_EVENT, sender_parameters(client, ice))
+                            .await
+                        {
+                            warn!("UU sender parameters notification failed: {e}");
                         }
                         if let Some(control) =
                             context.app_control_id.as_ref().and_then(|v| v.as_str())
@@ -983,17 +989,37 @@ async fn restrict_video_codec(pc: &RTCPeerConnection, codec: VideoCodecType) -> 
 fn device_capability(
     client_id: &str,
     ice_id: &str,
+    native: Rect,
     fps: u32,
     codec: VideoCodecType,
 ) -> serde_json::Value {
     serde_json::json!({
         "client_id": client_id,
-        "type": "device_capability",
         "data": {
-            "display_info": [{"id": 0, "fps": fps, "type": 0, "hdr": 0}],
-            "video_codec_capability": [{"video_codec": if codec == VideoCodecType::H265 { 2 } else { 1 }, "chroma_sampling": 1, "codec_impl": 5, "bit_depth": 8}],
-            "ice_id": ice_id
+            "type": "device_capability",
+            "device_capability": {
+                "display_info": [{"id": 0, "fps": fps, "type": 0, "hdr": -1}],
+                "video_codec_capability": [{
+                    "video_codec": if codec == VideoCodecType::H265 { 2 } else { 1 },
+                    "chroma_sampling": 1, "codec_impl": 5, "bit_depth": 8,
+                    "width": native.width, "height": native.height
+                }],
+                "ice_id": ice_id
+            }
         }
+    })
+}
+
+fn sender_parameters(client_id: &str, ice_id: &str) -> serde_json::Value {
+    let media = serde_json::json!({
+        "capture_impl": "HDMI", "encoder_impl": "One-KVM", "video_track_index": 0
+    });
+    let mut parameters = media.clone();
+    parameters["ice_id"] = ice_id.into();
+    parameters["sender_media_infos"] = serde_json::json!([media]);
+    serde_json::json!({
+        "client_id": client_id,
+        "data": {"type": "sender_para_info", "sender_para_info": parameters}
     })
 }
 
@@ -1732,6 +1758,55 @@ async fn apply_capture_setting(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn forwarded_capability_is_readable_by_the_viewer_message_dispatcher() {
+        let (outgoing, mut received) = tokio::sync::mpsc::channel(2);
+        let signaling = SignalingClient::with_test_sender(outgoing);
+        for codec in [VideoCodecType::H264, VideoCodecType::H265] {
+            let size = Rect {
+                width: 3840,
+                height: 2160,
+            };
+            signaling
+                .emit_event(
+                    FORWARD_SETTING_EVENT,
+                    device_capability("test-client", "test-ice", size, 60, codec),
+                )
+                .await
+                .unwrap();
+            let packet = received.recv().await.unwrap();
+            let envelope: serde_json::Value = serde_json::from_str(&packet[2..]).unwrap();
+            assert_eq!(envelope[0], FORWARD_SETTING_EVENT);
+            let dispatch = &envelope[1]["data"];
+            assert_eq!(dispatch["type"], "device_capability");
+            let capability = &dispatch[dispatch["type"].as_str().unwrap()];
+            assert_eq!(capability["ice_id"], "test-ice");
+            let formats = capability["video_codec_capability"].as_array().unwrap();
+            assert_eq!(formats.len(), 1);
+            assert_eq!(formats[0]["width"], size.width);
+            assert_eq!(formats[0]["height"], size.height);
+            assert_eq!(
+                formats[0]["video_codec"],
+                if codec == VideoCodecType::H265 { 2 } else { 1 }
+            );
+            assert_eq!(formats[0]["chroma_sampling"], 1);
+            assert_eq!(capability["display_info"][0]["hdr"], -1);
+        }
+        signaling
+            .emit_event(
+                FORWARD_SETTING_EVENT,
+                sender_parameters("test-client", "test-ice"),
+            )
+            .await
+            .unwrap();
+        let packet = received.recv().await.unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&packet[2..]).unwrap();
+        let dispatch = &envelope[1]["data"];
+        let parameters = &dispatch[dispatch["type"].as_str().unwrap()];
+        assert_eq!(parameters["ice_id"], "test-ice");
+        assert_eq!(parameters["sender_media_infos"][0]["video_track_index"], 0);
+    }
 
     #[tokio::test]
     async fn terminal_survives_ice_disconnect_and_slow_send_until_closed() {
