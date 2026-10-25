@@ -3,6 +3,8 @@
 //! The HDMI input is the desktop; keyboard and mouse go through One-KVM HID.
 
 pub mod cloud;
+#[cfg(target_os = "linux")]
+mod files;
 mod ice;
 mod input;
 mod login;

@@ -115,6 +115,31 @@ impl MsdController {
         self.state.read().await.clone()
     }
 
+    pub fn image_transfer_root(&self) -> &Path {
+        &self.images_path
+    }
+
+    /// Exclude gadget operations while a remote transfer holds backing-file fds.
+    /// Refresh live mounts before returning; callers must reject those inodes.
+    pub async fn reserve_image_transfer(
+        &self,
+    ) -> Result<(tokio::sync::OwnedRwLockReadGuard<()>, Vec<PathBuf>)> {
+        let guard = self
+            .operation_lock
+            .clone()
+            .try_read_owned()
+            .map_err(|_| AppError::from(MsdErrorCode::MsdOperationInProgress))?;
+        #[cfg(feature = "vim4")]
+        let state = self.live_state().await?;
+        #[cfg(not(feature = "vim4"))]
+        let state = self.state().await;
+        self.assert_available(&state).await?;
+        Ok((
+            guard,
+            state.mounted_media.into_iter().map(|m| m.path).collect(),
+        ))
+    }
+
     #[cfg(feature = "vim4")]
     pub async fn live_state(&self) -> Result<MsdState> {
         let mut state = self.state.write().await;
@@ -983,6 +1008,36 @@ mod tests {
             controller.try_operation().unwrap_err(),
             AppError::Msd(error) if error.code() == MsdErrorCode::MsdOperationInProgress
         ));
+    }
+
+    #[cfg(feature = "vim4")]
+    #[tokio::test]
+    async fn image_transfer_lease_excludes_mount_delete_and_reports_live_backings() {
+        let temp = TempDir::new().unwrap();
+        let mut controller = MsdController::new(Arc::new(OtgService::new()), temp.path());
+        controller.test_gadget_path = Some(temp.path().into());
+        *controller.msd_function.write().await =
+            Some(MsdFunction::new(0, 1, crate::otg::msd::MsdInquiryStrings::default()).unwrap());
+        controller.state.write().await.available = true;
+        let lun = temp.path().join("functions/mass_storage.usb0/lun.0");
+        std::fs::create_dir_all(&lun).unwrap();
+        let image = temp.path().join("images/test.img");
+        std::fs::create_dir_all(image.parent().unwrap()).unwrap();
+        std::fs::write(&image, [0u8; 512]).unwrap();
+        for (attr, value) in [
+            ("file", image.to_str().unwrap()),
+            ("ro", "0"),
+            ("cdrom", "0"),
+        ] {
+            std::fs::write(lun.join(attr), value).unwrap();
+        }
+        let (lease, backings) = controller.reserve_image_transfer().await.unwrap();
+        assert_eq!(backings, vec![image]);
+        assert!(controller.try_operation().is_err());
+        drop(lease);
+        assert!(controller.try_operation().is_ok());
+        std::fs::remove_file(lun.join("file")).unwrap();
+        assert!(controller.reserve_image_transfer().await.is_err());
     }
 
     #[tokio::test]
