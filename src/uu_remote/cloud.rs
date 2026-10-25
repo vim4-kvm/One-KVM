@@ -156,6 +156,7 @@ pub struct CloudClient {
     creds: Credentials,
     http: reqwest::Client,
     system: UuRemoteSystem,
+    base_url: String,
 }
 
 fn hmac_sha256_hex(key: &[u8], data: &[u8]) -> Result<String, String> {
@@ -202,6 +203,15 @@ impl CloudClient {
             creds,
             http,
             system,
+            base_url: BASE_URL.to_owned(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn at_test_server(url: String) -> Self {
+        Self {
+            base_url: url,
+            ..Self::new(Credentials::default())
         }
     }
 
@@ -287,21 +297,46 @@ impl CloudClient {
 
     /// Signed JSON POST; returns (HTTP status, decoded body).
     pub async fn post(&self, path: &str, body: &Value) -> Result<(u16, Value), String> {
-        self.request(reqwest::Method::POST, path, body).await
+        self.request(
+            reqwest::Method::POST,
+            path,
+            Some(body),
+            Duration::from_secs(12),
+        )
+        .await
+    }
+
+    /// QR status is a long poll. An absent body must also be signed as absent.
+    pub(super) async fn login_post(
+        &self,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<(u16, Value), String> {
+        self.request(reqwest::Method::POST, path, body, Duration::from_secs(60))
+            .await
     }
 
     async fn request(
         &self,
         method: reqwest::Method,
         path: &str,
-        body: &Value,
+        body: Option<&Value>,
+        timeout: Duration,
     ) -> Result<(u16, Value), String> {
-        let body = serde_json::to_string(body).map_err(|e| e.to_string())?;
-        let response = self
+        let body = body
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let signed_body = body.as_deref().unwrap_or("");
+        let mut request = self
             .http
-            .request(method.clone(), format!("{BASE_URL}{path}"))
-            .headers(self.headers(method.as_str(), path, &body)?)
-            .body(body)
+            .request(method.clone(), format!("{}{path}", self.base_url))
+            .timeout(timeout)
+            .headers(self.headers(method.as_str(), path, signed_body)?);
+        if let Some(body) = body {
+            request = request.body(body);
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| format!("UU request {path} failed: {}", e.without_url()))?;
@@ -312,7 +347,12 @@ impl CloudClient {
     pub async fn rename_device(&self, name: &str) -> Result<(), String> {
         let path = format!("/api/v1/device/{}", self.creds.device_id);
         let (status, body) = self
-            .request(reqwest::Method::PUT, &path, &json!({"alias": name}))
+            .request(
+                reqwest::Method::PUT,
+                &path,
+                Some(&json!({"alias": name})),
+                Duration::from_secs(12),
+            )
             .await?;
         let data = api_data("device name", status, &body)?;
         if data.get("alias").and_then(Value::as_str) != Some(name) {

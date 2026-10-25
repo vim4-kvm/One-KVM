@@ -5,6 +5,7 @@
 pub mod cloud;
 mod ice;
 mod input;
+mod login;
 mod metrics;
 mod peer;
 mod signaling;
@@ -22,7 +23,9 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde::Serialize;
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 use tokio::sync::{mpsc, watch, Notify};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -519,7 +522,7 @@ async fn register_device(
 }
 
 /// Register this host (once) and bind it to an account by scanning the QR code with the UU
-/// mobile app: gen/login -> long-poll login/status (1 wait, 2 scanned, 3/4 final) -> by_qrcode.
+/// mobile app: gen/login -> long-poll login/status -> by_qrcode only after status 4.
 async fn login_flow(inner: &Inner) -> Result<String, String> {
     let profile = inner.profile.lock().clone();
     let mut credentials = inner.credentials.lock().clone();
@@ -541,95 +544,34 @@ async fn login_flow(inner: &Inner) -> Result<String, String> {
         },
         profile.system,
     );
-    loop {
-        let (status, body) = client.post("/api/v1/qrcode/gen/login", &json!({})).await?;
-        let data = api_data("QR code", status, &body)?;
-        let url = data
-            .get("qrcode_jump_url")
-            .and_then(Value::as_str)
-            .ok_or("QR response has no URL")?
-            .to_string();
-        let ticket = data
-            .get("token")
-            .or_else(|| data.get("status_query_ticket"))
-            .and_then(Value::as_str)
-            .ok_or("QR response has no ticket")?
-            .to_string();
-        inner.login.send_replace(UuLoginState {
-            stage: UuLoginStage::Waiting,
-            qr_url: Some(url.clone()),
-            message: None,
-        });
-        let mut login_status = 1i64;
-        for _ in 0..150 {
-            let query =
-                json!({"token": ticket, "qrcode_jump_url": url, "login_status": login_status});
-            let Ok((status, body)) = client.post("/api/v1/qrcode/login/status", &query).await
-            else {
-                continue; // long-poll timeout: ask again
-            };
-            if body.get("code").and_then(Value::as_i64) == Some(cloud::QR_EXPIRED) {
-                break;
-            }
-            let current = api_data("QR status", status, &body)?
-                .get("status")
-                .and_then(Value::as_i64)
-                .unwrap_or(login_status);
-            if current == login_status {
-                continue;
-            }
-            login_status = current;
-            if current == 2 {
-                inner.login.send_replace(UuLoginState {
-                    stage: UuLoginStage::Scanned,
-                    qr_url: Some(url.clone()),
-                    message: None,
-                });
-                continue;
-            }
-            if !matches!(current, 3 | 4) {
-                break;
-            }
-            let (status, body) = client
-                .post(
-                    "/api/v1/login/by_qrcode",
-                    &json!({"token": ticket, "qrcode_jump_url": url}),
-                )
-                .await?;
-            let Ok(data) = api_data("QR login", status, &body) else {
-                break; // cancelled on the phone: offer a new code
-            };
-            let token = data
-                .get("token")
-                .and_then(Value::as_str)
-                .ok_or("login returned no token")?;
-            credentials.user_id = data
-                .get("user_id")
-                .and_then(Value::as_str)
-                .ok_or("login returned no user id")?
-                .to_string();
-            credentials.csrf =
-                cloud::csrf_from_token(token).ok_or("login token carries no csrf claim")?;
-            credentials.token = token.to_string();
-            credentials.nickname = data
-                .get("nickname")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            save(inner, &credentials)?;
-            inner.credentials_changed.notify_waiters();
-            CloudClient::for_system(credentials.clone(), profile.system)
-                .rename_device(&profile.device_name)
-                .await?;
-            info!("UU account bound");
-            return Ok(if credentials.nickname.is_empty() {
-                credentials.user_id.clone()
-            } else {
-                credentials.nickname.clone()
-            });
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+    let data = login::authenticate(inner, &client).await?;
+    let token = data
+        .get("token")
+        .and_then(Value::as_str)
+        .ok_or("login returned no token")?;
+    credentials.user_id = data
+        .get("user_id")
+        .and_then(Value::as_str)
+        .ok_or("login returned no user id")?
+        .to_string();
+    credentials.csrf = cloud::csrf_from_token(token).ok_or("login token carries no csrf claim")?;
+    credentials.token = token.to_string();
+    credentials.nickname = data
+        .get("nickname")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    save(inner, &credentials)?;
+    inner.credentials_changed.notify_waiters();
+    CloudClient::for_system(credentials.clone(), profile.system)
+        .rename_device(&profile.device_name)
+        .await?;
+    info!("UU account bound");
+    Ok(if credentials.nickname.is_empty() {
+        credentials.user_id
+    } else {
+        credentials.nickname
+    })
 }
 
 async fn run(inner: Arc<Inner>) {
