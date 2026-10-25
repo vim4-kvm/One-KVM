@@ -144,6 +144,13 @@ vim4-manager 的 hdr-curve 助手保存、立即重载；SDR 输入不受影响�
 
 在工作区固定的 ARM64 Ubuntu 构建环境运行：
 
+先在主仓运行 `python3 packaging/kernel-edge/build-gstreamer.py build/mainline-gstreamer`
+（输出目录须为空），生成私有标准 V4L2 插件；组件打包自动执行此步骤。
+独立 worktree 可用 `VIM4_V4L2_PLUGIN` 指定生成的插件文件。
+服务优先选择驱动支持的连续 NV21 单 fd 布局，保留真实 VideoMeta；
+避免厂商 amlvconv 对多 fd 色度平面漏 unref，重配后遗留整池 VDIN1 CMA。
+不支持连续格式的设备仍按原规则回退；不改变内核 CMA 预留。
+
 ```sh
 npm --prefix web ci --ignore-scripts
 npm --prefix web run build
