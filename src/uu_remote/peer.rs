@@ -704,20 +704,23 @@ impl Peer {
                     let signal = &shared.deps.signaling;
                     if let (Some(client), Some(ice)) = (
                         &context.client_id,
-                        context.ice_id.as_ref().and_then(|v| v.as_str()),
+                        context
+                            .ice_id
+                            .as_ref()
+                            .and_then(super::signaling::session_key),
                     ) {
                         let (size, fps) = *shared.screen.borrow();
                         if let Err(e) = signal
                             .emit_event(
                                 FORWARD_SETTING_EVENT,
-                                device_capability(client, ice, native_screen(size), fps, codec),
+                                device_capability(client, &ice, native_screen(size), fps, codec),
                             )
                             .await
                         {
                             warn!("UU device capability notification failed: {e}");
                         }
                         if let Err(e) = signal
-                            .emit_event(FORWARD_SETTING_EVENT, sender_parameters(client, ice))
+                            .emit_event(FORWARD_SETTING_EVENT, sender_parameters(client, &ice))
                             .await
                         {
                             warn!("UU sender parameters notification failed: {e}");

@@ -707,26 +707,13 @@ async fn room_loop(
                 .await
             }
             SignalingEvent::Released(value) => {
-                let ice = ["ice_id", "iceId"]
-                    .iter()
-                    .find_map(|k| {
-                        value
-                            .get(*k)
-                            .or_else(|| value.get("data").and_then(|d| d.get(*k)))
-                    })
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
                 let mut peers = inner.peers.lock().await;
-                let targets: Vec<String> = match ice {
-                    Some(id) if peers.contains_key(&id) => vec![id],
-                    // A release for an unknown tool must not tear down the desktop.
-                    Some(_) => Vec::new(),
-                    None => peers
+                let targets = released_peers(
+                    &value,
+                    peers
                         .iter()
-                        .filter(|(_, p)| !p.is_terminal())
-                        .map(|(id, _)| id.clone())
-                        .collect(),
-                };
+                        .map(|(id, peer)| (id.clone(), peer.is_terminal())),
+                );
                 info!("UU viewer disconnected: closing={}", targets.len());
                 let closing: Vec<Arc<Peer>> =
                     targets.iter().filter_map(|k| peers.remove(k)).collect();
@@ -751,7 +738,10 @@ async fn handle_soac(
     pending: &mut HashMap<String, (u64, ice::SessionIce)>,
     next_pending: &mut Option<(u64, ice::SessionIce)>,
 ) {
-    let ice = soac.ice_key();
+    let Some(ice) = soac.ice_key() else {
+        warn!("UU message ignored: invalid session identifier");
+        return;
+    };
     let mut peers = inner.peers.lock().await;
     let ended: Vec<String> = peers
         .iter()
@@ -835,6 +825,17 @@ async fn handle_soac(
     }
 }
 
+fn released_peers(value: &Value, peers: impl Iterator<Item = (String, bool)>) -> Vec<String> {
+    let scope = signaling::ice_id_of(value);
+    peers
+        .filter_map(|(id, terminal)| match &scope {
+            signaling::IceId::Session(target) if *target == id => Some(id),
+            signaling::IceId::Missing if !terminal => Some(id),
+            _ => None,
+        })
+        .collect()
+}
+
 fn replacement_peers(
     incoming_terminal: bool,
     peers: impl Iterator<Item = (String, bool, std::time::Instant)>,
@@ -854,6 +855,21 @@ fn replacement_peers(
 #[cfg(test)]
 mod terminal_peer_tests {
     use super::*;
+
+    #[test]
+    fn explicit_release_targets_only_its_session_even_when_id_is_numeric() {
+        let peers = vec![("desktop".to_owned(), false), ("123".to_owned(), true)];
+        let targets = |value: Value| released_peers(&value, peers.clone().into_iter());
+        assert_eq!(targets(json!({"ice_id":123})), vec!["123"]);
+        assert_eq!(targets(json!({"data":{"iceId":"123"}})), vec!["123"]);
+        for id in [json!(999), Value::Null, json!(false), json!({}), json!([])] {
+            assert!(targets(json!({"ice_id":id})).is_empty());
+        }
+        assert_eq!(targets(json!({})), vec!["desktop"]);
+        let message: SoacMessage =
+            serde_json::from_value(json!({"type":"candidate","ice_id":123})).unwrap();
+        assert_eq!(message.ice_key().as_deref(), Some("123"));
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn expired_login_ends_attached_and_detached_sessions_even_if_save_fails() {

@@ -39,15 +39,11 @@ pub struct SoacMessage {
 }
 
 impl SoacMessage {
-    pub fn ice_key(&self) -> String {
-        self.ice_id
-            .as_ref()
-            .map(|v| {
-                v.as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| v.to_string())
-            })
-            .unwrap_or_default()
+    pub fn ice_key(&self) -> Option<String> {
+        match self.ice_id.as_ref() {
+            Some(value) => session_key(value),
+            None => Some(String::new()),
+        }
     }
 }
 
@@ -130,16 +126,39 @@ pub struct SignalingClient {
     outgoing: mpsc::Sender<String>,
 }
 
-fn ice_id_of(value: &Value) -> Option<String> {
-    ["ice_id", "iceId"]
-        .iter()
-        .find_map(|k| {
-            value
-                .get(*k)
-                .or_else(|| value.get("data").and_then(|d| d.get(*k)))
-        })
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+pub(super) fn session_key(value: &Value) -> Option<String> {
+    match value {
+        Value::String(id) if !id.is_empty() => Some(id.clone()),
+        Value::Number(id) if id.is_i64() || id.is_u64() => Some(id.to_string()),
+        _ => None,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum IceId {
+    Missing,
+    Session(String),
+    Invalid,
+}
+
+pub(super) fn ice_id_of(value: &Value) -> IceId {
+    let raw = ["ice_id", "iceId"].iter().find_map(|k| {
+        value
+            .get(*k)
+            .or_else(|| value.get("data").and_then(|d| d.get(*k)))
+    });
+    match raw {
+        None => IceId::Missing,
+        Some(value) => session_key(value).map_or(IceId::Invalid, IceId::Session),
+    }
+}
+
+fn leave_event(value: &Value) -> Option<SignalingEvent> {
+    match ice_id_of(value) {
+        IceId::Missing => Some(SignalingEvent::Disconnected),
+        IceId::Session(_) => Some(SignalingEvent::Released(value.clone())),
+        IceId::Invalid => None,
+    }
 }
 
 impl SignalingClient {
@@ -330,13 +349,7 @@ impl SignalingClient {
                                     }
                                 }
                                 "released" => Some(SignalingEvent::Released(data.clone())),
-                                "left" | "leave" => Some(match ice_id_of(data) {
-                                    Some(_) => SignalingEvent::Released(data.clone()),
-                                    None => {
-                                        info!("UU room expired; renewing");
-                                        SignalingEvent::Disconnected
-                                    }
-                                }),
+                                "left" | "leave" => leave_event(data),
                                 _ => None,
                             };
                             if let Some(event) = event {
@@ -364,7 +377,11 @@ impl SignalingClient {
                             .ok()
                             .and_then(|f| wire::number(&f, 1))
                             .unwrap_or(0);
-                        let ice_id = ice_id_of(&header);
+                        let ice_id = match ice_id_of(&header) {
+                            IceId::Missing => None,
+                            IceId::Session(id) => Some(id),
+                            IceId::Invalid => continue,
+                        };
                         info!(
                             "UU connect request: capture_type={capture_type} ice_id_present={}",
                             ice_id.is_some()
@@ -412,6 +429,31 @@ impl SignalingClient {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn numeric_and_invalid_leaves_never_become_room_expiration() {
+        assert!(matches!(
+            leave_event(&json!({})),
+            Some(SignalingEvent::Disconnected)
+        ));
+        for header in [json!({"ice_id":123}), json!({"data":{"iceId":"123"}})] {
+            assert!(matches!(
+                leave_event(&header),
+                Some(SignalingEvent::Released(_))
+            ));
+            assert_eq!(ice_id_of(&header), IceId::Session("123".into()));
+        }
+        for id in [
+            Value::Null,
+            json!(false),
+            json!({}),
+            json!([]),
+            json!(1.25),
+            json!(""),
+        ] {
+            assert!(leave_event(&json!({"ice_id":id})).is_none());
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn heartbeat_closes_blocked_delivery_before_reporting_disconnect() {
