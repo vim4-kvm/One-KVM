@@ -9,6 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use bytes::Bytes;
 use tokio::sync::{watch, Mutex};
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{debug, info, warn};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -52,6 +53,7 @@ const FORWARD_SETTING_EVENT: &str = "forward_setting";
 const ICE_FINISHED_EVENT: &str = "ice_finished_log";
 const SCREEN_NAME: &str = "HDMI";
 const RTP_CLOCK: u64 = 90_000;
+const TRANSPORT_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bitrates accepted by the shared encoder's custom setting.
 const CUSTOM_KBPS: std::ops::RangeInclusive<u32> = 1_000..=60_000;
 
@@ -338,7 +340,7 @@ pub struct PeerDeps {
 
 /// State shared between the media tasks and the CONTROL channel.
 struct Shared {
-    closed: AtomicBool,
+    closed: CancellationToken,
     terminal: bool,
     terminal_conn: parking_lot::Mutex<Option<Arc<super::terminal::TerminalConn>>>,
     deps: PeerDeps,
@@ -439,6 +441,20 @@ pub struct Peer {
     video: Arc<VideoStreamManager>,
     codec: VideoCodecType,
     shared: Arc<Shared>,
+    _shutdown_guard: DropGuard,
+}
+
+fn spawn_until_closed(
+    closed: CancellationToken,
+    task: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    tokio::spawn(async move {
+        tokio::select! {
+            biased;
+            _ = closed.cancelled() => {},
+            _ = task => {},
+        }
+    });
 }
 
 fn select_video_codec(
@@ -599,7 +615,7 @@ impl Peer {
             .map(|c| c.bitrate_preset)
             .unwrap_or(BitratePreset::Balanced);
         let shared = Arc::new(Shared {
-            closed: AtomicBool::new(false),
+            closed: CancellationToken::new(),
             terminal,
             terminal_conn: parking_lot::Mutex::new(None),
             default_bitrate,
@@ -614,6 +630,8 @@ impl Peer {
             codec,
             video_diagnostics: Mutex::new(VideoDiagnostics::default()),
         });
+        // Also cancel application tasks if constructing or owning the peer ends early.
+        let shutdown_guard = shared.closed.clone().drop_guard();
 
         let (ice_context, ice_signal) = (context.clone(), deps.signaling.clone());
         pc.on_ice_candidate(Box::new(move |candidate: Option<RTCIceCandidate>| {
@@ -648,7 +666,10 @@ impl Peer {
                 .add_track(video_track.local())
                 .await
                 .map_err(|e| format!("Add video track failed: {e}"))?;
-            tokio::spawn(read_video_feedback(video_sender, shared.clone()));
+            spawn_until_closed(
+                shared.closed.clone(),
+                read_video_feedback(video_sender, shared.clone()),
+            );
             // The viewer always offers an Opus m-line.
             let audio_track = Arc::new(TrackLocalStaticSample::new(
                 RTCRtpCodecCapability {
@@ -664,7 +685,7 @@ impl Peer {
                 .add_track(audio_track.clone())
                 .await
                 .map_err(|e| format!("Add audio track failed: {e}"))?;
-            tokio::spawn(async move {
+            spawn_until_closed(shared.closed.clone(), async move {
                 let mut rtcp = [0u8; 1500];
                 while audio_sender.read(&mut rtcp).await.is_ok() {}
             });
@@ -681,6 +702,9 @@ impl Peer {
                 );
                 let (video_track, audio_track) = (video_track.clone(), audio_track.clone());
                 Box::pin(async move {
+                    if shared.closed.is_cancelled() {
+                        return;
+                    }
                     info!("UU peer connection state: {state:?}");
                     match state {
                         PcState::Connected => {
@@ -690,6 +714,7 @@ impl Peer {
                             shared.update_input(SessionInputEvent::Disconnected).await
                         }
                         PcState::Closed | PcState::Failed => {
+                            shared.closed.cancel();
                             shared.update_input(SessionInputEvent::Close).await
                         }
                         _ => {}
@@ -698,8 +723,14 @@ impl Peer {
                         return;
                     }
                     let Some(pc) = pc.upgrade() else { return };
-                    tokio::spawn(stream_video(pc.clone(), video_track, shared.clone(), codec));
-                    tokio::spawn(stream_audio(pc, audio_track, shared.deps.audio.clone()));
+                    spawn_until_closed(
+                        shared.closed.clone(),
+                        stream_video(pc.clone(), video_track, shared.clone(), codec),
+                    );
+                    spawn_until_closed(
+                        shared.closed.clone(),
+                        stream_audio(pc, audio_track, shared.deps.audio.clone()),
+                    );
                     let context = context.lock().await.clone();
                     let signal = &shared.deps.signaling;
                     if let (Some(client), Some(ice)) = (
@@ -742,6 +773,9 @@ impl Peer {
             pc.on_peer_connection_state_change(Box::new(move |state| {
                 let shared = closing.clone();
                 Box::pin(async move {
+                    if matches!(state, PcState::Closed | PcState::Failed) {
+                        shared.closed.cancel();
+                    }
                     if let Some(conn) = shared.terminal_conn.lock().as_ref() {
                         terminal_connection_state(conn, state);
                     }
@@ -753,7 +787,7 @@ impl Peer {
         pc.on_data_channel(Box::new(move |channel: Arc<RTCDataChannel>| {
             let shared = channel_shared.clone();
             Box::pin(async move {
-                if shared.closed.load(Ordering::Acquire) {
+                if shared.closed.is_cancelled() {
                     return;
                 }
                 let label = channel.label().to_string();
@@ -803,6 +837,7 @@ impl Peer {
             video: deps.video.clone(),
             codec,
             shared,
+            _shutdown_guard: shutdown_guard,
         })
     }
 
@@ -935,17 +970,21 @@ impl Peer {
     }
 
     pub async fn close(&self) {
-        self.shared.closed.store(true, Ordering::Release);
+        self.shared.closed.cancel();
         if let Some(conn) = self.shared.terminal_conn.lock().take() {
             conn.close();
         }
         // Finish releases before the room loop can create a replacement peer.
         self.shared.update_input(SessionInputEvent::Close).await;
-        if let Err(e) = self.pc.close().await {
-            debug!("UU peer close: {e}");
-        }
         if !self.shared.terminal {
             self.video.set_uu_negotiated_codec(None).await;
+        }
+        // Only transport teardown is bounded. Input releases above must finish
+        // before a replacement can acquire HID ownership or the shared codec.
+        match tokio::time::timeout(TRANSPORT_CLOSE_TIMEOUT, self.pc.close()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => debug!("UU peer close: {e}"),
+            Err(_) => warn!("UU peer transport close timed out; application tasks cancelled"),
         }
     }
 }
@@ -1344,7 +1383,7 @@ async fn terminal_send<T, E>(
 }
 
 async fn terminal_rpc(channel: &RTCDataChannel, shared: &Shared, data: &[u8]) -> bool {
-    if shared.closed.load(Ordering::Acquire) {
+    if shared.closed.is_cancelled() {
         return true;
     }
     let response = wire::decode(data).ok().and_then(|fields| {
@@ -1376,7 +1415,10 @@ fn attach_control(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
         let (channel, shared) = (open_channel.clone(), open_shared.clone());
         Box::pin(async move {
             shared.update_input(SessionInputEvent::ControlOpened).await;
-            tokio::spawn(control_initialization(channel, shared));
+            spawn_until_closed(
+                shared.closed.clone(),
+                control_initialization(channel, shared),
+            );
         })
     }));
     let closing = shared.clone();
@@ -1860,8 +1902,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn terminal_offer_has_no_media_and_preserves_desktop_codec() {
+    async fn terminal_peer_fixture() -> (Peer, RTCPeerConnection, String) {
         let viewer = APIBuilder::new()
             .build()
             .new_peer_connection(Default::default())
@@ -1906,6 +1947,14 @@ mod tests {
         .await
         .unwrap();
         let answer = peer.handle_offer(&soac).await.unwrap();
+        (peer, viewer, answer)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_offer_has_no_media_and_preserves_desktop_codec() {
+        let (peer, viewer, answer) = terminal_peer_fixture().await;
+        let video = peer.video.clone();
         assert!(answer.contains("m=application"));
         assert!(!answer.contains("m=video"));
         assert!(!answer.contains("m=audio"));
@@ -1920,6 +1969,58 @@ mod tests {
             video.uu_negotiated_codec().await,
             Some(VideoCodecType::H265)
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stuck_transport_close_releases_room_lock_and_cancels_application_tasks() {
+        let (peer, viewer, _) = terminal_peer_fixture().await;
+        let (entered, callback_started) = tokio::sync::oneshot::channel();
+        let (callback_life, callback_dropped) = tokio::sync::oneshot::channel::<()>();
+        let mut pending = Some((entered, callback_life));
+        peer.pc
+            .on_peer_connection_state_change(Box::new(move |state| {
+                let pending = if state == PcState::Closed {
+                    pending.take()
+                } else {
+                    None
+                };
+                Box::pin(async move {
+                    if let Some((entered, _life)) = pending {
+                        let _ = entered.send(());
+                        std::future::pending::<()>().await;
+                    }
+                })
+            }));
+        let (started, task_started) = tokio::sync::oneshot::channel();
+        let (task_life, task_dropped) = tokio::sync::oneshot::channel::<()>();
+        spawn_until_closed(peer.shared.closed.clone(), async move {
+            let _life = task_life;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        task_started.await.unwrap();
+        let peer = Arc::new(peer);
+        let room = Arc::new(Mutex::new(vec![peer.clone()]));
+        let closing_room = room.clone();
+        let closing = tokio::spawn(async move {
+            let mut peers = closing_room.lock().await;
+            peers.pop().unwrap().close().await;
+        });
+        callback_started.await.unwrap();
+        assert!(room.try_lock().is_err());
+        assert!(task_dropped.await.is_err());
+        tokio::time::timeout(TRANSPORT_CLOSE_TIMEOUT + Duration::from_secs(2), closing)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(callback_dropped.await.is_err());
+        assert!(
+            room.lock().await.is_empty(),
+            "the next room operation must make progress"
+        );
+        assert!(peer.shared.closed.is_cancelled());
+        viewer.close().await.unwrap();
     }
 
     #[test]
