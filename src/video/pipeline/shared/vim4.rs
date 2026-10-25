@@ -11,19 +11,27 @@ mod wave5;
 #[cfg(test)]
 mod queue_tests;
 
-fn restore_scaler_clock() -> Result<()> {
-    let output = std::process::Command::new("sudo")
-        .args(["-n", "/usr/libexec/vim4-onekvm", "video-clock"])
+fn restore_scaler_clock(command: &mut std::process::Command) {
+    let result = command
         .output()
-        .map_err(|error| AppError::VideoError(format!("Restore scaler clock: {error}")))?;
-    if !output.status.success() {
-        return Err(AppError::VideoError(format!(
-            "Restore scaler clock: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+        .map_err(|error| error.to_string())
+        .and_then(|output| {
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            } else {
+                Err(format!(
+                    "{}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ))
+            }
+        });
+    match result {
+        Ok(actual) => info!(%actual, "VIM4 scaler clock restored"),
+        Err(error) => {
+            warn!(%error, "VIM4 scaler clock restoration failed; continuing video at reduced throughput")
+        }
     }
-    info!(actual = %String::from_utf8_lossy(&output.stdout).trim(), "VIM4 scaler clock restored");
-    Ok(())
 }
 
 struct Capture(gst::Pipeline);
@@ -304,7 +312,11 @@ impl SharedVideoPipeline {
                 && config.output.height > 0
                 && config.output.height < source.0.height
             {
-                restore_scaler_clock()?;
+                restore_scaler_clock(std::process::Command::new("sudo").args([
+                    "-n",
+                    "/usr/libexec/vim4-onekvm",
+                    "video-clock",
+                ]));
             }
             let buffer = sample
                 .buffer()

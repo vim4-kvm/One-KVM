@@ -64,6 +64,40 @@ fn native_uhd_frames_keep_their_original_memory() {
 }
 
 #[test]
+fn scaler_clock_failures_do_not_stop_frame_delivery() {
+    let mut unavailable = std::process::Command::new("/nonexistent-vim4-clock-helper");
+    let mut rejected = std::process::Command::new("/bin/sh");
+    rejected.args(["-c", "exit 1"]);
+    for command in [&mut unavailable, &mut rejected] {
+        let (capture, source, sink, info) = pipeline_with_software_scaler(
+            Resolution::new(64, 48),
+            OutputSettings {
+                height: 24,
+                fps: 60,
+            },
+        );
+        capture.0.set_state(gst::State::Playing).unwrap();
+        for sequence in 0..3 {
+            source.push_buffer(frame(&info, sequence)).unwrap();
+        }
+        source.end_of_stream().unwrap();
+        let first = sink
+            .try_pull_sample(gst::ClockTime::from_seconds(2))
+            .unwrap();
+        let () = restore_scaler_clock(command);
+        let mut previous = first.buffer().unwrap().pts().unwrap();
+        for _ in 0..2 {
+            let sample = sink
+                .try_pull_sample(gst::ClockTime::from_seconds(2))
+                .expect("video must continue after the clock helper fails");
+            let timestamp = sample.buffer().unwrap().pts().unwrap();
+            assert!(timestamp > previous);
+            previous = timestamp;
+        }
+    }
+}
+
+#[test]
 fn scaling_progresses_while_the_encoder_holds_a_frame() {
     let (capture, source, _sink, info) = pipeline_with_software_scaler(
         Resolution::new(64, 48),
