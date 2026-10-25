@@ -114,10 +114,23 @@ impl UuLoginState {
     }
 }
 
+#[derive(Clone)]
+struct AccountState {
+    credentials: Credentials,
+    generation: u64,
+}
+
+impl AccountState {
+    fn replace(&mut self, credentials: Credentials) {
+        self.credentials = credentials;
+        self.generation = self.generation.wrapping_add(1);
+    }
+}
+
 struct Inner {
     credentials_path: PathBuf,
     profile: Mutex<UuRemoteConfig>,
-    credentials: Mutex<Credentials>,
+    credentials: Mutex<AccountState>,
     /// Woken when credentials change (login or logout).
     credentials_changed: Notify,
     state: Mutex<(UuRemoteServiceState, Option<String>)>,
@@ -154,7 +167,10 @@ impl UuRemoteService {
                 ),
                 credentials_path,
                 profile: Mutex::new(UuRemoteConfig::default()),
-                credentials: Mutex::new(credentials),
+                credentials: Mutex::new(AccountState {
+                    credentials,
+                    generation: 0,
+                }),
                 credentials_changed: Notify::new(),
                 state: Mutex::new((UuRemoteServiceState::Stopped, None)),
                 login: watch::channel(UuLoginState::idle()).0,
@@ -180,11 +196,12 @@ impl UuRemoteService {
         let old = self.inner.profile.lock().clone();
         if old.system != profile.system {
             let path = profile_path(&self.inner.credentials_path, profile.system);
-            let credentials = load_profile_credentials(&path, &self.inner.credentials.lock())?;
+            let credentials =
+                load_profile_credentials(&path, &self.inner.credentials.lock().credentials)?;
             self.cancel_login().await;
             self.stop().await;
             *self.inner.profile.lock() = profile.clone();
-            *self.inner.credentials.lock() = credentials;
+            self.inner.credentials.lock().replace(credentials);
         } else {
             // A pending QR flow must not later overwrite a newly applied profile.
             if old.device_name != profile.device_name {
@@ -192,7 +209,7 @@ impl UuRemoteService {
             }
         }
         if old.system == profile.system && old.device_name != profile.device_name {
-            let credentials = self.inner.credentials.lock().clone();
+            let credentials = self.inner.credentials.lock().credentials.clone();
             if credentials.logged_in() {
                 register_device(&self.inner, &credentials, profile).await?;
             }
@@ -241,7 +258,7 @@ impl UuRemoteService {
         } else {
             (UuRemoteServiceState::Stopped, None)
         };
-        let credentials = self.inner.credentials.lock().clone();
+        let credentials = self.inner.credentials.lock().credentials.clone();
         let peers: Vec<_> = self
             .inner
             .peers
@@ -376,15 +393,17 @@ impl UuRemoteService {
     pub async fn logout(&self) -> Result<(), String> {
         self.cancel_login().await;
         let credentials = {
-            let mut credentials = self.inner.credentials.lock();
+            let mut current = self.inner.credentials.lock();
+            let mut credentials = current.credentials.clone();
             credentials.logout();
-            credentials.clone()
+            current.replace(credentials.clone());
+            credentials
         };
-        save(&self.inner, &credentials)?;
+        let persisted = save(&self.inner, &credentials);
         info!("UU account unbound");
         self.inner.credentials_changed.notify_waiters();
         close_all(&self.inner).await;
-        Ok(())
+        persisted
     }
 }
 
@@ -402,22 +421,32 @@ async fn close_all(inner: &Inner) {
     inner.terminal.shutdown().await;
 }
 
-async fn login_expired(inner: &Inner, mut credentials: Credentials) {
-    error!("UU login is invalid or expired; a new QR login is required");
-    credentials.logout();
-    if let Err(error) = save(inner, &credentials) {
-        warn!("{error}");
-        *inner.credentials.lock() = credentials;
+async fn login_expired(inner: &Inner, failed: AccountState) {
+    let path = profile_path(&inner.credentials_path, inner.profile.lock().system);
+    {
+        let mut current = inner.credentials.lock();
+        if current.generation != failed.generation {
+            info!("UU obsolete login-expiry response ignored");
+            return;
+        }
+        error!("UU login is invalid or expired; a new QR login is required");
+        let mut expired = current.credentials.clone();
+        expired.logout();
+        if let Err(error) = cloud::save_credentials(&path, &expired) {
+            warn!("{error}");
+        }
+        // Revoke in memory even if persistence fails. Generation and disk writes
+        // share this lock with login/logout, including a reissued identical token.
+        current.replace(expired);
     }
     close_all(inner).await;
 }
 
 fn save(inner: &Inner, credentials: &Credentials) -> Result<(), String> {
-    cloud::save_credentials(
-        &profile_path(&inner.credentials_path, inner.profile.lock().system),
-        credentials,
-    )?;
-    *inner.credentials.lock() = credentials.clone();
+    let path = profile_path(&inner.credentials_path, inner.profile.lock().system);
+    let mut current = inner.credentials.lock();
+    cloud::save_credentials(&path, credentials)?;
+    current.replace(credentials.clone());
     Ok(())
 }
 
@@ -525,7 +554,7 @@ async fn register_device(
 /// mobile app: gen/login -> long-poll login/status -> by_qrcode only after status 4.
 async fn login_flow(inner: &Inner) -> Result<String, String> {
     let profile = inner.profile.lock().clone();
-    let mut credentials = inner.credentials.lock().clone();
+    let mut credentials = inner.credentials.lock().credentials.clone();
     if credentials.ensure_identity() {
         save(inner, &credentials)?;
     }
@@ -576,11 +605,12 @@ async fn login_flow(inner: &Inner) -> Result<String, String> {
 
 async fn run(inner: Arc<Inner>) {
     loop {
-        let credentials = inner.credentials.lock().clone();
+        let account = inner.credentials.lock().clone();
+        let credentials = account.credentials.clone();
         if !credentials.logged_in() {
             set_state(&inner, UuRemoteServiceState::WaitingLogin, None);
             let changed = inner.credentials_changed.notified();
-            if !inner.credentials.lock().logged_in() {
+            if !inner.credentials.lock().credentials.logged_in() {
                 changed.await;
             }
             continue;
@@ -598,7 +628,7 @@ async fn run(inner: Arc<Inner>) {
         {
             Ok(room) => room,
             Err(CloudError::LoginExpired) => {
-                login_expired(&inner, credentials).await;
+                login_expired(&inner, account).await;
                 continue;
             }
             Err(e) => {
@@ -856,6 +886,83 @@ fn replacement_peers(
 mod terminal_peer_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn obsolete_expiry_cannot_revoke_a_new_login_or_its_terminal_sessions() {
+        use terminal::frame::*;
+        for same_token in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let service = UuRemoteService::new(
+                dir.path().into(),
+                VideoStreamManager::with_webrtc_streamer(
+                    crate::video::streamer::Streamer::new(),
+                    crate::webrtc::WebRtcStreamer::new(),
+                ),
+                Arc::new(HidController::new(crate::hid::HidBackendType::None, None)),
+                Arc::new(AudioController::default()),
+            );
+            let mut old = Credentials {
+                user_id: "synthetic-user".into(),
+                device_id: "synthetic-device".into(),
+                token: "synthetic-old".into(),
+                csrf: "synthetic-csrf".into(),
+                ..Default::default()
+            };
+            old.ensure_identity();
+            save(&service.inner, &old).unwrap();
+            let failed = service.inner.credentials.lock().clone();
+            let (complete, response) = tokio::sync::oneshot::channel();
+            let inner = service.inner.clone();
+            let late_response = tokio::spawn(async move {
+                response.await.unwrap();
+                login_expired(&inner, failed).await;
+            });
+            let mut fresh = old;
+            if !same_token {
+                fresh.token = "synthetic-new".into();
+            }
+            save(&service.inner, &fresh).unwrap();
+            let registry = &service.inner.terminal;
+            let mut config = crate::config::UuTerminalConfig::default();
+            config.serial.enabled = true;
+            registry.configure(&config, "test").await.unwrap();
+            registry.start();
+            let (out, mut replies) = mpsc::channel(64);
+            let conn = terminal::TerminalConn::new(registry.clone(), out);
+            conn.handle(&encode(OPEN, 0, b"{}")).await;
+            loop {
+                let bytes = replies.recv().await.unwrap();
+                let frame = decode(&bytes).unwrap();
+                if frame.kind == OPEN_RESP {
+                    assert_eq!(json(frame.payload)["code"], 0);
+                    break;
+                }
+            }
+            complete.send(()).unwrap();
+            late_response.await.unwrap();
+            assert_eq!(
+                service.inner.credentials.lock().credentials.token,
+                fresh.token
+            );
+            let saved = cloud::load_credentials(&service.inner.credentials_path).unwrap();
+            assert_eq!(saved.token, fresh.token);
+            assert_eq!(registry.status(0).await.sessions.len(), 1);
+            conn.handle(&encode(OPEN, 0, b"{}")).await;
+            loop {
+                let bytes = replies.recv().await.unwrap();
+                let frame = decode(&bytes).unwrap();
+                if frame.kind == OPEN_RESP {
+                    assert_eq!(
+                        json(frame.payload)["code"],
+                        0,
+                        "new login must remain accepting"
+                    );
+                    break;
+                }
+            }
+            registry.shutdown().await;
+        }
+    }
+
     #[test]
     fn explicit_release_targets_only_its_session_even_when_id_is_numeric() {
         let peers = vec![("desktop".to_owned(), false), ("123".to_owned(), true)];
@@ -914,8 +1021,16 @@ mod terminal_peer_tests {
                 token: "expired-token".into(),
                 ..Default::default()
             };
-            login_expired(&service.inner, credentials).await;
-            assert!(service.inner.credentials.lock().token.is_empty());
+            service.inner.credentials.lock().replace(credentials);
+            let failed = service.inner.credentials.lock().clone();
+            login_expired(&service.inner, failed).await;
+            assert!(service
+                .inner
+                .credentials
+                .lock()
+                .credentials
+                .token
+                .is_empty());
             assert!(registry.status(0).await.sessions.is_empty());
             conn.handle(&encode(OPEN, 0, b"{}")).await;
             loop {
