@@ -3,7 +3,7 @@
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -56,6 +56,10 @@ const RTP_CLOCK: u64 = 90_000;
 const TRANSPORT_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bitrates accepted by the shared encoder's custom setting.
 const CUSTOM_KBPS: std::ops::RangeInclusive<u32> = 1_000..=60_000;
+
+#[cfg(test)]
+#[path = "desktop_tests.rs"]
+mod desktop_tests;
 
 struct CaptureIndex(u16);
 impl webrtc::util::MarshalSize for CaptureIndex {
@@ -336,12 +340,69 @@ pub struct PeerDeps {
     pub audio: Arc<AudioController>,
     pub signaling: Arc<SignalingClient>,
     pub terminal: Arc<super::terminal::Registry>,
+    pub desktop: Arc<DesktopCoordinator>,
+}
+
+/// Serialize desktop takeover across normal and promoted tool connections.
+/// Tool transports survive losing the desktop role, including their terminals.
+#[derive(Default)]
+pub struct DesktopCoordinator(Mutex<Weak<Shared>>);
+
+impl DesktopCoordinator {
+    async fn claim(&self, next: &Arc<Shared>) -> Result<(), String> {
+        let mut owner = self.0.lock().await;
+        if next.closed.is_cancelled() {
+            return Err("Connection closed".into());
+        }
+        if *next.desktop.borrow() {
+            return Ok(());
+        }
+        if next.media.get().is_none() {
+            return Err("Desktop requires a receiving video section in the tool offer".into());
+        }
+        if let Some(old) = owner.upgrade().filter(|old| !Arc::ptr_eq(old, next)) {
+            old.stop_desktop().await;
+            if !old.terminal {
+                old.closed.cancel();
+                old.update_input(SessionInputEvent::Close).await;
+                if let Some(pc) = old.media.get().and_then(|m| m.pc.upgrade()) {
+                    let _ = tokio::time::timeout(TRANSPORT_CLOSE_TIMEOUT, pc.close()).await;
+                }
+            }
+        }
+        next.deps
+            .video
+            .set_uu_negotiated_codec(Some(next.codec))
+            .await;
+        next.desktop.send_replace(true);
+        next.update_input(SessionInputEvent::ControlOpened).await;
+        if next
+            .media
+            .get()
+            .and_then(|m| m.pc.upgrade())
+            .is_some_and(|p| p.connection_state() == PcState::Connected)
+        {
+            next.update_input(SessionInputEvent::Connected).await;
+        }
+        *owner = Arc::downgrade(next);
+        start_desktop_streams(next.clone());
+        Ok(())
+    }
+}
+
+struct DesktopMedia {
+    pc: Weak<RTCPeerConnection>,
+    video: Arc<VideoTrack>,
+    audio: Arc<TrackLocalStaticSample>,
 }
 
 /// State shared between the media tasks and the CONTROL channel.
 struct Shared {
     closed: CancellationToken,
     terminal: bool,
+    desktop: watch::Sender<bool>,
+    media: OnceLock<DesktopMedia>,
+    desktop_task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
     terminal_conn: parking_lot::Mutex<Option<Arc<super::terminal::TerminalConn>>>,
     deps: PeerDeps,
     sequence: AtomicU64,
@@ -359,6 +420,20 @@ struct Shared {
 }
 
 impl Shared {
+    async fn stop_desktop(&self) {
+        if !self.desktop.send_replace(false) {
+            return;
+        }
+        let task = self.desktop_task.lock().take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        self.update_input(SessionInputEvent::Disconnected).await;
+        self.deps.video.set_uu_negotiated_codec(None).await;
+        self.video_diagnostics.lock().await.sender = None;
+    }
+
     async fn refresh_screen(&self) {
         if let Some(config) = self.deps.video.get_encoding_config().await {
             let kbps = u64::from(config.bitrate_kbps());
@@ -417,7 +492,12 @@ impl Shared {
     }
 
     async fn update_input(&self, event: SessionInputEvent<'_>) {
-        if self.terminal {
+        if !*self.desktop.borrow()
+            && !matches!(
+                event,
+                SessionInputEvent::Disconnected | SessionInputEvent::Close
+            )
+        {
             return;
         }
         let source = if matches!(
@@ -432,6 +512,31 @@ impl Shared {
             .update(event, |actions| self.send_hid(actions, source))
             .await;
     }
+}
+
+fn start_desktop_streams(shared: Arc<Shared>) {
+    let Some(media) = shared.media.get() else {
+        return;
+    };
+    let Some(pc) = media.pc.upgrade() else { return };
+    let (video, audio) = (media.video.clone(), media.audio.clone());
+    let mut slot = shared.desktop_task.lock();
+    if slot.as_ref().is_some_and(|task| !task.is_finished()) {
+        return;
+    }
+    let running = shared.clone();
+    *slot = Some(tokio::spawn(async move {
+        tokio::select! {
+            biased;
+            _ = running.closed.cancelled() => {},
+            _ = async {
+                tokio::join!(
+                    stream_video(pc.clone(), video, running.clone(), running.codec),
+                    stream_audio(pc, audio, running.deps.audio.clone())
+                );
+            } => {},
+        }
+    }));
 }
 
 pub struct Peer {
@@ -546,11 +651,14 @@ impl Peer {
         terminal: bool,
     ) -> Result<Self, String> {
         let sdp = offer_sdp(offer).ok_or("Offer SDP is empty")?;
-        let codec = if terminal {
-            VideoCodecType::H264
-        } else {
-            let constraints = deps.video.codec_constraints().await;
-            select_video_codec(&sdp, deps.video_codec, &constraints.allowed_webrtc_codecs)?
+        let constraints = deps.video.codec_constraints().await;
+        let offered_codec =
+            select_video_codec(&sdp, deps.video_codec, &constraints.allowed_webrtc_codecs);
+        let media_available = offered_codec.is_ok();
+        let codec = match offered_codec {
+            Ok(codec) => codec,
+            Err(_) if terminal => VideoCodecType::H264,
+            Err(error) => return Err(error),
         };
         if !terminal {
             info!(?codec, preference = ?deps.video_codec, "UU negotiated video codec");
@@ -617,6 +725,9 @@ impl Peer {
         let shared = Arc::new(Shared {
             closed: CancellationToken::new(),
             terminal,
+            desktop: watch::channel(false).0,
+            media: OnceLock::new(),
+            desktop_task: parking_lot::Mutex::new(None),
             terminal_conn: parking_lot::Mutex::new(None),
             default_bitrate,
             custom_kbps: AtomicU64::new(u64::from(default_bitrate.bitrate_kbps())),
@@ -660,7 +771,7 @@ impl Peer {
             })
         }));
 
-        if !terminal {
+        if media_available {
             let video_track = Arc::new(VideoTrack::new(codec));
             let video_sender = pc
                 .add_track(video_track.local())
@@ -690,22 +801,24 @@ impl Peer {
                 while audio_sender.read(&mut rtcp).await.is_ok() {}
             });
 
+            let _ = shared.media.set(DesktopMedia {
+                pc: Arc::downgrade(&pc),
+                video: video_track.clone(),
+                audio: audio_track.clone(),
+            });
             let started = Arc::new(AtomicBool::new(false));
-            let (state_pc, state_shared, state_context) =
-                (Arc::downgrade(&pc), shared.clone(), context.clone());
+            let (state_shared, state_context) = (shared.clone(), context.clone());
             pc.on_peer_connection_state_change(Box::new(move |state| {
-                let (pc, shared, context, started) = (
-                    state_pc.clone(),
-                    state_shared.clone(),
-                    state_context.clone(),
-                    started.clone(),
-                );
-                let (video_track, audio_track) = (video_track.clone(), audio_track.clone());
+                let (shared, context, started) =
+                    (state_shared.clone(), state_context.clone(), started.clone());
                 Box::pin(async move {
                     if shared.closed.is_cancelled() {
                         return;
                     }
                     info!("UU peer connection state: {state:?}");
+                    if let Some(conn) = shared.terminal_conn.lock().as_ref() {
+                        terminal_connection_state(conn, state);
+                    }
                     match state {
                         PcState::Connected => {
                             shared.update_input(SessionInputEvent::Connected).await
@@ -722,15 +835,9 @@ impl Peer {
                     if state != PcState::Connected || started.swap(true, Ordering::AcqRel) {
                         return;
                     }
-                    let Some(pc) = pc.upgrade() else { return };
-                    spawn_until_closed(
-                        shared.closed.clone(),
-                        stream_video(pc.clone(), video_track, shared.clone(), codec),
-                    );
-                    spawn_until_closed(
-                        shared.closed.clone(),
-                        stream_audio(pc, audio_track, shared.deps.audio.clone()),
-                    );
+                    if *shared.desktop.borrow() {
+                        start_desktop_streams(shared.clone());
+                    }
                     let context = context.lock().await.clone();
                     let signal = &shared.deps.signaling;
                     if let (Some(client), Some(ice)) = (
@@ -796,7 +903,7 @@ impl Peer {
                     "CONTROL_DATA_CHANNEL" => attach_control(channel, shared),
                     "BINARY_DATA_CHANNEL" if shared.terminal => attach_terminal(channel, shared),
                     "STREAMER_DATA_CHANNEL" => {
-                        let reply = channel.clone();
+                        let reply = Arc::downgrade(&channel);
                         channel.on_message(Box::new(move |message: DataChannelMessage| {
                             let reply = reply.clone();
                             Box::pin(async move {
@@ -815,6 +922,7 @@ impl Peer {
                                 let ping =
                                     value.get("type").and_then(|t| t.as_str()) == Some("ping");
                                 if ping {
+                                    let Some(reply) = reply.upgrade() else { return };
                                     let _ = reply
                                         .send(&Bytes::from_static(br#"{"type":"pong"}"#))
                                         .await;
@@ -828,7 +936,7 @@ impl Peer {
         }));
 
         if !terminal {
-            deps.video.set_uu_negotiated_codec(Some(codec)).await;
+            deps.desktop.claim(&shared).await?;
         }
         Ok(Self {
             created_at: Instant::now(),
@@ -855,7 +963,7 @@ impl Peer {
             .set_remote_description(offer)
             .await
             .map_err(|e| format!("Set remote description failed: {e}"))?;
-        if !self.shared.terminal {
+        if self.shared.media.get().is_some() {
             restrict_video_codec(&self.pc, self.codec).await?;
         }
         let answer = self
@@ -969,16 +1077,23 @@ impl Peer {
         self.shared.terminal
     }
 
+    pub fn is_desktop(&self) -> bool {
+        *self.shared.desktop.borrow()
+    }
+
+    pub async fn stop_desktop(&self) {
+        let _owner = self.shared.deps.desktop.0.lock().await;
+        self.shared.stop_desktop().await;
+    }
+
     pub async fn close(&self) {
         self.shared.closed.cancel();
+        self.stop_desktop().await;
         if let Some(conn) = self.shared.terminal_conn.lock().take() {
             conn.close();
         }
         // Finish releases before the room loop can create a replacement peer.
         self.shared.update_input(SessionInputEvent::Close).await;
-        if !self.shared.terminal {
-            self.video.set_uu_negotiated_codec(None).await;
-        }
         // Only transport teardown is bounded. Input releases above must finish
         // before a replacement can acquire HID ownership or the shared codec.
         match tokio::time::timeout(TRANSPORT_CLOSE_TIMEOUT, self.pc.close()).await {
@@ -1351,14 +1466,16 @@ fn attach_terminal(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
             conn.close();
         })
     }));
-    let reply = channel.clone();
+    let reply = Arc::downgrade(&channel);
     channel.on_message(Box::new(move |message: DataChannelMessage| {
         let (conn, shared, reply) = (conn.clone(), shared.clone(), reply.clone());
         Box::pin(async move {
             if message.data.starts_with(b"TERM") {
                 conn.handle(&message.data).await;
             } else {
-                terminal_rpc(&reply, &shared, &message.data).await;
+                if let Some(reply) = reply.upgrade() {
+                    terminal_rpc(&reply, &shared, &message.data).await;
+                }
             }
         })
     }));
@@ -1410,15 +1527,15 @@ async fn terminal_rpc(channel: &RTCDataChannel, shared: &Shared, data: &[u8]) ->
 }
 
 fn attach_control(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
-    let (open_channel, open_shared) = (channel.clone(), shared.clone());
+    let (open_channel, open_shared) = (Arc::downgrade(&channel), shared.clone());
     channel.on_open(Box::new(move || {
         let (channel, shared) = (open_channel.clone(), open_shared.clone());
         Box::pin(async move {
+            let Some(channel) = channel.upgrade() else {
+                return;
+            };
             shared.update_input(SessionInputEvent::ControlOpened).await;
-            spawn_until_closed(
-                shared.closed.clone(),
-                control_initialization(channel, shared),
-            );
+            spawn_until_closed(shared.closed.clone(), control_supervisor(channel, shared));
         })
     }));
     let closing = shared.clone();
@@ -1426,19 +1543,23 @@ fn attach_control(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
         let shared = closing.clone();
         Box::pin(async move { shared.update_input(SessionInputEvent::Close).await })
     }));
-    let reply = channel.clone();
+    let reply = Arc::downgrade(&channel);
     channel.on_message(Box::new(move |message: DataChannelMessage| {
         let (channel, shared) = (reply.clone(), shared.clone());
-        Box::pin(async move { handle_control(&channel, &shared, &message.data).await })
+        Box::pin(async move {
+            if let Some(channel) = channel.upgrade() {
+                handle_control(&channel, &shared, &message.data).await;
+            }
+        })
     }));
 }
 
 /// CaptureChange, SystemMetrics, ScreenSources and the unlocked state, then ScreenSources
 /// again whenever the encoded size or rate changes.
-async fn control_initialization(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
-    if shared.terminal {
-        // The reference host initializes tool peers with nominal source metadata,
-        // but omits CodecNegotiation and never attaches media tracks.
+async fn control_supervisor(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
+    let mut desktop = shared.desktop.subscribe();
+    if !*desktop.borrow_and_update() {
+        // Tools get nominal source metadata until they acquire the desktop role.
         let size = Rect {
             width: 1920,
             height: 1080,
@@ -1468,8 +1589,23 @@ async fn control_initialization(channel: Arc<RTCDataChannel>, shared: Arc<Shared
             wire::secure_desktop_unlocked(shared.next_seq(), now_secs()),
         )
         .await;
-        return;
     }
+    loop {
+        if *desktop.borrow_and_update() {
+            tokio::select! {
+                _ = control_initialization(channel.clone(), shared.clone()) => return,
+                changed = desktop.changed() => if changed.is_err() { return; },
+            }
+        } else if desktop.changed().await.is_err() {
+            return;
+        }
+        if channel.ready_state() != RTCDataChannelState::Open {
+            return;
+        }
+    }
+}
+
+async fn control_initialization(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
     let sound = shared.deps.audio.is_streaming().await;
     let mut screen = shared.screen.subscribe();
     let (size, fps) = *screen.borrow_and_update();
@@ -1546,11 +1682,23 @@ async fn control_initialization(channel: Arc<RTCDataChannel>, shared: Arc<Shared
     }
 }
 
-async fn handle_control(channel: &RTCDataChannel, shared: &Shared, data: &[u8]) {
+async fn handle_control(channel: &RTCDataChannel, shared: &Arc<Shared>, data: &[u8]) {
+    if wire::decode(data)
+        .ok()
+        .and_then(|f| {
+            wire::message(&f, wire::which::SIMPLE_ACTION).and_then(|a| wire::decode(a).ok())
+        })
+        .is_some_and(|a| wire::number(&a, 1) == Some(4))
+    {
+        if let Err(error) = shared.deps.desktop.claim(shared).await {
+            warn!(%error, "UU desktop request rejected");
+        }
+        return;
+    }
     if terminal_rpc(channel, shared, data).await {
         return;
     }
-    if shared.terminal {
+    if !*shared.desktop.borrow() {
         if let Ok(fields) = wire::decode(data) {
             if wire::message(&fields, wire::which::SIMPLE_ACTION)
                 .and_then(|a| wire::decode(a).ok())
@@ -1937,6 +2085,7 @@ mod tests {
                 audio: Arc::new(AudioController::default()),
                 signaling: Arc::new(SignalingClient::with_test_sender(out)),
                 terminal,
+                desktop: Arc::new(DesktopCoordinator::default()),
             },
             SessionIce::from_header(
                 &serde_json::json!({"iceServers":[{"urls":"stun:127.0.0.1:9"}]}),

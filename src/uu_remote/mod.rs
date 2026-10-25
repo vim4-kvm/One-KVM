@@ -140,6 +140,7 @@ struct Inner {
     hid: Arc<HidController>,
     audio: Arc<AudioController>,
     terminal: Arc<terminal::Registry>,
+    desktop: Arc<peer::DesktopCoordinator>,
 }
 
 pub struct UuRemoteService {
@@ -175,6 +176,7 @@ impl UuRemoteService {
                 state: Mutex::new((UuRemoteServiceState::Stopped, None)),
                 login: watch::channel(UuLoginState::idle()).0,
                 peers: tokio::sync::Mutex::new(HashMap::new()),
+                desktop: Arc::new(peer::DesktopCoordinator::default()),
                 video,
                 hid,
                 audio,
@@ -227,10 +229,14 @@ impl UuRemoteService {
             let mut peers = self.inner.peers.lock().await;
             let desktop: Vec<_> = peers
                 .iter()
-                .filter(|(_, p)| !p.is_terminal())
+                .filter(|(_, p)| p.is_desktop())
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in desktop {
+                if let Some(peer) = peers.get(&id).filter(|p| p.is_terminal()) {
+                    peer.stop_desktop().await;
+                    continue;
+                }
                 if let Some(peer) = peers.remove(&id) {
                     peer.close().await;
                 }
@@ -274,7 +280,8 @@ impl UuRemoteService {
             if !peer.ended() {
                 if peer.is_terminal() {
                     terminal_peers += 1;
-                } else {
+                }
+                if peer.is_desktop() {
                     sessions.push(peer.status(id).await);
                 }
             }
@@ -696,6 +703,7 @@ async fn room_loop(
         audio: inner.audio.clone(),
         signaling: signaling.clone(),
         terminal: inner.terminal.clone(),
+        desktop: inner.desktop.clone(),
     };
     while let Some(event) = events.recv().await {
         match event {
@@ -742,12 +750,24 @@ async fn room_loop(
                     &value,
                     peers
                         .iter()
-                        .map(|(id, peer)| (id.clone(), peer.is_terminal())),
+                        .map(|(id, peer)| (id.clone(), !peer.is_desktop())),
                 );
                 info!("UU viewer disconnected: closing={}", targets.len());
-                let closing: Vec<Arc<Peer>> =
-                    targets.iter().filter_map(|k| peers.remove(k)).collect();
+                let desktop_only =
+                    matches!(signaling::ice_id_of(&value), signaling::IceId::Missing);
+                let mut closing = Vec::new();
+                let mut demoting = Vec::new();
+                for id in targets {
+                    if desktop_only && peers.get(&id).is_some_and(|p| p.is_terminal()) {
+                        demoting.extend(peers.get(&id).cloned());
+                    } else {
+                        closing.extend(peers.remove(&id));
+                    }
+                }
                 drop(peers);
+                for peer in demoting {
+                    peer.stop_desktop().await;
+                }
                 for peer in closing {
                     peer.close().await;
                 }
