@@ -69,11 +69,55 @@ fn description(config: &SharedVideoPipelineConfig, source: Resolution, fps: u32)
         3
     };
     let filter = config.output.filter(source, fps);
-    Ok(format!("vfmcapsrc name=source ! {}queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! {filter}\
+    let capture = vendor_capture(
+        std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").ok().as_deref(),
+        source,
+        fps,
+    )?;
+    Ok(format!("{capture} ! {}queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! {filter}\
         amlvenc name=encoder bitrate={} gop=0 framerate={} intra-refresh-rows={refresh_rows} min-force-key-unit-interval=250000000 ! \
         video/x-{codec} ! {codec}parse config-interval=-1 ! \
         video/x-{codec},stream-format=byte-stream,alignment=au ! appsink name=frames sync=false max-buffers=2",
         crate::video::snapshot::vim4::BRANCH, config.bitrate_kbps().clamp(1000, 60000), fps))
+}
+
+fn vendor_capture(secondary: Option<&str>, source: Resolution, fps: u32) -> Result<String> {
+    match secondary {
+        None | Some("0") => Ok("vfmcapsrc name=source".into()),
+        Some("1") => Ok(format!(
+            "v4l2src name=source device=/dev/video71 io-mode=dmabuf do-timestamp=true ! \
+             video/x-raw,format=NV21,width={},height={},framerate={fps}/1,colorimetry=bt709",
+            source.width, source.height
+        )),
+        _ => Err(AppError::VideoError(
+            "VIM4_SECONDARY_HDMI_CAPTURE must be 0 or 1".into(),
+        )),
+    }
+}
+
+fn secondary_allocation(pipeline: &gst::Pipeline, source: Resolution) -> Result<()> {
+    let pad = pipeline
+        .by_name("source")
+        .and_then(|source| source.static_pad("src"))
+        .and_then(|pad| pad.peer())
+        .ok_or_else(|| AppError::VideoError("Missing secondary capture boundary".into()))?;
+    let bytes = source
+        .width
+        .checked_mul(source.height)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .map(|bytes| bytes / 2)
+        .ok_or_else(|| AppError::VideoError("Secondary capture geometry overflow".into()))?;
+    pad.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, move |_, info| {
+        if let Some(query) = info.query_mut() {
+            if let gst::QueryViewMut::Allocation(allocation) = query.view_mut() {
+                allocation.add_allocation_meta::<gstreamer_video::VideoMeta>(None);
+                allocation.add_allocation_pool(None::<&gst::BufferPool>, bytes, 6, 8);
+                return gst::PadProbeReturn::Handled;
+            }
+        }
+        gst::PadProbeReturn::Ok
+    });
+    Ok(())
 }
 
 impl SharedVideoPipeline {
@@ -231,6 +275,11 @@ impl SharedVideoPipeline {
         } else {
             None
         };
+        if VideoBackend::current() == VideoBackend::Vendor
+            && std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").as_deref() == Ok("1")
+        {
+            secondary_allocation(&capture.0, source.0)?;
+        }
         capture
             .0
             .set_state(gst::State::Playing)

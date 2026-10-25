@@ -24,6 +24,21 @@
 | USB 网卡 | NCM / ECM / RNDIS，独立 NetworkManager DHCP/NAT 连接 |
 | HDR / EDID | 原生视频菜单和设置页调用共享板级助手，与 vim4-manager 共用 HDR 曲线 |
 
+5.15 原生 HDR 双路径在驱动参数 `vdin0_native_hdr=Y` 时，由公共启动器自动设置
+`VIM4_SECONDARY_HDMI_CAPTURE=1`，H.264/H.265 共享管线改用 `/dev/video71`
+的完整尺寸 NV21 SDR DMA-buf；未设置仍是原来的 vfmcapsrc，不自动改变 EDID 或主 RX。
+它要求配套候选驱动提供 VDIN1 的同源 HDMI frontend 隔离与 HDR→SDR，不能直接用于原厂
+video71（原厂仅声明 VIU 回写输入）。显示由 VDIN0 高位深原生路径负责，不从采集帧伪造 HDR。
+原生 HDR10 显示与 SDR H.264/H.265 4K60 已实测；HLG 无真实源/显示器现场验收，
+MJPEG 独立路径尚未接入。原生模式不依赖显示器回写采集。
+`deploy/vim4/probe-vdin.c` 是先于应用接入的有界 V4L2 诊断，显式传 device/input/尺寸/帧数，
+输出实际协商、DMA 完成帧率与序号；不能将驱动不递增的旧序号当成零丢帧证明。
+需要私有的标准 `video4linux2` 插件：系统厂商版本链接 `libamlv4l2src`，会调用
+`hdmictrl` 并干扰主 RX。构建器从标准 Ubuntu 安装复制经链接检查的插件，组件包放在
+`/opt/vim4-onekvm/lib/gstreamer-1.0/`，公共启动器将其放在厂商编码插件目录之前，
+不覆盖系统插件。采集边界保留 VideoMeta 并提供完整 DMA 池预算，
+否则默认三缓冲及快照分支的分配协商会引起复制/饥饿，现场仅约30fps。
+
 定位音频连续性时可临时设置 `ONEKVM_AUDIO_STATS=1`：每五秒汇总原生双声道
 PCM、Opus 编码前 PCM 的帧数、相邻样本差及读取间隔，另报 XRUN、非阻塞
 读取 EAGAIN 和每条 WebRTC 音轨的序列缺口、发送耗时。计数占用固定内存，
