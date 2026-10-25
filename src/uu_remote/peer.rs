@@ -341,6 +341,8 @@ pub struct PeerDeps {
     pub signaling: Arc<SignalingClient>,
     pub terminal: Arc<super::terminal::Registry>,
     pub desktop: Arc<DesktopCoordinator>,
+    #[cfg(target_os = "linux")]
+    pub files: Arc<super::files::storage::Storage>,
 }
 
 /// Serialize desktop takeover across normal and promoted tool connections.
@@ -400,12 +402,15 @@ struct DesktopMedia {
 struct Shared {
     closed: CancellationToken,
     terminal: bool,
+    capture_type: u64,
     desktop: watch::Sender<bool>,
     media: OnceLock<DesktopMedia>,
     desktop_task: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
     terminal_conn: parking_lot::Mutex<Option<Arc<super::terminal::TerminalConn>>>,
     deps: PeerDeps,
-    sequence: AtomicU64,
+    sequence: Arc<AtomicU64>,
+    #[cfg(target_os = "linux")]
+    files: Arc<super::files::Connection>,
     /// Encoded size and fps, refreshed by the video task.
     screen: watch::Sender<(Rect, u32)>,
     /// Last viewer quality choice reported back in CaptureSettingSync.
@@ -648,8 +653,9 @@ impl Peer {
         deps: PeerDeps,
         transport: SessionIce,
         offer: &SoacMessage,
-        terminal: bool,
+        capture_type: u64,
     ) -> Result<Self, String> {
+        let terminal = capture_type > 2;
         let sdp = offer_sdp(offer).ok_or("Offer SDP is empty")?;
         let constraints = deps.video.codec_constraints().await;
         let offered_codec =
@@ -722,9 +728,18 @@ impl Peer {
             .await
             .map(|c| c.bitrate_preset)
             .unwrap_or(BitratePreset::Balanced);
+        let closed = CancellationToken::new();
+        let sequence = Arc::new(AtomicU64::new(1));
         let shared = Arc::new(Shared {
-            closed: CancellationToken::new(),
+            #[cfg(target_os = "linux")]
+            files: super::files::Connection::new(
+                deps.files.clone(),
+                sequence.clone(),
+                closed.child_token(),
+            ),
+            closed,
             terminal,
+            capture_type,
             desktop: watch::channel(false).0,
             media: OnceLock::new(),
             desktop_task: parking_lot::Mutex::new(None),
@@ -734,7 +749,7 @@ impl Peer {
             actual_kbps: AtomicU64::new(u64::from(default_bitrate.bitrate_kbps())),
             settings_lock: Mutex::new(()),
             deps: deps.clone(),
-            sequence: AtomicU64::new(1),
+            sequence,
             screen: watch::channel(initial).0,
             quality: AtomicU64::new(wire::quality::AUTO),
             input: SessionInput::new(deps.system, deps.reverse_scroll),
@@ -902,6 +917,8 @@ impl Peer {
                 match label.as_str() {
                     "CONTROL_DATA_CHANNEL" => attach_control(channel, shared),
                     "BINARY_DATA_CHANNEL" if shared.terminal => attach_terminal(channel, shared),
+                    #[cfg(target_os = "linux")]
+                    "FILE_DATA_CHANNEL" => attach_file(channel, shared.files.clone()),
                     "STREAMER_DATA_CHANNEL" => {
                         let reply = Arc::downgrade(&channel);
                         channel.on_message(Box::new(move |message: DataChannelMessage| {
@@ -1074,6 +1091,10 @@ impl Peer {
     }
 
     pub fn is_terminal(&self) -> bool {
+        self.shared.capture_type == 8
+    }
+
+    pub fn is_tool(&self) -> bool {
         self.shared.terminal
     }
 
@@ -1088,6 +1109,8 @@ impl Peer {
 
     pub async fn close(&self) {
         self.shared.closed.cancel();
+        #[cfg(target_os = "linux")]
+        self.shared.files.close().await;
         self.stop_desktop().await;
         if let Some(conn) = self.shared.terminal_conn.lock().take() {
             conn.close();
@@ -1201,7 +1224,10 @@ async fn read_video_feedback(sender: Arc<RTCRtpSender>, shared: Arc<Shared>) {
         let wants_keyframe = packets.iter().any(|p| {
             p.as_any().is::<PictureLossIndication>() || p.as_any().is::<FullIntraRequest>()
         });
-        if wants_keyframe && last_request.elapsed() >= Duration::from_millis(500) {
+        if wants_keyframe
+            && *shared.desktop.borrow()
+            && last_request.elapsed() >= Duration::from_millis(500)
+        {
             last_request = Instant::now();
             if let Err(e) = video.request_keyframe().await {
                 debug!("UU keyframe request failed: {e}");
@@ -1481,6 +1507,47 @@ fn attach_terminal(channel: Arc<RTCDataChannel>, shared: Arc<Shared>) {
     }));
 }
 
+#[cfg(target_os = "linux")]
+fn attach_file(channel: Arc<RTCDataChannel>, connection: Arc<super::files::Connection>) {
+    let weak = Arc::downgrade(&channel);
+    let opened = connection.clone();
+    channel.on_open(Box::new(move || {
+        let (weak, connection) = (weak.clone(), opened.clone());
+        Box::pin(async move {
+            let Some(mut receiver) = connection.take_receiver() else { return };
+            tokio::spawn(async move {
+                loop {
+                    let bytes = tokio::select! {
+                        biased;
+                        _ = connection.cancelled() => break,
+                        bytes = receiver.recv() => match bytes { Some(bytes) => bytes, None => break },
+                    };
+                    let Some(channel) = weak.upgrade() else { break };
+                    let bytes = Bytes::from(bytes);
+                    let sent = tokio::select! {
+                        biased;
+                        _ = connection.cancelled() => false,
+                        sent = tokio::time::timeout(Duration::from_secs(10), channel.send(&bytes)) => matches!(sent, Ok(Ok(_))),
+                    };
+                    if !sent { break; }
+                }
+                connection.close().await;
+            });
+        })
+    }));
+    let closing = connection.clone();
+    channel.on_close(Box::new(move || {
+        let connection = closing.clone();
+        Box::pin(async move { connection.close().await })
+    }));
+    channel.on_message(Box::new(move |message| {
+        let connection = connection.clone();
+        Box::pin(async move {
+            connection.handle(&message.data).await;
+        })
+    }));
+}
+
 fn terminal_connection_state(conn: &super::terminal::TerminalConn, state: PcState) {
     if matches!(state, PcState::Closed | PcState::Failed) {
         conn.close();
@@ -1683,6 +1750,10 @@ async fn control_initialization(channel: Arc<RTCDataChannel>, shared: Arc<Shared
 }
 
 async fn handle_control(channel: &RTCDataChannel, shared: &Arc<Shared>, data: &[u8]) {
+    #[cfg(target_os = "linux")]
+    if shared.files.handle(data).await {
+        return;
+    }
     if wire::decode(data)
         .ok()
         .and_then(|f| {
@@ -2086,12 +2157,14 @@ mod tests {
                 signaling: Arc::new(SignalingClient::with_test_sender(out)),
                 terminal,
                 desktop: Arc::new(DesktopCoordinator::default()),
+                #[cfg(target_os = "linux")]
+                files: super::super::files::storage::Storage::new(dir.path().join("files")),
             },
             SessionIce::from_header(
                 &serde_json::json!({"iceServers":[{"urls":"stun:127.0.0.1:9"}]}),
             ),
             &soac,
-            true,
+            8,
         )
         .await
         .unwrap();

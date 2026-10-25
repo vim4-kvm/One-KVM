@@ -9,13 +9,18 @@ struct Viewer {
     pc: Arc<RTCPeerConnection>,
     control: Arc<RTCDataChannel>,
     binary: Arc<RTCDataChannel>,
-    incoming: mpsc::UnboundedReceiver<(bool, Vec<u8>)>,
+    _file: Arc<RTCDataChannel>,
+    incoming: mpsc::UnboundedReceiver<(u8, Vec<u8>)>,
     packets: mpsc::UnboundedReceiver<()>,
     _directory: tempfile::TempDir,
 }
 
 impl Viewer {
     async fn connect(desktop: Arc<DesktopCoordinator>, tool: bool) -> Self {
+        Self::connect_kind(desktop, if tool { 8 } else { 1 }).await
+    }
+
+    async fn connect_kind(desktop: Arc<DesktopCoordinator>, capture_type: u64) -> Self {
         let mut media = MediaEngine::default();
         media.register_default_codecs().unwrap();
         let pc = Arc::new(
@@ -57,13 +62,17 @@ impl Viewer {
             .create_data_channel("BINARY_DATA_CHANNEL", None)
             .await
             .unwrap();
+        let file = pc
+            .create_data_channel("FILE_DATA_CHANNEL", None)
+            .await
+            .unwrap();
         let opened = Arc::new(Notify::new());
-        for (is_terminal, channel) in [(false, &control), (true, &binary)] {
+        for (kind, channel) in [(0, &control), (1, &binary), (2, &file)] {
             let out = out.clone();
             channel.on_message(Box::new(move |m| {
                 let out = out.clone();
                 Box::pin(async move {
-                    let _ = out.send((is_terminal, m.data.to_vec()));
+                    let _ = out.send((kind, m.data.to_vec()));
                 })
             }));
             let opened = opened.clone();
@@ -112,10 +121,12 @@ impl Viewer {
                 signaling: Arc::new(SignalingClient::with_test_sender(out)),
                 terminal,
                 desktop,
+                #[cfg(target_os = "linux")]
+                files: super::super::files::storage::Storage::new(directory.path().join("files")),
             },
             SessionIce::from_header(&serde_json::json!({"iceServers":[]})),
             &soac,
-            tool,
+            capture_type,
         )
         .await
         .unwrap();
@@ -130,9 +141,13 @@ impl Viewer {
         tokio::time::timeout(Duration::from_secs(8), async {
             loop {
                 let changed = opened.notified();
-                if [control.ready_state(), binary.ready_state()]
-                    .iter()
-                    .all(|s| *s == RTCDataChannelState::Open)
+                if [
+                    control.ready_state(),
+                    binary.ready_state(),
+                    file.ready_state(),
+                ]
+                .iter()
+                .all(|s| *s == RTCDataChannelState::Open)
                 {
                     break;
                 }
@@ -146,6 +161,7 @@ impl Viewer {
             pc,
             control,
             binary,
+            _file: file,
             incoming,
             packets: received_packets,
             _directory: directory,
@@ -160,7 +176,7 @@ impl Viewer {
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while let Some((terminal, bytes)) = self.incoming.recv().await {
-                if terminal {
+                if terminal == 1 {
                     let reply = frame::decode(&bytes).unwrap();
                     assert_eq!((reply.kind, reply.session), (frame::LIST_RESP, id));
                     return;
@@ -261,7 +277,9 @@ async fn tool_promotion_is_idempotent_and_keeps_terminal_and_video_on_the_same_p
             while lifetime.strong_count() != 0 {
                 tokio::task::yield_now().await;
             }
-        }).await.expect("Closed peer retained its application state");
+        })
+        .await
+        .expect("Closed peer retained its application state");
     })
     .await
     .unwrap();
@@ -291,6 +309,64 @@ async fn desktop_takeover_demotes_tools_without_closing_their_terminal() {
             Some(VideoCodecType::H264)
         );
         tool.close().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn file_tool_replies_on_file_channel_before_and_after_desktop_promotion() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut viewer = Viewer::connect_kind(Arc::new(DesktopCoordinator::default()), 5).await;
+        assert!(viewer.host.is_tool() && !viewer.host.is_terminal());
+        for promoted in [false, true] {
+            if promoted {
+                viewer.capture().await;
+            }
+            let mut task = Vec::new();
+            wire::put_varint(1, 33, &mut task);
+            let mut directory = Vec::new();
+            wire::put_bytes(1, &task, &mut directory);
+            wire::put_bytes(2, b"~/", &mut directory);
+            let mut ftp = Vec::new();
+            wire::put_bytes(10, &directory, &mut ftp);
+            let mut header = Vec::new();
+            wire::put_varint(1, 99, &mut header);
+            let mut rpc = Vec::new();
+            wire::put_bytes(1, &header, &mut rpc);
+            wire::put_bytes(8, &ftp, &mut rpc);
+            viewer
+                .control
+                .send(&Bytes::from(wire::envelope(1, 0, 21, &rpc)))
+                .await
+                .unwrap();
+            loop {
+                let (channel, bytes) = viewer.incoming.recv().await.unwrap();
+                let Ok(message) = wire::decode(&bytes) else {
+                    continue;
+                };
+                let Some(rpc) = wire::message(&message, 22) else {
+                    continue;
+                };
+                let rpc = wire::decode(rpc).unwrap();
+                let header = wire::decode(wire::message(&rpc, 1).unwrap()).unwrap();
+                if wire::number(&header, 1) != Some(99) {
+                    continue;
+                }
+                assert_eq!(channel, 2, "FTP response escaped onto CONTROL");
+                let ftp = wire::decode(wire::message(&rpc, 4).unwrap()).unwrap();
+                let directory = wire::decode(wire::message(&ftp, 7).unwrap()).unwrap();
+                assert_eq!(wire::number(&directory, 4), Some(1));
+                let mut list = Vec::new();
+                flate2::read::ZlibDecoder::new(wire::message(&directory, 5).unwrap())
+                    .read_to_end(&mut list)
+                    .unwrap();
+                assert!(list.windows(b"/files".len()).any(|p| p == b"/files"));
+                break;
+            }
+        }
+        viewer.close().await;
     })
     .await
     .unwrap();

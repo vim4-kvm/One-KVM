@@ -162,10 +162,12 @@ pub const FF_CAPTURE_SETTING: u64 = 4;
 
 /// SimpleAction echo_response (action 1) with args `{"seq":<request seq>}` and this host's
 /// FeatureFlag (field 4). The viewer only uses features declared here, so only the capture
-/// setting RPCs are declared: clipboard, file transfer, mute and auto-lock are not offered.
+/// setting RPCs and Linux board-file transfer are declared; clipboard/mute/auto-lock are absent.
 pub fn echo_response(seq: u64, timestamp: u64, request_seq: u64) -> Vec<u8> {
     let mut flags = Vec::new();
     put_varint(1, FF_CAPTURE_SETTING, &mut flags);
+    #[cfg(target_os = "linux")]
+    put_varint(6, 2, &mut flags); // FileTransferFtp LIST_COMPRESS
     let mut action = Vec::new();
     put_varint(1, 1, &mut action);
     put_bytes(
@@ -178,7 +180,7 @@ pub fn echo_response(seq: u64, timestamp: u64, request_seq: u64) -> Vec<u8> {
 }
 
 /// The reference host has no terminal-specific FeatureFlag. Data-only peers must
-/// not advertise capture settings, clipboard, mute or file transfer.
+/// not advertise desktop settings. Linux tools share the board-file responder.
 pub fn terminal_echo_response(seq: u64, timestamp: u64, request_seq: u64) -> Vec<u8> {
     let mut action = Vec::new();
     put_varint(1, 1, &mut action);
@@ -187,7 +189,10 @@ pub fn terminal_echo_response(seq: u64, timestamp: u64, request_seq: u64) -> Vec
         format!(r#"{{"seq":{request_seq}}}"#).as_bytes(),
         &mut action,
     );
-    put_bytes(4, &[], &mut action);
+    let mut flags = Vec::new();
+    #[cfg(target_os = "linux")]
+    put_varint(6, 2, &mut flags);
+    put_bytes(4, &flags, &mut action);
     envelope(seq, timestamp, which::SIMPLE_ACTION, &action)
 }
 
@@ -535,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn echo_response_correlates_request_and_declares_only_capture_setting() {
+    fn echo_response_correlates_request_and_declares_supported_features() {
         let reply = echo_response(1, 2, 200);
         assert_eq!(&reply[..4], &[8, 1, 16, 2]);
         let outer = decode(&reply).unwrap();
@@ -543,7 +548,15 @@ mod tests {
         assert_eq!(number(&action, 1), Some(1));
         assert_eq!(message(&action, 2), Some(&br#"{"seq":200}"#[..]));
         let flags = decode(message(&action, 4).unwrap()).unwrap();
-        assert_eq!(flags.len(), 1);
+        assert_eq!(flags.len(), if cfg!(target_os = "linux") { 2 } else { 1 });
+        assert_eq!(
+            number(&flags, 6),
+            if cfg!(target_os = "linux") {
+                Some(2)
+            } else {
+                None
+            }
+        );
         assert_eq!(number(&flags, 1), Some(FF_CAPTURE_SETTING));
     }
 

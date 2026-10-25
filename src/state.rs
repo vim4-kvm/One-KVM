@@ -131,6 +131,8 @@ impl AppState {
         );
         #[cfg(unix)]
         let msd = Arc::new(RwLock::new(msd));
+        #[cfg(target_os = "linux")]
+        remote_access.uu_remote().bind_file_media(msd.clone());
         #[cfg(unix)]
         let uac_playback = Arc::new(RwLock::new(None));
         let usb = UsbCoordinator::new(

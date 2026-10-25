@@ -48,7 +48,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(5);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// ConnectOptions.capture_type: 0 unknown, 1 desktop, 2 window; terminal (8)
 /// is an independent data-only peer with explicitly enabled targets.
-/// File transfer (5) and port mapping (9) remain unsupported.
+/// Linux file transfer (5) is another independent tool peer; port mapping (9) is unsupported.
 const MAX_DESKTOP_CAPTURE_TYPE: u64 = 2;
 
 #[typeshare]
@@ -143,6 +143,8 @@ struct Inner {
     audio: Arc<AudioController>,
     terminal: Arc<terminal::Registry>,
     desktop: Arc<peer::DesktopCoordinator>,
+    #[cfg(target_os = "linux")]
+    files: Arc<files::storage::Storage>,
 }
 
 pub struct UuRemoteService {
@@ -167,6 +169,10 @@ impl UuRemoteService {
             inner: Arc::new(Inner {
                 terminal: terminal::Registry::new(
                     credentials_path.parent().unwrap().join("terminal"),
+                ),
+                #[cfg(target_os = "linux")]
+                files: files::storage::Storage::new(
+                    credentials_path.parent().unwrap().join("files"),
                 ),
                 credentials_path,
                 profile: Mutex::new(UuRemoteConfig::default()),
@@ -235,7 +241,7 @@ impl UuRemoteService {
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in desktop {
-                if let Some(peer) = peers.get(&id).filter(|p| p.is_terminal()) {
+                if let Some(peer) = peers.get(&id).filter(|p| p.is_tool()) {
                     peer.stop_desktop().await;
                     continue;
                 }
@@ -254,6 +260,11 @@ impl UuRemoteService {
 
     pub fn terminal(&self) -> &Arc<terminal::Registry> {
         &self.inner.terminal
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn bind_file_media(&self, media: files::storage::Media) {
+        self.inner.files.bind_media(media);
     }
 
     pub fn video_codec_preference(&self) -> crate::config::UuVideoCodec {
@@ -706,6 +717,8 @@ async fn room_loop(
         signaling: signaling.clone(),
         terminal: inner.terminal.clone(),
         desktop: inner.desktop.clone(),
+        #[cfg(target_os = "linux")]
+        files: inner.files.clone(),
     };
     while let Some(event) = events.recv().await {
         match event {
@@ -760,7 +773,7 @@ async fn room_loop(
                 let mut closing = Vec::new();
                 let mut demoting = Vec::new();
                 for id in targets {
-                    if desktop_only && peers.get(&id).is_some_and(|p| p.is_terminal()) {
+                    if desktop_only && peers.get(&id).is_some_and(|p| p.is_tool()) {
                         demoting.extend(peers.get(&id).cloned());
                     } else {
                         closing.extend(peers.remove(&id));
@@ -811,16 +824,19 @@ async fn handle_soac(
                 .remove(&ice)
                 .or_else(|| next_pending.take())
                 .unwrap_or((1, ice::SessionIce::default()));
-            if capture_type > MAX_DESKTOP_CAPTURE_TYPE && capture_type != 8 {
+            if capture_type > MAX_DESKTOP_CAPTURE_TYPE
+                && capture_type != 8
+                && !(cfg!(target_os = "linux") && capture_type == 5)
+            {
                 info!("UU connection type {capture_type} is not offered by a KVM; ignored");
                 return;
             }
-            let terminal = capture_type == 8;
+            let terminal = matches!(capture_type, 5 | 8);
             let evict = replacement_peers(
                 terminal,
                 peers
                     .iter()
-                    .map(|(id, p)| (id.clone(), p.is_terminal(), p.created_at)),
+                    .map(|(id, p)| (id.clone(), p.is_tool(), p.created_at)),
             );
             for id in evict {
                 if let Some(peer) = peers.remove(&id) {
@@ -830,7 +846,7 @@ async fn handle_soac(
             if let Some(peer) = peers.remove(&ice) {
                 peer.close().await;
             }
-            let peer = match Peer::new(deps.clone(), transport, &soac, terminal).await {
+            let peer = match Peer::new(deps.clone(), transport, &soac, capture_type).await {
                 Ok(peer) => Arc::new(peer),
                 Err(e) => {
                     error!("UU peer creation failed: {e}");
