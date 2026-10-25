@@ -37,22 +37,30 @@ class ScalerClockTest(unittest.TestCase):
         self.enterContext(patch.object(helper, 'EDGE', False))
         self.enterContext(patch.object(helper.platform, 'release', return_value='5.15.137-vim4kvm'))
 
-    def test_restores_shared_bus_after_encoder_open(self):
-        with redirect_stdout(io.StringIO()) as output:
-            helper.main(['video-clock'])
-        self.assertEqual(json.loads(output.getvalue())['ge2d_hz'], 666666667)
-        self.assertEqual((self.root / 'vpu/clk_rate').read_text(), '666666656')
+    def test_low_shared_bus_warns_without_changing_kernel_clock(self):
+        with patch.object(Path, 'write_text', side_effect=AssertionError('clock write')):
+            with self.assertRaisesRegex(ValueError, 'kernel shared-clock fix required'):
+                helper.main(['video-clock'])
+        self.assertEqual((self.root / 'ge2d_gate/clk_rate').read_text(), '399999994')
 
-    def test_refuses_unvalidated_hardware_or_insufficient_vpu_clock(self):
-        clock = self.root / 'ge2d_gate/clk_rate'
-        for compatible, vpu in [(b'amlogic, ge2d-g12a\0', 666666656),
-                                (b'amlogic, ge2d-t7\0', 399999994)]:
-            with self.subTest(compatible=compatible, vpu=vpu):
-                self.compatible.write_bytes(compatible)
-                (self.root / 'vpu/clk_rate').write_text(str(vpu))
-                with self.assertRaises(ValueError):
-                    helper.main(['video-clock'])
-                self.assertEqual(clock.read_text(), '399999994')
+    def test_supported_rounded_or_higher_clock_is_read_only(self):
+        for rate in (666666656, 800000000):
+            (self.root / 'ge2d_gate/clk_rate').write_text(str(rate))
+            with patch.object(Path, 'write_text', side_effect=AssertionError('clock write')), \
+                    redirect_stdout(io.StringIO()) as output:
+                helper.main(['video-clock'])
+            self.assertEqual(json.loads(output.getvalue())['ge2d_hz'], rate)
+
+    def test_refuses_unvalidated_hardware(self):
+        self.compatible.write_bytes(b'amlogic, ge2d-g12a\0')
+        with self.assertRaisesRegex(ValueError, 'Unsupported GE2D'):
+            helper.main(['video-clock'])
+        self.assertEqual((self.root / 'ge2d_gate/clk_rate').read_text(), '399999994')
+
+    def test_missing_debugfs_is_reported_without_repair(self):
+        (self.root / 'ge2d_gate/clk_rate').unlink()
+        with self.assertRaises(FileNotFoundError):
+            helper.main(['video-clock'])
 
     def test_mainline_does_not_touch_vendor_clocks(self):
         self.compatible.unlink()

@@ -11,7 +11,7 @@ mod wave5;
 #[cfg(test)]
 mod queue_tests;
 
-fn restore_scaler_clock(command: &mut std::process::Command) {
+fn check_scaler_clock(command: &mut std::process::Command) {
     let result = command
         .output()
         .map_err(|error| error.to_string())
@@ -27,9 +27,9 @@ fn restore_scaler_clock(command: &mut std::process::Command) {
             }
         });
     match result {
-        Ok(actual) => info!(%actual, "VIM4 scaler clock restored"),
+        Ok(actual) => info!(%actual, "VIM4 scaler clock checked"),
         Err(error) => {
-            warn!(%error, "VIM4 scaler clock restoration failed; continuing video at reduced throughput")
+            warn!(%error, "VIM4 scaler clock check failed; kernel frequency may limit video throughput")
         }
     }
 }
@@ -312,7 +312,7 @@ impl SharedVideoPipeline {
                 && config.output.height > 0
                 && config.output.height < source.0.height
             {
-                restore_scaler_clock(std::process::Command::new("sudo").args([
+                check_scaler_clock(std::process::Command::new("sudo").args([
                     "-n",
                     "/usr/libexec/vim4-onekvm",
                     "video-clock",

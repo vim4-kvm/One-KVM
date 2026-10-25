@@ -84,7 +84,7 @@ fn scaler_clock_failures_do_not_stop_frame_delivery() {
         let first = sink
             .try_pull_sample(gst::ClockTime::from_seconds(2))
             .unwrap();
-        let () = restore_scaler_clock(command);
+        let () = check_scaler_clock(command);
         let mut previous = first.buffer().unwrap().pts().unwrap();
         for _ in 0..2 {
             let sample = sink

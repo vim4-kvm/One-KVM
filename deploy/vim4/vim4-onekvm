@@ -390,28 +390,24 @@ def _configure_media(name, cdrom, readonly, expected):
             os.close(fd)
 
 
-def restore_scaler_clock():
-    """Restore the T7 GE2D bus rate after the vendor encoder lowers it on open."""
+def check_scaler_clock():
+    """Report whether the kernel maintains the T7 shared scaler bus requirement."""
     if EDGE or not platform.release().startswith('5.15.'):
         return
     if b'amlogic, ge2d-t7' not in GE2D_DEVICE.read_bytes().split(b'\0'):
-        raise ValueError('Unsupported GE2D device for scaler clock restoration')
+        raise ValueError('Unsupported GE2D device for scaler clock check')
     target = 666666667
     tolerance = 10000
-    if int((CLOCK_ROOT / 'vpu/clk_rate').read_text()) + tolerance < target:
-        raise ValueError('VPU clock is below the validated T7 scaler bus rate')
     clock = CLOCK_ROOT / 'ge2d_gate/clk_rate'
-    if int(clock.read_text()) + tolerance < target:
-        clock.write_text(str(target))
     actual = int(clock.read_text())
-    if abs(actual - target) > tolerance:
-        raise ValueError(f'GE2D bus clock restoration failed: {actual} Hz')
+    if actual + tolerance < target:
+        raise ValueError(f'GE2D bus clock is too low: {actual} Hz; kernel shared-clock fix required')
     print(json.dumps({'ge2d_hz': actual}))
 
 
 def main(args):
     if args == ['video-clock']:
-        restore_scaler_clock()
+        check_scaler_clock()
         return
     if args == ['catalog']:
         print(json.dumps(vim4media.catalog()))
