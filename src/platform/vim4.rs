@@ -386,8 +386,28 @@ pub fn signal() -> Option<(Resolution, u32)> {
             status.fps?.round() as u32,
         ));
     }
-    parse_signal(&std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/info").ok()?)
-        .map(|(size, fps)| (size, fps.round() as u32))
+    parse_capture_signal(&std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/info").ok()?)
+}
+
+// Capture caps and encoder budgets follow the base timing during VRR. Actual
+// cadence remains visible in input_status(), and buffer PTS stays authoritative.
+fn parse_capture_signal(info: &str) -> Option<(Resolution, u32)> {
+    let (size, measured) = parse_signal(info)?;
+    let rate = info.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "Capture Frame Rate").then_some(value.trim())
+    });
+    let fps = match rate {
+        Some(value) => {
+            let hundredths: u32 = value.parse().ok()?;
+            if !(100..=12000).contains(&hundredths) {
+                return None;
+            }
+            (hundredths + 50) / 100
+        }
+        None => measured.round() as u32,
+    };
+    Some((size, fps))
 }
 
 pub fn input_status() -> crate::video::device::VideoInputStatus {
@@ -658,6 +678,37 @@ mod tests {
         assert_eq!(
             parse_signal(&info.replace("3-YUV420", "0-RGB")),
             Some((Resolution::new(1920, 2160), 59.99))
+        );
+    }
+
+    #[test]
+    fn vrr_cadence_does_not_change_capture_mode_but_geometry_still_does() {
+        for rate in [4800, 5994, 7200, 9000, 11988, 12000] {
+            let info = format!(
+                "Hactive: 1920\nVactive: 1080\nFrame Rate: {rate}\nCapture Frame Rate: 12000\n"
+            );
+            assert_eq!(
+                parse_capture_signal(&info),
+                Some((Resolution::new(1920, 1080), 120))
+            );
+            assert_eq!(parse_signal(&info).unwrap().1, f64::from(rate) / 100.0);
+            assert_eq!(
+                parse_capture_signal(&info.replace("Vactive: 1080", "Vactive: 720")),
+                Some((Resolution::new(1920, 720), 120))
+            );
+        }
+        let info = "Hactive: 1920\nVactive: 1080\nFrame Rate: 5000\n";
+        assert_eq!(
+            parse_capture_signal(info),
+            Some((Resolution::new(1920, 1080), 50))
+        );
+        assert_eq!(
+            parse_capture_signal(&format!("{info}Capture Frame Rate: 0\n")),
+            None
+        );
+        assert_eq!(
+            parse_capture_signal(&format!("{info}Capture Frame Rate: 14400\n")),
+            None
         );
     }
 }
