@@ -252,7 +252,9 @@ impl SharedVideoPipeline {
         config: &SharedVideoPipelineConfig,
         source: (Resolution, u32),
     ) -> Result<()> {
-        let fps = config.output.frame_rate(source.1, 60);
+        let fps = config
+            .output
+            .h26x_frame_rate(source.0, source.1, VideoBackend::current());
         let error = |e: &dyn std::fmt::Display| AppError::VideoError(e.to_string());
         let element =
             gst::parse::launch(&description(config, source.0, fps)?).map_err(|e| error(&e))?;

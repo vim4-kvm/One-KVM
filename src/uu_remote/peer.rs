@@ -1925,7 +1925,7 @@ fn requested_output(
     mut output: crate::platform::vim4::OutputSettings,
 ) -> crate::platform::vim4::OutputSettings {
     if let Some(fps) = request.fps {
-        output.fps = fps.clamp(5, 60) as u32;
+        output.fps = fps.clamp(5, 120) as u32;
     }
     if let Some(size) = request.output {
         output.height = match size {
@@ -2417,7 +2417,7 @@ mod tests {
             ..Default::default()
         };
         let output = requested_output(&request, native, OutputSettings::default());
-        assert_eq!((output.height, output.fps), (1080, 60));
+        assert_eq!((output.height, output.fps), (1080, 120));
         let native_request = wire::CaptureRequest {
             output: Some(None),
             ..Default::default()

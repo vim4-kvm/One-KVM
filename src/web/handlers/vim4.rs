@@ -60,7 +60,14 @@ impl BoardVideoChange {
     fn command(&self) -> Result<(&'static str, Vec<String>)> {
         match self {
             Self::Edid { preset }
-                if ["VIM4-4K60", "VIM4-1080P60", "VIM4-1080P60-SDR8", "RTK-CONTROL"].contains(&preset.as_str()) =>
+                if [
+                    "VIM4-4K60",
+                    "VIM4-1080P60",
+                    "VIM4-1080P60-SDR8",
+                    "RTK-CONTROL",
+                    "RTK-1080P120",
+                ]
+                .contains(&preset.as_str()) =>
             {
                 Ok((
                     "/usr/libexec/vim4-edid",

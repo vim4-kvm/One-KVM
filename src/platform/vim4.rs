@@ -247,14 +247,14 @@ pub fn validate_bitrate(preset: crate::config::BitratePreset) -> crate::error::R
 pub struct OutputSettings {
     /// Maximum output height; zero preserves the input size. Never upscale.
     pub height: u32,
-    /// Maximum frame rate; zero follows the source. MJPEG is capped at 10 fps.
+    /// Maximum frame rate; zero follows the source. Each encoder applies its own limit.
     pub fps: u32,
 }
 
 impl OutputSettings {
     pub fn validate(self) -> crate::error::Result<()> {
         if (self.height != 0 && (!(180..=2160).contains(&self.height) || self.height % 2 != 0))
-            || (self.fps != 0 && !(5..=60).contains(&self.fps))
+            || (self.fps != 0 && !(5..=120).contains(&self.fps))
         {
             return Err(crate::error::AppError::BadRequest(
                 "Unsupported output size or frame rate".into(),
@@ -271,6 +271,23 @@ impl OutputSettings {
                 self.fps.min(maximum)
             })
             .max(1)
+    }
+
+    pub fn h26x_frame_rate(
+        self,
+        source: Resolution,
+        source_fps: u32,
+        backend: VideoBackend,
+    ) -> u32 {
+        // Scope the high-refresh candidate to native 1080p on the vendor path.
+        // Scaling a UHD source down must not raise its capture/encoding budget.
+        let maximum =
+            if backend == VideoBackend::Vendor && source.width == 1920 && source.height == 1080 {
+                120
+            } else {
+                60
+            };
+        self.frame_rate(source_fps, maximum)
     }
 
     pub fn filter(self, source: Resolution, fps: u32) -> String {
@@ -575,6 +592,46 @@ mod tests {
         .is_err());
         assert!(validate_bitrate(crate::config::BitratePreset::Custom(60000)).is_ok());
         assert!(validate_bitrate(crate::config::BitratePreset::Custom(60001)).is_err());
+    }
+    #[test]
+    fn high_refresh_is_limited_by_native_input_backend_and_user_cap() {
+        let native = Resolution::new(1920, 1080);
+        let automatic = OutputSettings::default();
+        assert_eq!(
+            automatic.h26x_frame_rate(native, 120, VideoBackend::Vendor),
+            120
+        );
+        assert_eq!(
+            automatic.h26x_frame_rate(native, 60, VideoBackend::Vendor),
+            60
+        );
+        assert_eq!(
+            automatic.h26x_frame_rate(native, 120, VideoBackend::Wave5),
+            60
+        );
+        let limited = OutputSettings {
+            height: 720,
+            fps: 60,
+        };
+        assert_eq!(
+            limited.h26x_frame_rate(native, 120, VideoBackend::Vendor),
+            60
+        );
+        let high = OutputSettings {
+            height: 1080,
+            fps: 120,
+        };
+        assert!(high.validate().is_ok());
+        assert_eq!(high.h26x_frame_rate(native, 100, VideoBackend::Vendor), 100);
+        assert_eq!(
+            high.h26x_frame_rate(Resolution::new(3840, 2160), 120, VideoBackend::Vendor),
+            60
+        );
+        assert_eq!(
+            high.h26x_frame_rate(Resolution::new(2560, 1440), 120, VideoBackend::Vendor),
+            60
+        );
+        assert!(OutputSettings { fps: 121, ..high }.validate().is_err());
     }
     #[test]
     fn initial_defaults_restore_media_after_generic_config_normalization() {

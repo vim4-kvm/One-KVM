@@ -26,7 +26,7 @@ const peak = ref(1000)
 const ready = ref(false)
 const busy = ref(false)
 const heights = computed(() => [...new Set([720, 900, 1080, 1440, 2160, Number(height.value)])].filter(v => v > 0).sort((a, b) => a - b))
-const frameRates = computed(() => [...new Set([5, 10, 15, 24, 30, 60, Number(fps.value)])].filter(v => v > 0).sort((a, b) => a - b))
+const frameRates = computed(() => [...new Set([5, 10, 15, 24, 30, 60, 100, 120, Number(fps.value)])].filter(v => v > 0).sort((a, b) => a - b))
 
 async function load() {
   ready.value = false
@@ -121,9 +121,10 @@ onMounted(load)
           <SelectContent>
             <SelectItem value="VIM4-4K60">4K 60 Hz</SelectItem>
             <SelectItem value="RTK-CONTROL">RTK UHD HDR 4K60</SelectItem>
+            <SelectItem value="RTK-1080P120">RTK UHD HDR · 4K60 + 1080p120 (experimental)</SelectItem>
             <SelectItem value="VIM4-1080P60">1080p 60 Hz</SelectItem>
             <SelectItem value="VIM4-1080P60-SDR8">1080p 60 Hz · SDR 8-bit</SelectItem>
-            <SelectItem v-if="board && !['VIM4-4K60', 'RTK-CONTROL', 'VIM4-1080P60', 'VIM4-1080P60-SDR8'].includes(board.edid)" :value="board.edid" disabled>{{ board.edid }}</SelectItem>
+            <SelectItem v-if="board && !['VIM4-4K60', 'RTK-CONTROL', 'RTK-1080P120', 'VIM4-1080P60', 'VIM4-1080P60-SDR8'].includes(board.edid)" :value="board.edid" disabled>{{ board.edid }}</SelectItem>
           </SelectContent>
         </Select>
         <p class="text-muted-foreground">{{ t('vim4Video.edidHint') }}</p>
