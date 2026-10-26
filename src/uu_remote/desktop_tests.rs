@@ -124,7 +124,7 @@ impl Viewer {
                 #[cfg(target_os = "linux")]
                 files: super::super::files::storage::Storage::new(directory.path().join("files")),
             },
-            SessionIce::from_header(&serde_json::json!({"iceServers":[]})),
+            SessionIce::host_only(),
             &soac,
             capture_type,
         )
