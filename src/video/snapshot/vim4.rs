@@ -261,7 +261,12 @@ pub(crate) fn encode(
     let info = gstreamer_video::VideoInfo::from_caps(caps).map_err(SnapshotError::unavailable)?;
     let (sw, sh) = output_size((info.width(), info.height()), output_height);
     let g = geometry(target, (sw, sh))?;
+    let padded = sample
+        .buffer()
+        .and_then(|buffer| buffer.meta::<gstreamer_video::VideoMeta>())
+        .is_some_and(|meta| meta.stride()[0] != info.stride()[0]);
     let scaler = match backend {
+        VideoBackend::Vendor if padded => "videoconvert ! videoscale",
         VideoBackend::Vendor => "amlvconv",
         VideoBackend::Wave5 => "videoconvert ! videoscale",
     };

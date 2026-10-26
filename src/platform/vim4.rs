@@ -306,12 +306,20 @@ impl OutputSettings {
         let mut filter =
             format!("videorate name=output_rate drop-only=true ! video/x-raw,framerate={fps}/1 ! ");
         if self.height > 0 && self.height < source.height {
-            // GE2D keeps scaling in DMA memory. Preserve aspect ratio and even chroma dimensions.
+            // The vendor GE2D plugin ignores padded input VideoMeta. Standard
+            // scaling keeps native HDMI widths such as 3440 from shearing.
+            let (scaler, format) = if source.width % 64 != 0 {
+                // Scale NV21 directly: converting the full DMA frame first
+                // adds an expensive CPU read before reducing its dimensions.
+                ("videoscale name=scaler n-threads=4", "NV21")
+            } else {
+                ("amlvconv name=scaler", "NV12")
+            };
             let width = (u64::from(source.width) * u64::from(self.height)
                 / u64::from(source.height)) as u32
                 & !1;
             filter.push_str(&format!(
-                "amlvconv name=scaler ! video/x-raw,format=NV12,width={},height={} ! \
+                "{scaler} ! video/x-raw,format={format},width={},height={} ! \
                  queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! ",
                 width.max(2),
                 self.height
