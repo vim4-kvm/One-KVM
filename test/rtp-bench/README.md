@@ -6,6 +6,20 @@ It does not compile or open capture, encoder, HDMI, USB or application services.
 It uses the workspace's patched DTLS and the production WebRTC dependency version
 and `vendored-openssl` feature. The default `vim4` feature selects the production
 first-packet playout-delay extension branch.
+The local SRTP patch matches the application. Default `openssl-hmac` enables its
+VIM4 authentication backend; disable only this feature for a controlled baseline:
+
+```sh
+cargo build --locked --release --manifest-path test/rtp-bench/Cargo.toml \
+  --no-default-features --features vim4
+cp test/rtp-bench/target/release/onekvm-rtp-bench /tmp/rtp-bench-upstream-hmac
+cargo build --locked --release --manifest-path test/rtp-bench/Cargo.toml
+cp test/rtp-bench/target/release/onekvm-rtp-bench /tmp/rtp-bench-openssl-hmac
+```
+
+Keep fixtures, profiles, rounds, iteration counts and VIM4 track behavior equal.
+Reports record the selected feature and embedded SRTP source hashes; all encrypted
+transcript hashes must match across backends. See [backend notes](../../libs/srtp/VIM4.md).
 
 Build from the One-KVM checkout so its ancestor `.cargo/config.toml` supplies
 the ARM AES/PMULL settings; do not override `RUSTFLAGS`:
@@ -102,6 +116,10 @@ Run performance cases alone under the workspace heavy lock. A board replay
 needs coordination even though it does not open codec devices: it consumes CPU.
 
 ## Isolated OpenSSL HMAC experiment
+
+This section preserves the original experiment against the unmodified 0.17.2
+release. The production fork now uses an explicit feature; use the commands
+above for current A/B tests. Do not apply this archived patch to `libs/srtp`.
 
 `hmac-openssl-experiment.patch` is an experimental patch for a clean copy of
 `webrtc-srtp` 0.17.2. It is not connected to this crate's or the application's

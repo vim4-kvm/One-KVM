@@ -1163,6 +1163,7 @@ dependencies = [
  "tokio",
  "tracing",
  "webrtc",
+ "webrtc-srtp",
 ]
 
 [[package]]
@@ -2381,8 +2382,6 @@ dependencies = [
 [[package]]
 name = "webrtc-srtp"
 version = "0.17.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45d2b667a0b5d04eebcb7cb22fd51b2af3721f418097b496e72de16386c8d0c3"
 dependencies = [
  "aead",
  "aes",

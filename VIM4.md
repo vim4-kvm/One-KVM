@@ -174,6 +174,11 @@ packaging/ubuntu/Dockerfile 固定。Ubuntu libyuv 使用兼容的两步 BGR 转
 依赖运行时检测 CPU 能力，不支持时回退软件实现。不要用外部 `RUSTFLAGS` 覆盖
 这些配置。它们加速 RustCrypto 后端；当前 OpenSSL AES-CM 路径已有硬件 AES，
 因此这些开关本身不能消除 UU 会话的大关键帧发送峰值。
+VIM4 构建还启用私有 SRTP 的 `openssl-hmac`，以已有 OpenSSL 计算 HMAC-SHA1；
+预计算 keyed 状态，避免逐包创建 EVP 上下文。协议、认证标签、协商和其他平台默认
+保持原样；实现及库测试见 [SRTP 后端](libs/srtp/VIM4.md)，CPU 回放方法见
+[RTP 基准](test/rtp-bench/README.md)。该特性要求 OpenSSL 提供低层 SHA1 API，
+正式构建使用匹配的 vendored OpenSSL。
 VIM4 H.264 使用 `gop=0 intra-refresh-rows=3`，H.265 使用
 `gop=0 intra-refresh-rows=1`，分别每帧刷新三行 MB、一行 CTU，避免周期
 整幅 I 帧造成编码和发送突发。保留厂商 QP 范围；静态画面也可能接近目标码率。

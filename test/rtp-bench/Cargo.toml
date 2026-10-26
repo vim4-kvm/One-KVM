@@ -8,8 +8,9 @@ publish = false
 
 [features]
 # Compile the production first-packet playout-delay branch.
-default = ["vim4"]
+default = ["vim4", "openssl-hmac"]
 vim4 = []
+openssl-hmac = ["srtp/openssl-hmac"]
 
 [dependencies]
 anyhow = "1"
@@ -23,9 +24,11 @@ socket2 = "0.6"
 tokio = { version = "=1.53.1", features = ["full"] }
 tracing = "0.1"
 webrtc = { version = "=0.17.2", features = ["vendored-openssl"] }
+srtp = { package = "webrtc-srtp", version = "=0.17.2" }
 
 [patch.crates-io]
 dtls = { path = "../../libs/dtls" }
+webrtc-srtp = { path = "../../libs/srtp" }
 
 [profile.release]
 opt-level = 3

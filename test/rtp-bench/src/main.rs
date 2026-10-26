@@ -792,6 +792,14 @@ fn metadata() -> Value {
             &include_bytes!("../../../libs/dtls/src/flight/flight0.rs")[..],
         ),
         (
+            "libs/srtp/Cargo.toml",
+            &include_bytes!("../../../libs/srtp/Cargo.toml")[..],
+        ),
+        (
+            "libs/srtp/src/cipher/cipher_aes_cm_hmac_sha1/mod.rs",
+            &include_bytes!("../../../libs/srtp/src/cipher/cipher_aes_cm_hmac_sha1/mod.rs")[..],
+        ),
+        (
             "test/rtp-bench/Cargo.lock",
             &include_bytes!("../Cargo.lock")[..],
         ),
@@ -803,7 +811,7 @@ fn metadata() -> Value {
     ] {
         files.insert(name.into(), json!(digest(bytes)));
     }
-    json!({"checkout_revision_at_runtime":command(&["git","rev-parse","HEAD"]),"checkout_status_at_runtime":command(&["git","status","--porcelain"]),"uname":command(&["uname","-a"]),"rustc":command(&["rustc","-Vv"]),"arch":std::env::consts::ARCH,"target_features":crypto_features(),"source_sha256":files,"build_manifest_sha256":digest(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),"/Cargo.toml"))),"build_lock_sha256":digest(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),"/Cargo.lock"))),"executable_sha256":std::fs::read("/proc/self/exe").map(|b|digest(&b)).ok(),"build":"release opt3 lto codegen-units1; webrtc/vendored-openssl; see cargo-features.txt for actual crypto backend"})
+    json!({"checkout_revision_at_runtime":command(&["git","rev-parse","HEAD"]),"checkout_status_at_runtime":command(&["git","status","--porcelain"]),"uname":command(&["uname","-a"]),"rustc":command(&["rustc","-Vv"]),"arch":std::env::consts::ARCH,"target_features":crypto_features(),"openssl_hmac_feature":cfg!(feature="openssl-hmac"),"source_sha256":files,"build_manifest_sha256":digest(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),"/Cargo.toml"))),"build_lock_sha256":digest(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),"/Cargo.lock"))),"executable_sha256":std::fs::read("/proc/self/exe").map(|b|digest(&b)).ok(),"build":"release opt3 lto codegen-units1; webrtc/vendored-openssl; see cargo-features.txt for actual crypto backend"})
 }
 
 fn crypto_features() -> Value {

@@ -31,6 +31,13 @@ License: AGPL-3.0-only
 Comment:
  Derived from the RustDesk hwcodec component. See libs/hwcodec/NOTICE.
 
+Files: libs/srtp/*
+Copyright: 2021 WebRTC.rs
+License: Expat or Apache-2.0
+Comment:
+ Vendored webrtc-srtp 0.17.2. The upstream license texts are retained in
+ libs/srtp/LICENSE-MIT and libs/srtp/LICENSE-APACHE.
+
 Files: libs/v4l2r/*
 Copyright: 2023-2024 Andrei Lytkin, Daniel Almeida, Collabora Ltd. and other v4l2r contributors
 License: Expat
@@ -140,6 +147,10 @@ License: GPL-2.0+
  .
  On Debian systems, the full text of the GNU General Public License
  version 2 can be found in the file `/usr/share/common-licenses/GPL-2'.
+
+License: Apache-2.0
+ On Debian systems, the complete text of the Apache License, version 2.0,
+ can be found in `/usr/share/common-licenses/Apache-2.0'.
 
 License: Expat
  Permission is hereby granted, free of charge, to any person obtaining a
