@@ -101,6 +101,81 @@ unavailable there. Record host CPU/frequency/load separately for comparisons.
 Run performance cases alone under the workspace heavy lock. A board replay
 needs coordination even though it does not open codec devices: it consumes CPU.
 
+## Isolated OpenSSL HMAC experiment
+
+`hmac-openssl-experiment.patch` is an experimental patch for a clean copy of
+`webrtc-srtp` 0.17.2. It is not connected to this crate's or the application's
+normal dependency graph. With the existing `openssl` feature, it replaces the
+RustCrypto SHA-1 HMAC state with precomputed inner/outer OpenSSL SHA-1 states;
+the algorithm, key derivation and authentication tag lengths remain unchanged.
+
+Copy the clean package into a private directory, preserving its license files.
+Never patch Cargo's shared registry cache. For example, from the One-KVM root:
+
+```sh
+mkdir -p .tmp
+cp -R /path/to/clean/webrtc-srtp-0.17.2 .tmp/srtp-openssl-candidate
+patch --dry-run -d .tmp/srtp-openssl-candidate -p1 < test/rtp-bench/hmac-openssl-experiment.patch
+patch -d .tmp/srtp-openssl-candidate -p1 < test/rtp-bench/hmac-openssl-experiment.patch
+```
+
+Build the normal benchmark first, then save its executable under a distinct
+name before any candidate build can overwrite a shared target directory:
+
+```sh
+cp test/rtp-bench/target/release/onekvm-rtp-bench .tmp/rtp-bench-baseline
+mkdir -p .tmp/rtp-bench-hmac
+cp test/rtp-bench/Cargo.toml .tmp/rtp-bench-hmac/Cargo.toml
+cp test/rtp-bench/Cargo.lock .tmp/rtp-bench-hmac/Cargo.lock
+```
+
+In that temporary manifest, add the binary declaration below and the SRTP entry
+to its existing `[patch.crates-io]` table. Keep the DTLS patch, dependency versions,
+features and release profile unchanged. Using the original source path preserves
+the production modules and source snapshots included by the benchmark.
+
+```toml
+[[bin]]
+name = "onekvm-rtp-bench"
+path = "../../test/rtp-bench/src/main.rs"
+
+[patch.crates-io]
+webrtc-srtp = { path = "../srtp-openssl-candidate" }
+dtls = { path = "../../libs/dtls" }
+```
+
+The first candidate build must refresh the temporary lockfile for the path
+override; preserve that lockfile and use `--locked` for subsequent builds.
+The executable paths here assume no `CARGO_TARGET_DIR` override; use the actual
+target directory if one is configured.
+
+```sh
+cargo build --release --manifest-path .tmp/rtp-bench-hmac/Cargo.toml
+cp .tmp/rtp-bench-hmac/target/release/onekvm-rtp-bench .tmp/rtp-bench-candidate
+cargo tree --locked --manifest-path .tmp/rtp-bench-hmac/Cargo.toml -e features -i webrtc-srtp
+```
+
+Confirm that feature tree activates the OpenSSL backend.
+Run candidate library tests directly with
+`cargo test --manifest-path .tmp/srtp-openssl-candidate/Cargo.toml --features vendored-openssl --lib`.
+The isolated candidate passed all 40 library tests, including the two added
+RFC 2202 and RTP/SRTCP authentication equivalence tests; the main workspace
+retains the run in `logs/rtp-hmac-candidate-tests-online.log`.
+
+Compare saved baseline, candidate and baseline again under the same host/load
+conditions. Use identical input files, stages, rounds and iterations, and fresh
+report paths. For `srtp_context` and `srtp_udp`, require matching
+`encrypted_transcript_sha256` for every codec/profile/stage, plus successful
+decryption and packet delivery validation. Record executable, actual manifest,
+lockfile and patched dependency source hashes. The benchmark embeds its actual
+manifest/lock hashes; it does not embed the experimental dependency's source.
+
+This remains a performance investigation, not production adoption. The safe
+`openssl::sha::Sha1` wrapper stores a low-level `SHA_CTX`; its underlying
+`SHA1_Init/Update/Final` APIs are deprecated in OpenSSL 3.0. That upstream
+maintenance constraint needs review before adopting or maintaining a dependency
+fork, even when byte equivalence and offline measurements pass.
+
 ## Optional Chrome interoperability check
 
 File signaling accepts an ICE-complete `{type,sdp}` offer from an isolated test

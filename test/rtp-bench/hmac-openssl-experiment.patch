@@ -1,0 +1,158 @@
+--- a/src/cipher/cipher_aes_cm_hmac_sha1/mod.rs
++++ b/src/cipher/cipher_aes_cm_hmac_sha1/mod.rs
+@@ -1,5 +1,7 @@
+ use byteorder::{BigEndian, ByteOrder};
++#[cfg(any(test, not(feature = "openssl")))]
+ use hmac::{Hmac, Mac};
++#[cfg(any(test, not(feature = "openssl")))]
+ use sha1::Sha1;
+ 
+ use super::{Cipher, Kdf};
+@@ -19,8 +21,60 @@
+ #[cfg(feature = "openssl")]
+ pub(crate) use opensslcipher::CipherAesCmHmacSha1;
+ 
++#[cfg(not(feature = "openssl"))]
+ type HmacSha1 = Hmac<Sha1>;
+ 
++// Offline experiment only: production dependencies have not been switched.
++// Match RustCrypto's precomputed HMAC states while changing only SHA1's backend.
++#[cfg(feature = "openssl")]
++#[derive(Clone)]
++struct HmacSha1 {
++    inner: openssl::sha::Sha1,
++    outer: openssl::sha::Sha1,
++}
++
++#[cfg(feature = "openssl")]
++impl HmacSha1 {
++    fn new_from_slice(key: &[u8]) -> std::result::Result<Self, hmac::digest::InvalidLength> {
++        let mut padded = [0; 64];
++        if key.len() > padded.len() {
++            padded[..20].copy_from_slice(&openssl::sha::sha1(key));
++        } else {
++            padded[..key.len()].copy_from_slice(key);
++        }
++        let mut ipad = padded;
++        let mut opad = padded;
++        for byte in &mut ipad {
++            *byte ^= 0x36;
++        }
++        for byte in &mut opad {
++            *byte ^= 0x5c;
++        }
++        let mut inner = openssl::sha::Sha1::new();
++        let mut outer = openssl::sha::Sha1::new();
++        inner.update(&ipad);
++        outer.update(&opad);
++        Ok(Self { inner, outer })
++    }
++
++    fn update(&mut self, bytes: &[u8]) {
++        self.inner.update(bytes);
++    }
++}
++
++fn finalize_hmac(signer: HmacSha1) -> [u8; 20] {
++    #[cfg(feature = "openssl")]
++    {
++        let mut outer = signer.outer;
++        outer.update(&signer.inner.finish());
++        outer.finish()
++    }
++    #[cfg(not(feature = "openssl"))]
++    {
++        signer.finalize().into_bytes().into()
++    }
++}
++
+ pub const CIPHER_AES_CM_HMAC_SHA1AUTH_TAG_LEN: usize = 10;
+ 
+ pub(crate) struct CipherInner {
+@@ -105,7 +159,7 @@
+         // For SRTP only, we need to hash the rollover counter as well.
+         signer.update(&roc.to_be_bytes());
+ 
+-        signer.finalize().into_bytes().into()
++        finalize_hmac(signer)
+     }
+ 
+     /// https://tools.ietf.org/html/rfc3711#section-4.2
+@@ -124,7 +178,7 @@
+ 
+         signer.update(buf);
+ 
+-        signer.finalize().into_bytes().into()
++        finalize_hmac(signer)
+     }
+ 
+     fn get_rtcp_index(&self, input: &[u8]) -> usize {
+@@ -133,3 +187,68 @@
+             as usize
+     }
+ }
++
++#[cfg(all(test, feature = "openssl"))]
++mod candidate_hmac_tests {
++    use super::*;
++
++    fn reference(key: &[u8], chunks: &[&[u8]]) -> [u8; 20] {
++        let mut signer = Hmac::<Sha1>::new_from_slice(key).unwrap();
++        for chunk in chunks {
++            signer.update(chunk);
++        }
++        signer.finalize().into_bytes().into()
++    }
++
++    #[test]
++    fn openssl_hmac_matches_rfc2202() {
++        for (key, message, expected) in [
++            (
++                vec![0x0b; 20],
++                b"Hi There".as_slice(),
++                [0xb6, 0x17, 0x31, 0x86, 0x55, 0x05, 0x72, 0x64, 0xe2, 0x8b,
++                 0xc0, 0xb6, 0xfb, 0x37, 0x8c, 0x8e, 0xf1, 0x46, 0xbe, 0x00],
++            ),
++            (
++                vec![0xaa; 80],
++                b"Test Using Larger Than Block-Size Key - Hash Key First".as_slice(),
++                [0xaa, 0x4a, 0xe5, 0xe1, 0x52, 0x72, 0xd0, 0x0e, 0x95, 0x70,
++                 0x56, 0x37, 0xce, 0x8a, 0x3b, 0x55, 0xed, 0x40, 0x21, 0x12],
++            ),
++        ] {
++            let mut signer = HmacSha1::new_from_slice(&key).unwrap();
++            signer.update(message);
++            assert_eq!(finalize_hmac(signer), expected);
++        }
++    }
++
++    #[test]
++    fn openssl_auth_tags_match_rustcrypto_for_rtp_and_srtcp() {
++        for key_len in [0, 20, 63, 64, 65, 80] {
++            let key: Vec<u8> = (0..key_len).map(|i| (i * 7) as u8).collect();
++            let cipher = CipherInner {
++                profile: ProtectionProfile::Aes128CmHmacSha1_80,
++                srtp_session_salt: vec![],
++                srtp_session_auth: HmacSha1::new_from_slice(&key).unwrap(),
++                srtcp_session_salt: vec![],
++                srtcp_session_auth: HmacSha1::new_from_slice(&key).unwrap(),
++            };
++            for size in [0, 12, 55, 56, 63, 64, 65, 128, 512, 1200, 1400] {
++                let packet: Vec<u8> = (0..size).map(|i| (i * 13) as u8).collect();
++                for index in [0, 1, 65535, 0x7fff_ffff, u32::MAX] {
++                    let roc = index.to_be_bytes();
++                    let expected = reference(&key, &[&packet, &roc]);
++                    // Reusing the saved keyed state must not retain a prior packet.
++                    for _ in 0..2 {
++                        assert_eq!(cipher.generate_srtp_auth_tag(&packet, index), expected);
++                    }
++                    for e_bit in [0, 1 << 31] {
++                        let mut srtcp = packet.clone();
++                        srtcp.extend_from_slice(&((index & 0x7fff_ffff) | e_bit).to_be_bytes());
++                        assert_eq!(cipher.generate_srtcp_auth_tag(&srtcp), reference(&key, &[&srtcp]));
++                    }
++                }
++            }
++        }
++    }
++}
