@@ -121,7 +121,7 @@ onMounted(load)
           <SelectContent>
             <SelectItem value="VIM4-4K60">4K 60 Hz</SelectItem>
             <SelectItem value="RTK-CONTROL">RTK UHD HDR 4K60</SelectItem>
-            <SelectItem value="RTK-1080P120">RTK UHD HDR · 4K60 + 1080p120 (experimental)</SelectItem>
+            <SelectItem value="RTK-1080P120">RTK UHD HDR · 4K60 + 1080p120 + VRR (experimental)</SelectItem>
             <SelectItem value="VIM4-1080P60">1080p 60 Hz</SelectItem>
             <SelectItem value="VIM4-1080P60-SDR8">1080p 60 Hz · SDR 8-bit</SelectItem>
             <SelectItem v-if="board && !['VIM4-4K60', 'RTK-CONTROL', 'RTK-1080P120', 'VIM4-1080P60', 'VIM4-1080P60-SDR8'].includes(board.edid)" :value="board.edid" disabled>{{ board.edid }}</SelectItem>
