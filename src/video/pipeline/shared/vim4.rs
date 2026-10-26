@@ -49,6 +49,7 @@ fn description(
     config: &SharedVideoPipelineConfig,
     source: Resolution,
     source_fps: u32,
+    native_hdr: bool,
 ) -> Result<String> {
     let fps = config
         .output
@@ -56,7 +57,7 @@ fn description(
     if VideoBackend::current() == VideoBackend::Wave5 {
         return wave5::description(config, source, fps);
     }
-    if config.output.hdr && config.output_codec == VideoEncoderType::H265 {
+    if native_hdr {
         return hdr_description(config, source, source_fps, fps);
     }
     let codec = match config.output_codec {
@@ -96,6 +97,13 @@ fn description(
         video/x-{codec} ! {codec}parse config-interval=-1 ! \
         video/x-{codec},stream-format=byte-stream,alignment=au ! appsink name=frames sync=false max-buffers=2",
         crate::video::snapshot::vim4::BRANCH, config.bitrate_kbps().clamp(1000, 60000), fps))
+}
+
+fn native_hdr(config: &SharedVideoPipelineConfig) -> bool {
+    VideoBackend::current() == VideoBackend::Vendor
+        && config.output.hdr
+        && config.output_codec == VideoEncoderType::H265
+        && crate::platform::vim4::pq_input()
 }
 
 fn hdr_description(
@@ -219,7 +227,12 @@ impl SharedVideoPipeline {
             return Ok(());
         }
         let config = self.config.read().await.clone();
-        description(&config, config.resolution, config.fps.max(1))?;
+        description(
+            &config,
+            config.resolution,
+            config.fps.max(1),
+            native_hdr(&config),
+        )?;
         gst::init().map_err(|e| AppError::VideoError(e.to_string()))?;
         *self.parameter_sets.lock() = CachedH26xParameterSets::default();
         *self.bootstrap_frame.write() = None;
@@ -303,8 +316,11 @@ impl SharedVideoPipeline {
             .output
             .h26x_frame_rate(source.0, source.1, VideoBackend::current());
         let error = |e: &dyn std::fmt::Display| AppError::VideoError(e.to_string());
-        let element =
-            gst::parse::launch(&description(config, source.0, source.1)?).map_err(|e| error(&e))?;
+        // SDR has no PQ samples to preserve. Keep its DMA/8-bit fast path even
+        // while the user preference allows HDR, and rebuild on EOTF changes.
+        let capture_hdr = native_hdr(config);
+        let element = gst::parse::launch(&description(config, source.0, source.1, capture_hdr)?)
+            .map_err(|e| error(&e))?;
         let capture = Capture(
             element
                 .downcast::<gst::Pipeline>()
@@ -332,10 +348,9 @@ impl SharedVideoPipeline {
             None
         };
         if VideoBackend::current() == VideoBackend::Vendor
-            && (std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").as_deref() == Ok("1")
-                || (config.output.hdr && config.output_codec == VideoEncoderType::H265))
+            && (std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").as_deref() == Ok("1") || capture_hdr)
         {
-            let name = if config.output.hdr && config.output_codec == VideoEncoderType::H265 {
+            let name = if capture_hdr {
                 "snapshot_source"
             } else {
                 "source"
@@ -358,7 +373,7 @@ impl SharedVideoPipeline {
         let mut idle_since = None;
         let mut total_frames = 0u64;
         let mut progress_time = Instant::now();
-        info!(?source, codec = ?config.output_codec, "VIM4 capture started");
+        info!(?source, codec = ?config.output_codec, capture_hdr, "VIM4 capture started");
         while self.running_flag.load(Ordering::Acquire) {
             if progress_time.elapsed() >= Duration::from_secs(5) {
                 if let Some(stats) = &video_stats {
@@ -389,6 +404,9 @@ impl SharedVideoPipeline {
                     break;
                 }
                 drop(current);
+                if native_hdr(config) != capture_hdr {
+                    break;
+                }
                 let signal = crate::platform::vim4::signal();
                 rate_changes = if signal != Some(source) {
                     rate_changes + 1

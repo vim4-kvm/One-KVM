@@ -9,14 +9,14 @@ fn lowest_hevc_tier_keeps_recovery_keyframes_without_cyclic_refresh_overhead() {
     config.output_codec = VideoEncoderType::H265;
     config.bitrate_preset = BitratePreset::Custom(1000);
     let source = Resolution::new(3840, 2160);
-    let low = description(&config, source, 60).unwrap();
+    let low = description(&config, source, 60, false).unwrap();
     assert!(low.contains("bitrate=1000 gop=0 framerate=60 intra-refresh-rows=0"));
     assert!(low.contains("min-force-key-unit-interval=250000000"));
     config.bitrate_preset = BitratePreset::Balanced;
-    let normal = description(&config, source, 60).unwrap();
+    let normal = description(&config, source, 60, false).unwrap();
     assert!(normal.contains("bitrate=4000 gop=0 framerate=60 intra-refresh-rows=1"));
     config.output_codec = VideoEncoderType::H264;
-    let avc = description(&config, source, 60).unwrap();
+    let avc = description(&config, source, 60, false).unwrap();
     assert!(avc.contains("intra-refresh-rows=3"));
 }
 

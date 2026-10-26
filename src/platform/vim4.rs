@@ -17,6 +17,21 @@ pub fn hdr_remote_available() -> bool {
             .is_ok_and(|value| value.trim() == "Y")
 }
 
+pub fn pq_input() -> bool {
+    std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/info")
+        .is_ok_and(|info| parse_pq_input(&info))
+}
+
+fn parse_pq_input(info: &str) -> bool {
+    // The vendor driver spells ST2084 as ST_2048 in this sysfs ABI.
+    parse_signal(info).is_some()
+        && info.lines().any(|line| {
+            line.split_once(':').is_some_and(|(key, value)| {
+                key.trim() == "HDR EOTF" && value.trim() == "SMPTE_ST_2048"
+            })
+        })
+}
+
 fn usb_helper() -> &'static str {
     match VideoBackend::current() {
         VideoBackend::Wave5 if !video_backend::shared_data() => "/usr/libexec/vim4-onekvm-edge",
@@ -719,6 +734,17 @@ mod tests {
             parse_signal(&info.replace("3-YUV420", "0-RGB")),
             Some((Resolution::new(1920, 2160), 59.99))
         );
+    }
+
+    #[test]
+    fn native_hdr_requires_a_locked_pq_input() {
+        let signal = "Hactive: 3840\nVactive: 2160\nFrame Rate: 5999\n";
+        for eotf in ["SDR", "HDR", "HLG", "", "SMPTE_ST_2048"] {
+            let info = format!("{signal}HDR EOTF: {eotf}\n");
+            assert_eq!(parse_pq_input(&info), eotf == "SMPTE_ST_2048");
+            assert!(!parse_pq_input(&info.replace("5999", "0")));
+        }
+        assert!(!parse_pq_input(signal));
     }
 
     #[test]
