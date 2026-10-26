@@ -13,7 +13,8 @@ use crate::hid::HidController;
 use crate::video::device::VideoDeviceInfo;
 
 #[cfg(feature = "vim4")]
-pub type CaptureChange<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
+pub type CaptureChange<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
 
 /// Trait for video output consumers that receive encoded video frames.
 ///
@@ -25,7 +26,9 @@ pub trait VideoOutput: Send + Sync {
     /// Release capture and block new acquisitions while the board action runs.
     #[cfg(feature = "vim4")]
     async fn with_capture_released(&self, _action: CaptureChange<'_>) -> Result<()> {
-        Err(crate::error::AppError::VideoError("Capture transactions unavailable".into()))
+        Err(crate::error::AppError::VideoError(
+            "Capture transactions unavailable".into(),
+        ))
     }
     async fn set_event_bus(&self, events: Arc<EventBus>);
     async fn update_video_config(&self, resolution: Resolution, format: PixelFormat, fps: u32);
@@ -50,6 +53,10 @@ pub trait VideoOutput: Send + Sync {
     async fn vim4_output_settings(&self) -> Option<crate::platform::vim4::OutputSettings> {
         self.get_pipeline_config().await.map(|config| config.output)
     }
+    /// Restore a session's HDR preference even when HDMI is lost. Unlike a user
+    /// output request this publishes desired state without claiming frame delivery.
+    #[cfg(feature = "vim4")]
+    async fn restore_vim4_hdr(&self, _hdr: bool) {}
     async fn set_video_codec(&self, codec: VideoCodecType) -> Result<()>;
     async fn set_bitrate_preset(&self, preset: BitratePreset) -> Result<()>;
     #[cfg(feature = "vim4")]

@@ -57,6 +57,9 @@ export default {
     network: 'USB 网卡提供独立的共享网络（NetworkManager 分配地址并提供 DHCP/NAT）；暂不支持桥接现有以太网。USB 麦克风为 48 kHz 双声道，浏览器采集需要 HTTPS 或安全上下文。',
   },
   vim4Video: {
+    dynamicRange: '远程画面 · HDR 转 SDR',
+    sdrOutput: '开启转换：兼容 SDR', hdrOutput: '关闭转换：保留 HDR10（H.265）',
+    dynamicRangeHint: '保留 HDR 需要 Main10 客户端；H.264、JPEG 和截图继续使用 SDR。HDMI OUT 单独控制。',
     title: 'VIM4 视频设置', applied: '设置已应用',
     outputSize: '输出分辨率上限', outputFps: '输出帧率上限', source: '跟随输入',
     jpegQuality: 'MJPEG 质量（1–100）', bitrate: '自定义码率（1000–60000 kbps，高码率需要更多网络带宽）',

@@ -21,8 +21,35 @@ impl Viewer {
     }
 
     async fn connect_kind(desktop: Arc<DesktopCoordinator>, capture_type: u64) -> Self {
+        Self::connect_configured(desktop, capture_type, None, false).await
+    }
+
+    async fn connect_configured(
+        desktop: Arc<DesktopCoordinator>,
+        capture_type: u64,
+        configured_video: Option<Arc<VideoStreamManager>>,
+        main10: bool,
+    ) -> Self {
         let mut media = MediaEngine::default();
         media.register_default_codecs().unwrap();
+        if main10 {
+            media
+                .register_codec(
+                    webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters {
+                        capability: RTCRtpCodecCapability {
+                            mime_type: "video/H265".into(),
+                            clock_rate: 90_000,
+                            sdp_fmtp_line: "profile-id=2;tier-flag=0;level-id=180;tx-mode=SRST"
+                                .into(),
+                            ..Default::default()
+                        },
+                        payload_type: 123,
+                        ..Default::default()
+                    },
+                    RTPCodecType::Video,
+                )
+                .unwrap();
+        }
         let pc = Arc::new(
             APIBuilder::new()
                 .with_media_engine(media)
@@ -97,24 +124,32 @@ impl Viewer {
         let directory = tempfile::tempdir().unwrap();
         let terminal = super::super::terminal::Registry::new(directory.path().join("terminal"));
         terminal.start();
-        let video = desktop
-            .0
-            .lock()
-            .await
-            .upgrade()
-            .map(|owner| owner.deps.video.clone())
-            .unwrap_or_else(|| {
-                VideoStreamManager::with_webrtc_streamer(
-                    crate::video::streamer::Streamer::new(),
-                    crate::webrtc::WebRtcStreamer::new(),
-                )
-            });
+        let video = if let Some(video) = configured_video {
+            video
+        } else {
+            desktop
+                .0
+                .lock()
+                .await
+                .upgrade()
+                .map(|owner| owner.deps.video.clone())
+                .unwrap_or_else(|| {
+                    VideoStreamManager::with_webrtc_streamer(
+                        crate::video::streamer::Streamer::new(),
+                        crate::webrtc::WebRtcStreamer::new(),
+                    )
+                })
+        };
         let (out, _signals) = mpsc::channel(64);
         let host = Peer::new(
             PeerDeps {
                 system: crate::config::UuRemoteSystem::Windows,
                 reverse_scroll: false,
-                video_codec: crate::config::UuVideoCodec::H264,
+                video_codec: if main10 {
+                    crate::config::UuVideoCodec::H265
+                } else {
+                    crate::config::UuVideoCodec::H264
+                },
                 video,
                 hid: Arc::new(HidController::new(crate::hid::HidBackendType::None, None)),
                 audio: Arc::new(AudioController::default()),
@@ -207,6 +242,130 @@ impl Viewer {
         self.host.close().await;
         self.pc.close().await.unwrap();
     }
+
+    #[cfg(feature = "vim4")]
+    async fn set_hdr(&mut self, enabled: bool, id: u64) {
+        let mut header = Vec::new();
+        wire::put_varint(1, id, &mut header);
+        let mut setting = Vec::new();
+        wire::put_varint(11, u64::from(enabled), &mut setting);
+        let mut request = Vec::new();
+        wire::put_bytes(1, &header, &mut request);
+        wire::put_bytes(2, &setting, &mut request);
+        self.control
+            .send(&Bytes::from(wire::envelope(
+                id,
+                0,
+                wire::which::RPC_REQUEST,
+                &request,
+            )))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(12), async {
+            while let Some((channel, bytes)) = self.incoming.recv().await {
+                if channel != 0 {
+                    continue;
+                }
+                let fields = wire::decode(&bytes).unwrap();
+                let Some(response) = wire::message(&fields, wire::which::RPC_RESPONSE) else {
+                    continue;
+                };
+                let response = wire::decode(response).unwrap();
+                let header = wire::decode(wire::message(&response, 1).unwrap()).unwrap();
+                if wire::number(&header, 1) == Some(id) {
+                    return;
+                }
+            }
+            panic!("CONTROL closed before HDR acknowledgement");
+        })
+        .await
+        .unwrap();
+    }
+}
+
+/// Run as the service user, with its GStreamer environment and all KVM services stopped.
+#[cfg(feature = "vim4")]
+#[tokio::test]
+#[ignore = "requires exclusive VIM4 capture and encoder access"]
+async fn live_uu_hdr_switch_and_takeover_restore_the_default() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("warn,one_kvm=info")
+        .try_init();
+    assert_eq!(std::env::var("VIM4_HARDWARE_TEST").as_deref(), Ok("1"));
+    assert!(crate::platform::vim4::hdr_remote_available());
+    gstreamer::init().unwrap();
+    let streamer = crate::webrtc::WebRtcStreamer::new();
+    streamer
+        .set_capture_device(crate::platform::vim4::VIDEO_DEVICE.into(), 80, None)
+        .await;
+    streamer
+        .set_vim4_output(crate::platform::vim4::OutputSettings {
+            height: 720,
+            fps: 15,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let _initial_pipeline = streamer.ensure_video_pipeline_for_external().await.unwrap();
+    let video = VideoStreamManager::with_webrtc_streamer(
+        crate::video::streamer::Streamer::new(),
+        streamer.clone(),
+    );
+    let owner = Arc::new(DesktopCoordinator::default());
+    let mut first = Viewer::connect_configured(owner.clone(), 1, Some(video.clone()), true).await;
+    assert!(first.host.shared.hdr_control_available());
+    for (id, hdr) in [(70, true), (71, false), (72, true)] {
+        first.set_hdr(hdr, id).await;
+        let config = video.get_encoding_config().await.unwrap();
+        assert_eq!(config.output.hdr, hdr);
+        assert_eq!(first.pc.connection_state(), PcState::Connected);
+        let mut frames = video.subscribe_encoded_frames().await.unwrap();
+        video.request_keyframe().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(frame) = frames.recv().await {
+                if let Some(compatible) =
+                    crate::video::codec::h265_bitstream::conforms_to_profile(&frame.data, 2)
+                {
+                    assert!(compatible);
+                    if hdr {
+                        assert_eq!(
+                            crate::video::codec::h265_bitstream::profile_id(&frame.data),
+                            Some(2)
+                        );
+                    }
+                    return;
+                }
+            }
+            panic!("Encoder stopped");
+        })
+        .await
+        .unwrap();
+        println!("UU HDR={hdr}: compatible keyframe and same peer confirmed");
+    }
+    let mut second = Viewer::connect_configured(owner, 1, Some(video.clone()), true).await;
+    assert!(!first.host.is_desktop());
+    let config = video.get_encoding_config().await.unwrap();
+    assert!(
+        !config.output.hdr,
+        "Takeover inherited the previous viewer's temporary HDR"
+    );
+    second.set_hdr(true, 73).await;
+    first.close().await;
+    assert!(
+        video.get_encoding_config().await.unwrap().output.hdr,
+        "Closing the old viewer changed the new owner's setting"
+    );
+    second.close().await;
+    let config = video.get_encoding_config().await.unwrap();
+    assert!(!config.output.hdr);
+    streamer
+        .ensure_video_pipeline_for_external()
+        .await
+        .unwrap()
+        .stop_and_wait(Duration::from_secs(5))
+        .await
+        .unwrap();
+    println!("UU takeover/disconnect restored SDR default and released Main10 override");
 }
 
 #[tokio::test]
@@ -252,6 +411,7 @@ async fn tool_promotion_is_idempotent_and_keeps_terminal_and_video_on_the_same_p
                     ..Default::default()
                 },
                 &mut HevcPackets::new(),
+                None,
             )
             .await
             .unwrap();

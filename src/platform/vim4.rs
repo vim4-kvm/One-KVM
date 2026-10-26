@@ -8,6 +8,15 @@ pub use video_backend::VideoBackend;
 pub const VIDEO_DEVICE: &str = "/dev/video_cap";
 pub const GADGET: &str = "/sys/kernel/config/usb_gadget/kvm";
 
+pub fn hdr_remote_available() -> bool {
+    VideoBackend::current() == VideoBackend::Vendor
+        && std::path::Path::new("/usr/lib/vim4-kvm/gstreamer-1.0/libgstvim4hevc10.so").exists()
+        && std::fs::read_to_string("/sys/module/vfm_cap/parameters/hdr_metadata_version")
+            .is_ok_and(|value| value.trim() == "1")
+        && std::fs::read_to_string("/sys/module/aml_media/parameters/vdin0_native_hdr")
+            .is_ok_and(|value| value.trim() == "Y")
+}
+
 fn usb_helper() -> &'static str {
     match VideoBackend::current() {
         VideoBackend::Wave5 if !video_backend::shared_data() => "/usr/libexec/vim4-onekvm-edge",
@@ -249,6 +258,8 @@ pub struct OutputSettings {
     pub height: u32,
     /// Maximum frame rate; zero follows the source. Each encoder applies its own limit.
     pub fps: u32,
+    /// Preserve HDR10 in HEVC Main10. AVC and JPEG retain SDR compatibility.
+    pub hdr: bool,
 }
 
 impl OutputSettings {
@@ -279,14 +290,15 @@ impl OutputSettings {
         source_fps: u32,
         backend: VideoBackend,
     ) -> u32 {
-        // Scope the high-refresh candidate to native 1080p on the vendor path.
+        // Scope high refresh to native 1080p and 1440p on the vendor path.
         // Scaling a UHD source down must not raise its capture/encoding budget.
-        let maximum =
-            if backend == VideoBackend::Vendor && source.width == 1920 && source.height == 1080 {
-                120
-            } else {
-                60
-            };
+        let maximum = if backend == VideoBackend::Vendor
+            && matches!((source.width, source.height), (1920, 1080) | (2560, 1440))
+        {
+            120
+        } else {
+            60
+        };
         self.frame_rate(source_fps, maximum)
     }
 
@@ -591,6 +603,8 @@ mod tests {
         let settings = OutputSettings {
             height: 1080,
             fps: 30,
+            hdr: false,
+            ..Default::default()
         };
         assert_eq!(settings.frame_rate(24, 60), 24);
         assert_eq!(settings.frame_rate(60, 60), 30);
@@ -606,7 +620,9 @@ mod tests {
             .contains("amlvconv"));
         assert!(OutputSettings {
             height: 719,
-            fps: 30
+            fps: 30,
+            hdr: false,
+            ..Default::default()
         }
         .validate()
         .is_err());
@@ -632,6 +648,8 @@ mod tests {
         let limited = OutputSettings {
             height: 720,
             fps: 60,
+            hdr: false,
+            ..Default::default()
         };
         assert_eq!(
             limited.h26x_frame_rate(native, 120, VideoBackend::Vendor),
@@ -640,6 +658,8 @@ mod tests {
         let high = OutputSettings {
             height: 1080,
             fps: 120,
+            hdr: false,
+            ..Default::default()
         };
         assert!(high.validate().is_ok());
         assert_eq!(high.h26x_frame_rate(native, 100, VideoBackend::Vendor), 100);
@@ -649,6 +669,18 @@ mod tests {
         );
         assert_eq!(
             high.h26x_frame_rate(Resolution::new(2560, 1440), 120, VideoBackend::Vendor),
+            120
+        );
+        assert_eq!(
+            automatic.h26x_frame_rate(Resolution::new(2560, 1440), 120, VideoBackend::Wave5),
+            60
+        );
+        assert_eq!(
+            limited.h26x_frame_rate(Resolution::new(2560, 1440), 120, VideoBackend::Vendor),
+            60
+        );
+        assert_eq!(
+            automatic.h26x_frame_rate(Resolution::new(3440, 1440), 120, VideoBackend::Vendor),
             60
         );
         assert!(OutputSettings { fps: 121, ..high }.validate().is_err());

@@ -290,6 +290,8 @@ use hwcodec::ffmpeg_hw::last_error_message as ffmpeg_hw_last_error;
 /// Encoded video frame for distribution
 #[derive(Debug, Clone)]
 pub struct EncodedVideoFrame {
+    /// H.273 primaries, transfer, matrix and RTP range/chroma byte, when known.
+    pub color_space: Option<[u8; 4]>,
     /// Monotonic time when the application obtained the encoded output. Kept
     /// across subscriber queues and bootstrap caching; excludes capture/encode
     /// and any buffering inside the encoder or its output API.
@@ -1912,6 +1914,7 @@ impl SharedVideoPipeline {
                     self.inspect_and_parameterize_packet(codec, Bytes::from(data), is_keyframe);
                 let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
                 return Ok(vec![EncodedVideoFrame {
+                    color_space: None,
                     encoded_at,
                     data,
                     pts_ms,
@@ -2006,6 +2009,7 @@ impl SharedVideoPipeline {
                         self.inspect_and_parameterize_packet(codec, encoded.data, encoded.key == 1);
                     let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
                     encoded_frames.push(EncodedVideoFrame {
+                        color_space: None,
                         encoded_at,
                         data,
                         pts_ms: encoded.pts,
@@ -2688,6 +2692,7 @@ mod tests {
         ))
         .unwrap();
         let bootstrap = Arc::new(EncodedVideoFrame {
+            color_space: None,
             encoded_at: Instant::now() - Duration::from_secs(10),
             data: Bytes::from_static(&[
                 0, 0, 0, 1, 0x67, 0x42, 0x40, 0x1f, 0, 0, 0, 1, 0x68, 0xce, 0, 0, 0, 1, 0x65, 0x88,
@@ -2718,6 +2723,7 @@ mod tests {
 
     fn delivery_test_frame(sequence: u64, is_keyframe: bool) -> Arc<EncodedVideoFrame> {
         Arc::new(EncodedVideoFrame {
+            color_space: None,
             encoded_at: Instant::now(),
             data: Bytes::from_static(&[0, 0, 0, 1, 0x41, 0xc0]),
             pts_ms: sequence as i64 * 33,

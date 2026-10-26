@@ -45,9 +45,19 @@ impl Drop for Capture {
     }
 }
 
-fn description(config: &SharedVideoPipelineConfig, source: Resolution, fps: u32) -> Result<String> {
+fn description(
+    config: &SharedVideoPipelineConfig,
+    source: Resolution,
+    source_fps: u32,
+) -> Result<String> {
+    let fps = config
+        .output
+        .h26x_frame_rate(source, source_fps, VideoBackend::current());
     if VideoBackend::current() == VideoBackend::Wave5 {
         return wave5::description(config, source, fps);
+    }
+    if config.output.hdr && config.output_codec == VideoEncoderType::H265 {
+        return hdr_description(config, source, source_fps, fps);
     }
     let codec = match config.output_codec {
         VideoEncoderType::H264 => "h264",
@@ -79,13 +89,46 @@ fn description(config: &SharedVideoPipelineConfig, source: Resolution, fps: u32)
     let capture = vendor_capture(
         std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").ok().as_deref(),
         source,
-        fps,
+        source_fps,
     )?;
     Ok(format!("{capture} ! {}queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! {filter}\
         amlvenc name=encoder bitrate={} gop=0 framerate={} intra-refresh-rows={refresh_rows} min-force-key-unit-interval=250000000 ! \
         video/x-{codec} ! {codec}parse config-interval=-1 ! \
         video/x-{codec},stream-format=byte-stream,alignment=au ! appsink name=frames sync=false max-buffers=2",
         crate::video::snapshot::vim4::BRANCH, config.bitrate_kbps().clamp(1000, 60000), fps))
+}
+
+fn hdr_description(
+    config: &SharedVideoPipelineConfig,
+    source: Resolution,
+    source_fps: u32,
+    fps: u32,
+) -> Result<String> {
+    let scaled = if config.output.height > 0 && config.output.height < source.height {
+        let width = (u64::from(source.width) * u64::from(config.output.height)
+            / u64::from(source.height)) as u32
+            & !1;
+        // GE2D's existing NV12 scaler would discard HDR precision.
+        format!(
+            "videoscale name=scaler n-threads=4 ! video/x-raw,width={},height={} ! ",
+            width.max(2),
+            config.output.height
+        )
+    } else {
+        String::new()
+    };
+    // JPEG snapshots continue to use the independent SDR capture. They must
+    // never reinterpret raw PQ samples as an ordinary eight-bit JPEG.
+    let snapshot = vendor_capture(Some("1"), source, source_fps)?
+        .replace("name=source", "name=snapshot_source");
+    Ok(format!("{snapshot} ! {}fakesink sync=false async=false \
+        vfmcapsrc name=source ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! \
+        videorate drop-only=true ! video/x-raw,framerate={fps}/1 ! \
+        videoconvert n-threads=4 ! video/x-raw,format=P010_10LE ! {scaled}\
+        vim4hevc10enc name=encoder bitrate={} framerate={fps} ! \
+        h265parse config-interval=-1 ! video/x-h265,stream-format=byte-stream,alignment=au,profile=main-10 ! \
+        appsink name=frames sync=false max-buffers=2",
+        crate::video::snapshot::vim4::BRANCH, config.bitrate_kbps().clamp(1000, 60000)))
 }
 
 fn vendor_capture(secondary: Option<&str>, source: Resolution, fps: u32) -> Result<String> {
@@ -102,9 +145,9 @@ fn vendor_capture(secondary: Option<&str>, source: Resolution, fps: u32) -> Resu
     }
 }
 
-fn secondary_allocation(pipeline: &gst::Pipeline, source: Resolution) -> Result<()> {
+fn secondary_allocation(pipeline: &gst::Pipeline, source: Resolution, name: &str) -> Result<()> {
     let pad = pipeline
-        .by_name("source")
+        .by_name(name)
         .and_then(|source| source.static_pad("src"))
         .and_then(|pad| pad.peer())
         .ok_or_else(|| AppError::VideoError("Missing secondary capture boundary".into()))?;
@@ -128,6 +171,10 @@ fn secondary_allocation(pipeline: &gst::Pipeline, source: Resolution) -> Result<
 }
 
 impl SharedVideoPipeline {
+    pub async fn restore_vim4_hdr(&self, hdr: bool) {
+        self.config.write().await.output.hdr = hdr;
+    }
+
     /// Reconfigure the DMA pipeline without dropping its subscribers or peer connections.
     pub async fn set_vim4_encoding(
         &self,
@@ -257,7 +304,7 @@ impl SharedVideoPipeline {
             .h26x_frame_rate(source.0, source.1, VideoBackend::current());
         let error = |e: &dyn std::fmt::Display| AppError::VideoError(e.to_string());
         let element =
-            gst::parse::launch(&description(config, source.0, fps)?).map_err(|e| error(&e))?;
+            gst::parse::launch(&description(config, source.0, source.1)?).map_err(|e| error(&e))?;
         let capture = Capture(
             element
                 .downcast::<gst::Pipeline>()
@@ -285,9 +332,15 @@ impl SharedVideoPipeline {
             None
         };
         if VideoBackend::current() == VideoBackend::Vendor
-            && std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").as_deref() == Ok("1")
+            && (std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").as_deref() == Ok("1")
+                || (config.output.hdr && config.output_codec == VideoEncoderType::H265))
         {
-            secondary_allocation(&capture.0, source.0)?;
+            let name = if config.output.hdr && config.output_codec == VideoEncoderType::H265 {
+                "snapshot_source"
+            } else {
+                "source"
+            };
+            secondary_allocation(&capture.0, source.0, name)?;
         }
         capture
             .0
@@ -411,6 +464,23 @@ impl SharedVideoPipeline {
                 }
             });
             let frame = Arc::new(EncodedVideoFrame {
+                color_space: sample
+                    .caps()
+                    .and_then(|caps| caps.structure(0))
+                    .and_then(|caps| caps.get::<&str>("colorimetry").ok())
+                    .and_then(|name| name.parse::<gstreamer_video::VideoColorimetry>().ok())
+                    .map(|color| {
+                        [
+                            color.primaries().to_iso() as u8,
+                            color.transfer().to_iso() as u8,
+                            color.matrix().to_iso() as u8,
+                            if color.range() == gstreamer_video::VideoColorRange::Range0_255 {
+                                0x20
+                            } else {
+                                0x10
+                            },
+                        ]
+                    }),
                 encoded_at: last_frame,
                 data,
                 is_keyframe,

@@ -1,6 +1,7 @@
 //! Low-latency WebRTC streaming: shared encoder → [`video_track::UniversalVideoTrack`] → peer;
 //! HID over DataChannel.
 
+pub(crate) mod color_space;
 pub mod config;
 pub mod h265_payloader;
 pub(crate) mod mdns;

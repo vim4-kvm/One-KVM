@@ -119,7 +119,7 @@ enum VideoTrack {
 }
 
 impl VideoTrack {
-    fn new(codec: VideoCodecType) -> Self {
+    fn new(codec: VideoCodecType, hevc_profile: u8) -> Self {
         let capability = RTCRtpCodecCapability {
             mime_type: if codec == VideoCodecType::H265 {
                 "video/H265"
@@ -128,6 +128,11 @@ impl VideoTrack {
             }
             .into(),
             clock_rate: 90_000,
+            sdp_fmtp_line: if codec == VideoCodecType::H265 {
+                format!("profile-id={hevc_profile};tx-mode=SRST")
+            } else {
+                String::new()
+            },
             ..Default::default()
         };
         if codec == VideoCodecType::H265 {
@@ -152,7 +157,12 @@ impl VideoTrack {
         }
     }
 
-    async fn write(&self, sample: &Sample, hevc: &mut HevcPackets) -> webrtc::error::Result<()> {
+    async fn write(
+        &self,
+        sample: &Sample,
+        hevc: &mut HevcPackets,
+        color_space: Option<[u8; 4]>,
+    ) -> webrtc::error::Result<()> {
         let extensions = frame_extensions();
         match self {
             Self::H264(track) => {
@@ -162,6 +172,12 @@ impl VideoTrack {
             }
             Self::H265(track) => {
                 for packet in hevc.packetize(sample) {
+                    let mut extensions = frame_extensions().into_iter().collect::<Vec<_>>();
+                    if let Some(extension) =
+                        crate::webrtc::color_space::extension(color_space, packet.header.marker)
+                    {
+                        extensions.push(extension);
+                    }
                     track
                         .write_rtp_with_extensions(&packet, &extensions)
                         .await?;
@@ -376,6 +392,11 @@ impl DesktopCoordinator {
             .video
             .set_uu_negotiated_codec(Some(next.codec))
             .await;
+        #[cfg(feature = "vim4")]
+        if let Err(error) = next.save_hdr_default().await {
+            next.deps.video.set_uu_negotiated_codec(None).await;
+            return Err(error);
+        }
         next.desktop.send_replace(true);
         next.update_input(SessionInputEvent::ControlOpened).await;
         if next
@@ -419,8 +440,12 @@ struct Shared {
     actual_kbps: AtomicU64,
     default_bitrate: BitratePreset,
     settings_lock: Mutex<()>,
+    #[cfg(feature = "vim4")]
+    hdr_restore: Mutex<Option<bool>>,
+    context: Arc<Mutex<Context>>,
     input: SessionInput,
     codec: VideoCodecType,
+    hevc_profile: u8,
     video_diagnostics: Mutex<VideoDiagnostics>,
 }
 
@@ -437,6 +462,80 @@ impl Shared {
         self.update_input(SessionInputEvent::Disconnected).await;
         self.deps.video.set_uu_negotiated_codec(None).await;
         self.video_diagnostics.lock().await.sender = None;
+        #[cfg(feature = "vim4")]
+        self.restore_hdr().await;
+    }
+
+    fn hdr_control_available(&self) -> bool {
+        #[cfg(feature = "vim4")]
+        return self.codec == VideoCodecType::H265
+            && self.hevc_profile == 2
+            && crate::platform::vim4::hdr_remote_available();
+        #[cfg(not(feature = "vim4"))]
+        false
+    }
+
+    #[cfg(feature = "vim4")]
+    async fn save_hdr_default(&self) -> Result<(), String> {
+        if !self.hdr_control_available() {
+            return Ok(());
+        }
+        let output = self
+            .deps
+            .video
+            .vim4_output_settings()
+            .await
+            .ok_or("Video output settings unavailable")?;
+        *self.hdr_restore.lock().await = Some(output.hdr);
+        Ok(())
+    }
+
+    #[cfg(feature = "vim4")]
+    async fn restore_hdr(&self) {
+        // Serialize with a request already applying when CONTROL closes.
+        let _guard = self.settings_lock.lock().await;
+        let Some(hdr) = self.hdr_restore.lock().await.take() else {
+            return;
+        };
+        self.deps.video.restore_vim4_hdr(hdr).await;
+    }
+
+    async fn report_hdr_capability(&self) {
+        let context = self.context.lock().await.clone();
+        let (Some(client), Some(ice)) = (
+            context.client_id.as_deref(),
+            context
+                .ice_id
+                .as_ref()
+                .and_then(super::signaling::session_key),
+        ) else {
+            return;
+        };
+        let (size, fps) = *self.screen.borrow();
+        let mut capability = device_capability(client, &ice, native_screen(size), fps, self.codec);
+        if self.hdr_control_available() {
+            #[cfg(feature = "vim4")]
+            {
+                let enabled = self
+                    .deps
+                    .video
+                    .vim4_output_settings()
+                    .await
+                    .is_some_and(|output| output.hdr);
+                capability["data"]["device_capability"]["display_info"][0]["hdr"] =
+                    u8::from(enabled).into();
+                capability["data"]["device_capability"]["video_codec_capability"][0]["bit_depth"] =
+                    10.into();
+            }
+        }
+        if let Err(error) = self
+            .deps
+            .signaling
+            .emit_event(FORWARD_SETTING_EVENT, capability)
+            .await
+        {
+            warn!("UU HDR capability notification failed: {error}");
+        }
     }
 
     async fn refresh_screen(&self) {
@@ -567,10 +666,34 @@ fn spawn_until_closed(
     });
 }
 
+async fn hevc_profile(video: &VideoStreamManager) -> u8 {
+    #[cfg(feature = "vim4")]
+    if crate::platform::vim4::VideoBackend::current() == crate::platform::vim4::VideoBackend::Vendor
+        && video
+            .get_encoding_config()
+            .await
+            .is_some_and(|config| config.output.hdr)
+    {
+        return 2;
+    }
+    let _ = video;
+    1
+}
+
+#[cfg(test)]
 fn select_video_codec(
     sdp: &str,
     preference: crate::config::UuVideoCodec,
     allowed: &[VideoCodecType],
+) -> Result<VideoCodecType, String> {
+    select_video_codec_with_profile(sdp, preference, allowed, 1)
+}
+
+fn select_video_codec_with_profile(
+    sdp: &str,
+    preference: crate::config::UuVideoCodec,
+    allowed: &[VideoCodecType],
+    hevc_profile: u8,
 ) -> Result<VideoCodecType, String> {
     use crate::config::UuVideoCodec;
     let session = webrtc::sdp::description::session::SessionDescription::unmarshal(
@@ -611,8 +734,10 @@ fn select_video_codec(
                 if codec == VideoCodecType::H264 {
                     return true;
                 }
-                // The board produces Main 8-bit, single-stream HEVC, not Main10 or multistream.
-                media
+                // Main and Main10 must match the selected encoder, including
+                // when the receiver also offers the other profile.
+                let mut profile_present = hevc_profile == 1;
+                let compatible = media
                     .attributes
                     .iter()
                     .filter(|a| a.key == "fmtp")
@@ -628,12 +753,16 @@ fn select_video_codec(
                                     return true;
                                 };
                                 match key {
-                                    "profile-id" => value == "1",
+                                    "profile-id" => {
+                                        profile_present = true;
+                                        value.parse::<u8>().ok() == Some(hevc_profile)
+                                    }
                                     "tx-mode" => value.eq_ignore_ascii_case("SRST"),
                                     _ => true,
                                 }
                             })
-                    })
+                    });
+                compatible && profile_present
             })
     };
     let candidates: &[VideoCodecType] = match preference {
@@ -658,8 +787,24 @@ impl Peer {
         let terminal = capture_type > 2;
         let sdp = offer_sdp(offer).ok_or("Offer SDP is empty")?;
         let constraints = deps.video.codec_constraints().await;
-        let offered_codec =
-            select_video_codec(&sdp, deps.video_codec, &constraints.allowed_webrtc_codecs);
+        let mut hevc_profile = hevc_profile(&deps.video).await;
+        #[cfg(feature = "vim4")]
+        if crate::platform::vim4::hdr_remote_available()
+            && select_video_codec_with_profile(
+                &sdp,
+                deps.video_codec,
+                &constraints.allowed_webrtc_codecs,
+                2,
+            ) == Ok(VideoCodecType::H265)
+        {
+            hevc_profile = 2;
+        }
+        let offered_codec = select_video_codec_with_profile(
+            &sdp,
+            deps.video_codec,
+            &constraints.allowed_webrtc_codecs,
+            hevc_profile,
+        );
         let media_available = offered_codec.is_ok();
         let codec = match offered_codec {
             Ok(codec) => codec,
@@ -673,7 +818,43 @@ impl Peer {
         media
             .register_default_codecs()
             .map_err(|e| format!("Register codecs failed: {e}"))?;
-        for uri in [CAPTURE_INDEX_URI, NEW_FRAME_URI] {
+        if hevc_profile == 2 {
+            media
+                .register_codec(
+                    webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecParameters {
+                        capability: RTCRtpCodecCapability {
+                            mime_type: "video/H265".into(),
+                            clock_rate: 90_000,
+                            sdp_fmtp_line: "profile-id=2;tier-flag=0;level-id=180;tx-mode=SRST"
+                                .into(),
+                            rtcp_feedback: vec![
+                                webrtc::rtp_transceiver::RTCPFeedback {
+                                    typ: "nack".into(),
+                                    parameter: "".into(),
+                                },
+                                webrtc::rtp_transceiver::RTCPFeedback {
+                                    typ: "nack".into(),
+                                    parameter: "pli".into(),
+                                },
+                                webrtc::rtp_transceiver::RTCPFeedback {
+                                    typ: "ccm".into(),
+                                    parameter: "fir".into(),
+                                },
+                            ],
+                            ..Default::default()
+                        },
+                        payload_type: 123,
+                        ..Default::default()
+                    },
+                    RTPCodecType::Video,
+                )
+                .map_err(|e| format!("Register Main10 failed: {e}"))?;
+        }
+        for uri in [
+            CAPTURE_INDEX_URI,
+            NEW_FRAME_URI,
+            crate::webrtc::color_space::URI,
+        ] {
             media
                 .register_header_extension(
                     RTCRtpHeaderExtensionCapability { uri: uri.into() },
@@ -748,6 +929,9 @@ impl Peer {
             custom_kbps: AtomicU64::new(u64::from(default_bitrate.bitrate_kbps())),
             actual_kbps: AtomicU64::new(u64::from(default_bitrate.bitrate_kbps())),
             settings_lock: Mutex::new(()),
+            #[cfg(feature = "vim4")]
+            hdr_restore: Mutex::new(None),
+            context: context.clone(),
             deps: deps.clone(),
             sequence,
             screen: watch::channel(initial).0,
@@ -755,6 +939,7 @@ impl Peer {
             input: SessionInput::new(deps.system, deps.reverse_scroll),
             codec,
             video_diagnostics: Mutex::new(VideoDiagnostics::default()),
+            hevc_profile,
         });
         // Also cancel application tasks if constructing or owning the peer ends early.
         let shutdown_guard = shared.closed.clone().drop_guard();
@@ -787,7 +972,7 @@ impl Peer {
         }));
 
         if media_available {
-            let video_track = Arc::new(VideoTrack::new(codec));
+            let video_track = Arc::new(VideoTrack::new(codec, hevc_profile));
             let video_sender = pc
                 .add_track(video_track.local())
                 .await
@@ -862,16 +1047,7 @@ impl Peer {
                             .as_ref()
                             .and_then(super::signaling::session_key),
                     ) {
-                        let (size, fps) = *shared.screen.borrow();
-                        if let Err(e) = signal
-                            .emit_event(
-                                FORWARD_SETTING_EVENT,
-                                device_capability(client, &ice, native_screen(size), fps, codec),
-                            )
-                            .await
-                        {
-                            warn!("UU device capability notification failed: {e}");
-                        }
+                        shared.report_hdr_capability().await;
                         if let Err(e) = signal
                             .emit_event(FORWARD_SETTING_EVENT, sender_parameters(client, &ice))
                             .await
@@ -1256,10 +1432,13 @@ async fn stream_video(
         return;
     }
     let video = shared.deps.video.clone();
+    let settings = shared.settings_lock.lock().await;
     if let Err(e) = video.set_video_codec(codec).await {
         warn!("UU could not select {codec:?} on the shared pipeline: {e}");
         return;
     }
+    let mut first_frames = video.subscribe_encoded_frames().await;
+    drop(settings);
     let mut health = tokio::time::interval(Duration::from_millis(500));
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut sent = 0u64;
@@ -1267,7 +1446,11 @@ async fn stream_video(
     'subscribe: while !closed(pc.connection_state()) {
         shared.video_diagnostics.lock().await.sender = None;
         let subscribed_at = Instant::now();
-        let Some(mut frames) = video.subscribe_encoded_frames().await else {
+        let subscribed = match first_frames.take() {
+            Some(frames) => Some(frames),
+            None => video.subscribe_encoded_frames().await,
+        };
+        let Some(mut frames) = subscribed else {
             tokio::time::sleep(Duration::from_millis(200)).await;
             continue;
         };
@@ -1324,6 +1507,17 @@ async fn stream_video(
             if frame.codec != expected {
                 continue;
             }
+            if codec == VideoCodecType::H265
+                && crate::video::codec::h265_bitstream::conforms_to_profile(
+                    &frame.data,
+                    shared.hevc_profile,
+                )
+                .is_some_and(|compatible| !compatible)
+            {
+                warn!("UU HEVC profile changed; receiver must negotiate again");
+                let _ = pc.close().await;
+                return;
+            }
             let gap = last_sequence.is_some_and(|prev| frame.sequence > prev.saturating_add(1));
             sequence_gaps += u64::from(gap && !waiting_for_keyframe);
             if waiting_for_keyframe || gap {
@@ -1348,7 +1542,7 @@ async fn stream_video(
                 duration: timeline.duration_after(Instant::now()),
                 ..Default::default()
             };
-            let send = track.write(&sample, &mut hevc);
+            let send = track.write(&sample, &mut hevc, frame.color_space);
             tokio::pin!(send);
             loop {
                 tokio::select! {
@@ -1876,7 +2070,12 @@ async fn handle_control(channel: &RTCDataChannel, shared: &Arc<Shared>, data: &[
             let request_seq = wire::number(&fields, 1).unwrap_or(0);
             send(
                 channel,
-                wire::echo_response(shared.next_seq(), ts, request_seq),
+                wire::echo_response_with_hdr(
+                    shared.next_seq(),
+                    ts,
+                    request_seq,
+                    shared.hdr_control_available(),
+                ),
             )
             .await;
             return;
@@ -1952,6 +2151,12 @@ async fn apply_capture_setting(
     mut request: wire::CaptureRequest,
 ) -> Result<(), String> {
     let _guard = shared.settings_lock.lock().await;
+    if !*shared.desktop.borrow() || shared.closed.is_cancelled() {
+        return Err("Desktop session is no longer active".into());
+    }
+    if request.hdr.is_some() && !shared.hdr_control_available() {
+        return Err("HDR requires a negotiated Main10 receiver and native HDR capture".into());
+    }
     let quality = request
         .quality
         .unwrap_or_else(|| shared.quality.load(Ordering::Relaxed));
@@ -1970,17 +2175,34 @@ async fn apply_capture_setting(
     };
     #[cfg(feature = "vim4")]
     {
+        shared
+            .deps
+            .video
+            .set_video_codec(shared.codec)
+            .await
+            .map_err(|e| e.to_string())?;
+        // CONTROL can arrive before the media task subscribes. Keep the shared
+        // pipeline alive while an HDR profile change closes browser sessions.
+        let _frames = shared
+            .deps
+            .video
+            .subscribe_encoded_frames()
+            .await
+            .ok_or("Video pipeline unavailable")?;
         let current = shared
             .deps
             .video
             .get_encoding_config()
             .await
             .ok_or("Video pipeline unavailable")?;
-        let output = requested_output(
+        let mut output = requested_output(
             &request,
             native_screen(shared.screen.borrow().0),
             current.output,
         );
+        if let Some(hdr) = request.hdr {
+            output.hdr = hdr;
+        }
         shared
             .deps
             .video
@@ -2011,6 +2233,9 @@ async fn apply_capture_setting(
     }
     shared.quality.store(quality, Ordering::Relaxed);
     shared.refresh_screen().await;
+    if request.hdr.is_some() {
+        shared.report_hdr_capability().await;
+    }
     let (size, fps) = *shared.screen.borrow();
     info!(
         "UU capture settings applied: {}x{} fps={fps} {preset}",
@@ -2306,7 +2531,7 @@ mod tests {
         offer.sdp = offer.sdp.replace(" 126", " 104").replace(":126", ":104");
         assert!(offer.sdp.contains("H264/90000"));
         assert!(offer.sdp.contains("H265/90000"));
-        let track = VideoTrack::new(VideoCodecType::H265);
+        let track = VideoTrack::new(VideoCodecType::H265, 1);
         let sender = host.add_track(track.local()).await.unwrap();
         host.set_remote_description(offer).await.unwrap();
         restrict_video_codec(&host, VideoCodecType::H265)
@@ -2322,6 +2547,30 @@ mod tests {
         assert_eq!(parameters.rtp_parameters.codecs[0].payload_type, 104);
         host.close().await.unwrap();
         viewer.close().await.unwrap();
+    }
+
+    #[test]
+    fn main10_requires_explicit_receiver_support_and_keeps_sdr_fallback() {
+        use crate::config::UuVideoCodec as Preference;
+        let offer = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=video 9 UDP/TLS/RTP/SAVPF 98 99 100\r\na=recvonly\r\na=rtpmap:98 H264/90000\r\na=rtpmap:99 H265/90000\r\na=fmtp:99 profile-id=1;tx-mode=SRST\r\na=rtpmap:100 H265/90000\r\na=fmtp:100 profile-id=2;tx-mode=SRST\r\n";
+        let allowed = [VideoCodecType::H264, VideoCodecType::H265];
+        assert_eq!(
+            select_video_codec_with_profile(offer, Preference::Auto, &allowed, 2).unwrap(),
+            VideoCodecType::H265
+        );
+        let main_only = offer.replace("profile-id=2", "profile-id=1");
+        assert_eq!(
+            select_video_codec_with_profile(&main_only, Preference::Auto, &allowed, 2).unwrap(),
+            VideoCodecType::H264
+        );
+        assert!(
+            select_video_codec_with_profile(&main_only, Preference::H265, &allowed, 2).is_err()
+        );
+        let unspecified = offer.replace("profile-id=2;", "");
+        assert_eq!(
+            select_video_codec_with_profile(&unspecified, Preference::Auto, &allowed, 2).unwrap(),
+            VideoCodecType::H264
+        );
     }
 
     #[test]

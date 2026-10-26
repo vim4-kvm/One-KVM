@@ -50,7 +50,11 @@ async fn live_output_changes_preserve_capture_and_produce_decodable_streams() {
         (720, 60, 8000),
         (0, 60, 4000),
     ] {
-        let output = OutputSettings { height, fps };
+        let output = OutputSettings {
+            height,
+            fps,
+            ..Default::default()
+        };
         pipeline
             .set_vim4_encoding(output, BitratePreset::Custom(kbps))
             .await

@@ -6,7 +6,7 @@ use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use v4l2r::bindings::{
-    V4L2_DV_BT_656_1120, V4L2_IN_ST_NO_SIGNAL, V4L2_IN_ST_NO_SYNC, v4l2_dv_timings, v4l2_input,
+    v4l2_dv_timings, v4l2_input, V4L2_DV_BT_656_1120, V4L2_IN_ST_NO_SIGNAL, V4L2_IN_ST_NO_SYNC,
 };
 
 v4l2r::nix::ioctl_readwrite!(query_input, b'V', 26, v4l2_input);
@@ -206,14 +206,18 @@ mod tests {
         assert!(!wave5_requires_h264(
             OutputSettings {
                 height: 720,
-                fps: 0
+                fps: 0,
+                hdr: false,
+                ..Default::default()
             },
             Resolution::new(1366, 768)
         ));
         assert!(wave5_requires_h264(
             OutputSettings {
                 height: 900,
-                fps: 0
+                fps: 0,
+                hdr: false,
+                ..Default::default()
             },
             Resolution::new(3840, 2160)
         ));
@@ -224,7 +228,15 @@ mod tests {
         for source in [Resolution::new(3840, 2160), Resolution::new(1920, 1080)] {
             assert_eq!(output_resolution(OutputSettings::default(), source), source);
             for height in (180..=2160).step_by(2) {
-                let output = output_resolution(OutputSettings { height, fps: 0 }, source);
+                let output = output_resolution(
+                    OutputSettings {
+                        height,
+                        fps: 0,
+                        hdr: false,
+                        ..Default::default()
+                    },
+                    source,
+                );
                 assert!(output.width <= source.width && output.height <= source.height);
                 assert_eq!(output.width % 16, 0);
                 assert_eq!(output.height % 2, 0);

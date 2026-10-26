@@ -77,6 +77,11 @@ impl VideoConfigUpdate {
         #[cfg(feature = "vim4")]
         if let Some(output) = self.output {
             output.validate()?;
+            if output.hdr && !crate::platform::vim4::hdr_remote_available() {
+                return Err(AppError::BadRequest(
+                    "Remote HDR requires the native HDR capture and Main10 encoder runtime".into(),
+                ));
+            }
         }
         if let Some(width) = self.width {
             if !(320..=7680).contains(&width) {

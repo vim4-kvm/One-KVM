@@ -65,7 +65,7 @@ fn secondary_dma_allocation_retains_real_video_meta_across_snapshot_branches() {
     .unwrap()
     .downcast::<gst::Pipeline>()
     .unwrap();
-    secondary_allocation(&pipeline, Resolution::new(3840, 2160)).unwrap();
+    secondary_allocation(&pipeline, Resolution::new(3840, 2160), "source").unwrap();
     let mut query = gst::query::Allocation::new(None, true);
     assert!(pipeline
         .by_name("source")
@@ -128,7 +128,12 @@ fn frame(info: &VideoInfo, sequence: u64) -> gst::Buffer {
 fn native_uhd_frames_keep_their_original_memory() {
     let (capture, source, sink, info) = pipeline_with_software_scaler(
         Resolution::new(3840, 2160),
-        OutputSettings { height: 0, fps: 60 },
+        OutputSettings {
+            height: 0,
+            fps: 60,
+            hdr: false,
+            ..Default::default()
+        },
     );
     let buffer = frame(&info, 0);
     let memory = buffer.peek_memory(0).as_ptr();
@@ -154,6 +159,8 @@ fn scaler_clock_failures_do_not_stop_frame_delivery() {
             OutputSettings {
                 height: 24,
                 fps: 60,
+                hdr: false,
+                ..Default::default()
             },
         );
         capture.0.set_state(gst::State::Playing).unwrap();
@@ -184,6 +191,8 @@ fn scaling_progresses_while_the_encoder_holds_a_frame() {
         OutputSettings {
             height: 24,
             fps: 60,
+            hdr: false,
+            ..Default::default()
         },
     );
     let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);

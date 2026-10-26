@@ -287,9 +287,11 @@ impl WebRtcStreamer {
         if restart {
             let resumed = async {
                 self.ensure_video_pipeline().await?;
-                self.reconnect_sessions_to_current_pipeline("HDMI board change").await?;
+                self.reconnect_sessions_to_current_pipeline("HDMI board change")
+                    .await?;
                 Ok::<(), AppError>(())
-            }.await;
+            }
+            .await;
             if let Err(error) = resumed {
                 tracing::warn!(%error, "Shared capture did not resume after board change");
                 if result.is_ok() {
@@ -733,6 +735,14 @@ impl WebRtcStreamer {
                     });
                 Some(h264_bitstream::webrtc_fmtp_line(&profile_level_id))
             }
+            #[cfg(feature = "vim4")]
+            VideoEncoderType::H265
+                if pipeline.config().await.output.hdr
+                    && crate::platform::vim4::VideoBackend::current()
+                        == crate::platform::vim4::VideoBackend::Vendor =>
+            {
+                Some("level-id=180;profile-id=2;tier-flag=0;tx-mode=SRST".into())
+            }
             _ => None,
         }
     }
@@ -920,6 +930,7 @@ impl WebRtcStreamer {
         &self,
         output: crate::platform::vim4::OutputSettings,
     ) -> Result<()> {
+        let profile_changed = self.config.read().await.output.hdr != output.hdr;
         if self.config.read().await.output != output {
             let pipeline = self.video_pipeline.read().await.clone();
             if pipeline.as_ref().is_some_and(|p| p.is_running()) {
@@ -928,6 +939,11 @@ impl WebRtcStreamer {
             } else {
                 self.config.write().await.output = output;
             }
+        }
+        if profile_changed {
+            // Main and Main10 have distinct SDP profiles; existing receivers
+            // must negotiate again before receiving the new bitstream.
+            self.close_all_sessions().await;
         }
         Ok(())
     }
@@ -1461,12 +1477,23 @@ impl WebRtcStreamer {
 #[async_trait::async_trait]
 impl crate::video::traits::VideoOutput for WebRtcStreamer {
     #[cfg(feature = "vim4")]
-    async fn with_capture_released(&self, action: crate::video::traits::CaptureChange<'_>) -> Result<()> {
+    async fn with_capture_released(
+        &self,
+        action: crate::video::traits::CaptureChange<'_>,
+    ) -> Result<()> {
         self.with_capture_released(action).await
     }
     #[cfg(feature = "vim4")]
     async fn vim4_output_settings(&self) -> Option<crate::platform::vim4::OutputSettings> {
         Some(self.config.read().await.output)
+    }
+
+    #[cfg(feature = "vim4")]
+    async fn restore_vim4_hdr(&self, hdr: bool) {
+        self.config.write().await.output.hdr = hdr;
+        if let Some(pipeline) = self.video_pipeline.read().await.clone() {
+            pipeline.restore_vim4_hdr(hdr).await;
+        }
     }
 
     #[cfg(feature = "vim4")]
@@ -1604,32 +1631,72 @@ mod tests {
 
     #[cfg(feature = "vim4")]
     #[tokio::test]
+    async fn session_hdr_restore_does_not_require_a_signal_or_start_capture() {
+        use crate::video::traits::VideoOutput;
+        let streamer = WebRtcStreamer::new();
+        let output = crate::platform::vim4::OutputSettings {
+            height: 720,
+            fps: 15,
+            hdr: true,
+        };
+        streamer.set_vim4_output(output).await.unwrap();
+        let video = crate::video::stream_manager::VideoStreamManager::with_webrtc_streamer(
+            crate::video::streamer::Streamer::new(),
+            streamer.clone(),
+        );
+        video.restore_vim4_hdr(false).await;
+        assert_eq!(
+            streamer.vim4_output_settings().await.unwrap(),
+            crate::platform::vim4::OutputSettings {
+                hdr: false,
+                ..output
+            }
+        );
+        assert!(streamer.video_pipeline.read().await.is_none());
+        video.restore_vim4_hdr(true).await;
+        assert!(streamer.vim4_output_settings().await.unwrap().hdr);
+        assert!(streamer.video_pipeline.read().await.is_none());
+    }
+
+    #[cfg(feature = "vim4")]
+    #[tokio::test]
     async fn board_action_blocks_pipeline_acquisition_and_releases_after_error() {
         let streamer = WebRtcStreamer::new();
         let mut acquisition = Box::pin(streamer.ensure_video_pipeline_for_external());
-        let result = streamer.with_capture_released(async {
-            std::future::poll_fn(|context| {
-                assert!(std::future::Future::poll(acquisition.as_mut(), context).is_pending());
-                std::task::Poll::Ready(())
-            }).await;
-            Err::<(), _>(AppError::BadRequest("board action rejected".into()))
-        }).await;
+        let result = streamer
+            .with_capture_released(async {
+                std::future::poll_fn(|context| {
+                    assert!(std::future::Future::poll(acquisition.as_mut(), context).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                Err::<(), _>(AppError::BadRequest("board action rejected".into()))
+            })
+            .await;
         assert!(result.is_err());
         drop(acquisition);
-        streamer.with_capture_released(async { Ok(()) }).await.unwrap();
+        streamer
+            .with_capture_released(async { Ok(()) })
+            .await
+            .unwrap();
     }
 
     #[cfg(feature = "vim4")]
     #[tokio::test]
     async fn canceled_board_action_does_not_leave_pipeline_acquisition_locked() {
         let streamer = WebRtcStreamer::new();
-        let mut change = Box::pin(streamer.with_capture_released(std::future::pending::<Result<()>>()));
+        let mut change =
+            Box::pin(streamer.with_capture_released(std::future::pending::<Result<()>>()));
         std::future::poll_fn(|context| {
             assert!(std::future::Future::poll(change.as_mut(), context).is_pending());
             std::task::Poll::Ready(())
-        }).await;
+        })
+        .await;
         drop(change);
-        streamer.with_capture_released(async { Ok(()) }).await.unwrap();
+        streamer
+            .with_capture_released(async { Ok(()) })
+            .await
+            .unwrap();
     }
 
     #[test]

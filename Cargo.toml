@@ -79,7 +79,7 @@ desktop = [
 [dependencies]
 gstreamer = { version = "0.24", optional = true }
 gstreamer-app = { version = "0.24", optional = true }
-gstreamer-video = { version = "0.24", optional = true }
+gstreamer-video = { version = "0.24", optional = true, features = ["v1_18"] }
 gstreamer-allocators = { version = "0.24", optional = true }
 # Async runtime
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"], optional = true }

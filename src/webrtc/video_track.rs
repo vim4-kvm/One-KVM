@@ -283,7 +283,8 @@ impl UniversalVideoTrack {
     }
 
     pub async fn write_frame_bytes(&self, data: Bytes, is_keyframe: bool) -> Result<()> {
-        self.write_frame_bytes_at(data, is_keyframe, None).await
+        self.write_frame_bytes_at(data, is_keyframe, None, None)
+            .await
     }
 
     /// Use the encoder's monotonic presentation time for H.264 and H.265. Counting frames
@@ -293,6 +294,7 @@ impl UniversalVideoTrack {
         data: Bytes,
         is_keyframe: bool,
         pts_ms: Option<i64>,
+        color_space: Option<[u8; 4]>,
     ) -> Result<()> {
         if data.is_empty() {
             return Ok(());
@@ -300,7 +302,7 @@ impl UniversalVideoTrack {
 
         match self.codec {
             VideoCodec::H264 => self.write_h264_frame(data, pts_ms).await,
-            VideoCodec::H265 => self.send_h265_rtp(data, pts_ms).await,
+            VideoCodec::H265 => self.send_h265_rtp(data, pts_ms, color_space).await,
             VideoCodec::VP8 => self.write_vp8_frame(data, is_keyframe).await,
             VideoCodec::VP9 => self.write_vp9_frame(data, is_keyframe).await,
         }
@@ -440,7 +442,12 @@ impl UniversalVideoTrack {
         Ok(())
     }
 
-    async fn send_h265_rtp(&self, payload: Bytes, pts_ms: Option<i64>) -> Result<()> {
+    async fn send_h265_rtp(
+        &self,
+        payload: Bytes,
+        pts_ms: Option<i64>,
+        color_space: Option<[u8; 4]>,
+    ) -> Result<()> {
         let rtp_track = match &self.track {
             TrackType::Rtp(t) => t,
             TrackType::Sample(_) => {
@@ -476,10 +483,6 @@ impl UniversalVideoTrack {
             (payloads, timestamp, seq_start, num_payloads)
         };
 
-        let extensions = [HeaderExtension::PlayoutDelay(PlayoutDelayExtension {
-            min_delay: 0,
-            max_delay: 0,
-        })];
         for (i, payload_data) in payloads.into_iter().enumerate() {
             let seq = seq_start.wrapping_add(i as u16);
             let is_last = i == num_payloads - 1;
@@ -499,15 +502,18 @@ impl UniversalVideoTrack {
                 payload: payload_data.clone(),
             };
 
+            let mut packet_extensions = Vec::with_capacity(2);
+            if cfg!(feature = "vim4") && i == 0 {
+                packet_extensions.push(HeaderExtension::PlayoutDelay(PlayoutDelayExtension {
+                    min_delay: 0,
+                    max_delay: 0,
+                }));
+            }
+            if let Some(extension) = super::color_space::extension(color_space, is_last) {
+                packet_extensions.push(extension);
+            }
             if let Err(e) = rtp_track
-                .write_rtp_with_extensions(
-                    &packet,
-                    if cfg!(feature = "vim4") && i == 0 {
-                        &extensions
-                    } else {
-                        &[]
-                    },
-                )
+                .write_rtp_with_extensions(&packet, &packet_extensions)
                 .await
             {
                 trace!("H265 write_rtp failed: {}", e);
@@ -554,7 +560,7 @@ mod tests {
         });
         let frame = Bytes::from_static(&[0, 0, 0, 1, 0x26, 1, 0x80]);
         track
-            .write_frame_bytes_at(frame.clone(), true, Some(100))
+            .write_frame_bytes_at(frame.clone(), true, Some(100), None)
             .await
             .unwrap();
         let first = track
@@ -566,7 +572,7 @@ mod tests {
             .clock
             .timestamp;
         track
-            .write_frame_bytes_at(frame, true, Some(200))
+            .write_frame_bytes_at(frame, true, Some(200), None)
             .await
             .unwrap();
         let second = track

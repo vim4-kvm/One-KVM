@@ -10,13 +10,14 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
-interface OutputSettings { height: number; fps: number }
-interface BoardStatus { edid: string; hdr_eotf: string; white: number; peak: number }
+interface OutputSettings { height: number; fps: number; hdr?: boolean }
+interface BoardStatus { edid: string; hdr_eotf: string; white: number; peak: number; hdr_remote_available: boolean }
 const props = defineProps<{ outputOnly?: boolean }>()
 const { t } = useI18n()
 const store = useConfigStore()
 const height = ref('0')
 const fps = ref('0')
+const dynamicRange = ref('sdr')
 const quality = ref(80)
 const bitrate = ref(4000)
 const board = ref<BoardStatus | null>(null)
@@ -38,6 +39,7 @@ async function load() {
     ])
     height.value = String(video.output.height)
     fps.value = String(video.output.fps)
+    dynamicRange.value = video.output.hdr ? 'hdr' : 'sdr'
     quality.value = video.quality
     board.value = status
     edid.value = status.edid
@@ -60,7 +62,7 @@ async function apply(action: 'output' | 'bitrate' | 'edid' | 'hdr') {
   try {
     if (action === 'output') {
       await request('/config/video', { method: 'PATCH', body: JSON.stringify({
-        output: { height: Number(height.value), fps: Number(fps.value) }, quality: Number(quality.value),
+        output: { height: Number(height.value), fps: Number(fps.value), hdr: dynamicRange.value === 'hdr' }, quality: Number(quality.value),
       }) })
       await store.refreshVideo()
     } else if (action === 'bitrate') {
@@ -107,6 +109,15 @@ onMounted(load)
           <Input id="vim4-quality" v-model="quality" type="number" min="1" max="100" required />
         </template>
         <p class="text-muted-foreground">{{ t('vim4Video.outputHint') }}</p>
+        <Label>{{ t('vim4Video.dynamicRange') }}</Label>
+        <Select v-model="dynamicRange" :disabled="!ready || busy">
+          <SelectTrigger class="w-full"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="sdr">{{ t('vim4Video.sdrOutput') }}</SelectItem>
+            <SelectItem value="hdr" :disabled="!board?.hdr_remote_available">{{ t('vim4Video.hdrOutput') }}</SelectItem>
+          </SelectContent>
+        </Select>
+        <p class="text-muted-foreground">{{ t('vim4Video.dynamicRangeHint') }}</p>
         <Button type="submit" size="sm" class="w-full">{{ t('common.apply') }}</Button>
       </form>
       <form class="space-y-2" @submit.prevent="apply('bitrate')">
@@ -129,7 +140,7 @@ onMounted(load)
         <p class="text-muted-foreground">{{ t('vim4Video.edidHint') }}</p>
         <Button type="submit" size="sm" variant="outline" class="w-full">{{ t('common.apply') }}</Button>
       </form>
-      <form v-if="!props.outputOnly" class="space-y-2" @submit.prevent="apply('hdr')">
+      <form v-if="!props.outputOnly && dynamicRange === 'sdr'" class="space-y-2" @submit.prevent="apply('hdr')">
         <h5 class="font-medium">HDR → SDR · {{ board?.hdr_eotf }}</h5>
         <Label for="vim4-white">{{ t('vim4Video.white') }}</Label>
         <Input id="vim4-white" v-model="white" type="number" min="160" max="1000" required />

@@ -250,6 +250,18 @@ impl UniversalSession {
                 })?;
         }
 
+        media_engine
+            .register_header_extension(
+                webrtc::rtp_transceiver::rtp_codec::RTCRtpHeaderExtensionCapability {
+                    uri: super::color_space::URI.into(),
+                },
+                RTPCodecType::Video,
+                None,
+            )
+            .map_err(|e| {
+                AppError::VideoError(format!("Failed to register video color space: {e}"))
+            })?;
+
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut media_engine)
             .map_err(|e| AppError::VideoError(format!("Failed to register interceptors: {}", e)))?;
@@ -726,6 +738,7 @@ impl UniversalSession {
                                 encoded_frame.data.clone(),
                                 encoded_frame.is_keyframe,
                                 Some(encoded_frame.pts_ms),
+                                encoded_frame.color_space,
                             )
                             .await;
                         frame_rx.record_send(send_result.is_ok());

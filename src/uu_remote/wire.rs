@@ -163,9 +163,14 @@ pub const FF_CAPTURE_SETTING: u64 = 4;
 /// SimpleAction echo_response (action 1) with args `{"seq":<request seq>}` and this host's
 /// FeatureFlag (field 4). The viewer only uses features declared here, so only the capture
 /// setting RPCs and Linux board-file transfer are declared; clipboard/mute/auto-lock are absent.
+#[cfg(test)]
 pub fn echo_response(seq: u64, timestamp: u64, request_seq: u64) -> Vec<u8> {
+    echo_response_with_hdr(seq, timestamp, request_seq, false)
+}
+
+pub fn echo_response_with_hdr(seq: u64, timestamp: u64, request_seq: u64, hdr: bool) -> Vec<u8> {
     let mut flags = Vec::new();
-    put_varint(1, FF_CAPTURE_SETTING, &mut flags);
+    put_varint(1, if hdr { 6 } else { FF_CAPTURE_SETTING }, &mut flags);
     #[cfg(target_os = "linux")]
     put_varint(6, 2, &mut flags); // FileTransferFtp LIST_COMPRESS
     let mut action = Vec::new();
@@ -338,6 +343,8 @@ pub mod quality {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CaptureRequest {
+    /// Explicit false disables HDR; absent leaves the session setting unchanged.
+    pub hdr: Option<bool>,
     pub quality: Option<u64>,
     /// Viewer max_custom_bitrate in bits/s, normalized when decoding the RPC.
     pub custom_bitrate: Option<u64>,
@@ -380,6 +387,7 @@ pub fn capture_setting_rpc(rpc: &[WireField]) -> Option<(CaptureRequest, Vec<u8>
     let mut request = CaptureRequest::default();
     if let Some(body) = message(rpc, 2) {
         let fields = decode(body).ok()?;
+        request.hdr = number(&fields, 11).map(|value| value != 0);
         request.quality = number(&fields, 2).filter(|v| *v > 0);
         request.custom_bitrate = number(&fields, 8)
             .filter(|v| *v > 0)
@@ -537,6 +545,25 @@ mod tests {
         overflow.extend_from_slice(&[255; 9]);
         overflow.push(2);
         assert_eq!(decode(&overflow), Err(WireError::VarintOverflow));
+    }
+
+    #[test]
+    fn hdr_rpc_distinguishes_disable_from_unchanged() {
+        for (body, expected) in [
+            (vec![], None),
+            (vec![88, 0], Some(false)),
+            (vec![88, 1], Some(true)),
+        ] {
+            let bytes = rpc(37, 2, &body);
+            let fields = decode(&bytes).unwrap();
+            let (request, response) = capture_setting_rpc(&fields).unwrap();
+            assert_eq!(request.hdr, expected);
+            assert_eq!(request.fps, None);
+            assert_eq!(request.quality, None);
+            let response = decode(&response).unwrap();
+            let header = decode(message(&response, 1).unwrap()).unwrap();
+            assert_eq!(number(&header, 1), Some(37));
+        }
     }
 
     #[test]

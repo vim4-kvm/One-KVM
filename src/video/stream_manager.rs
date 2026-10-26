@@ -684,9 +684,9 @@ impl VideoStreamManager {
         self: &Arc<Self>,
         action: impl std::future::Future<Output = Result<()>> + Send,
     ) -> Result<()> {
-        self.streamer.with_capture_released(
-            self.webrtc_streamer.with_capture_released(Box::pin(action)),
-        ).await
+        self.streamer
+            .with_capture_released(self.webrtc_streamer.with_capture_released(Box::pin(action)))
+            .await
     }
 
     /// Stop streaming
@@ -906,7 +906,35 @@ impl VideoStreamManager {
         output: crate::platform::vim4::OutputSettings,
         preset: crate::video::codec::BitratePreset,
     ) -> crate::error::Result<()> {
-        self.webrtc_streamer.set_vim4_encoding(output, preset).await
+        let changed_profile = self
+            .webrtc_streamer
+            .vim4_output_settings()
+            .await
+            .is_some_and(|current| current.hdr != output.hdr);
+        self.webrtc_streamer
+            .set_vim4_encoding(output, preset)
+            .await?;
+        if changed_profile {
+            self.webrtc_streamer.close_all_sessions().await;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "vim4")]
+    pub async fn vim4_output_settings(&self) -> Option<crate::platform::vim4::OutputSettings> {
+        self.webrtc_streamer.vim4_output_settings().await
+    }
+
+    #[cfg(feature = "vim4")]
+    pub async fn restore_vim4_hdr(&self, hdr: bool) {
+        let changed_profile = self
+            .vim4_output_settings()
+            .await
+            .is_some_and(|current| current.hdr != hdr);
+        self.webrtc_streamer.restore_vim4_hdr(hdr).await;
+        if changed_profile {
+            self.webrtc_streamer.close_all_sessions().await;
+        }
     }
 
     /// Request a keyframe from the shared video pipeline

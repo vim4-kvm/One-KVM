@@ -304,6 +304,7 @@ fn run(
                                             is_keyframe,
                                         );
                                     vec![EncodedVideoFrame {
+                                        color_space: None,
                                         encoded_at,
                                         data,
                                         pts_ms: pts,
