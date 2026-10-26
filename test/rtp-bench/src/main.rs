@@ -632,6 +632,7 @@ async fn srtp_stage(
     rounds: usize,
     iterations: usize,
 ) -> Result<Value> {
+    let udp_before = udp_counters();
     let key = vec![0x42; profile.key_len()];
     let salt = vec![0x24; profile.salt_len()];
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
@@ -654,7 +655,8 @@ async fn srtp_stage(
     let mut timestamp = 0u32;
     let mut cases = Vec::new();
     let mut transcript = Sha256::new();
-    for round in 0..rounds {
+    let mut failure = None;
+    'cases: for round in 0..rounds {
         for f in fixtures {
             let mut raw = Vec::new();
             for iteration in 0..iterations + 10 {
@@ -692,25 +694,62 @@ async fn srtp_stage(
                 }
                 expected += packets.len() as u64;
                 if udp {
-                    tokio::time::timeout(Duration::from_secs(1), async {
+                    let drained = tokio::time::timeout(Duration::from_secs(1), async {
                         while received.load(Ordering::Relaxed) < expected {
                             tokio::task::yield_now().await;
                         }
                     })
-                    .await
-                    .context("raw UDP capture loss")?;
+                    .await;
+                    if drained.is_err() {
+                        failure = Some(json!({
+                            "error": "raw UDP capture loss",
+                            "round": round,
+                            "fixture_index": f.index,
+                            "iteration_including_warmup": iteration,
+                            "warmup": iteration < 10,
+                            "sender_elapsed_us": elapsed,
+                            "expected_packets": expected,
+                            "udp_received": received.load(Ordering::Relaxed)
+                        }));
+                        break;
+                    }
                 }
             }
-            let mut result = distribution(&raw);
+            // A timeout during warmup has no measured samples. Keep that case
+            // without asking distribution() to index an empty sample set.
+            let mut result = if raw.is_empty() {
+                json!({"n": 0, "raw_us": raw})
+            } else {
+                distribution(&raw)
+            };
             result["round"] = json!(round);
             result["fixture_index"] = json!(f.index);
             result["packets_per_frame"] = json!(f.packets);
+            result["complete"] = json!(failure.is_none());
             cases.push(result);
+            if failure.is_some() {
+                break 'cases;
+            }
         }
     }
-    Ok(
-        json!({"stage":if udp {"srtp_udp"} else {"srtp_context"},"profile":profile_name(profile),"codec":fixtures[0].codec.mime_type(),"cases":cases,"packets_decrypt_verified":expected,"encrypted_transcript_sha256":hex(&transcript.finalize()),"transcript_format":"u64 little-endian packet length followed by SRTP bytes; includes warmup, fixed keys/salt/SSRC/initial sequence/timestamps","udp_received":received.load(Ordering::Relaxed),"receive_buffer_bytes":receive_buffer}),
-    )
+    let udp_after = udp_counters();
+    Ok(json!({
+        "stage": if udp { "srtp_udp" } else { "srtp_context" },
+        "profile": profile_name(profile),
+        "codec": fixtures[0].codec.mime_type(),
+        "cases": cases,
+        "failed": failure.is_some(),
+        "failure": failure,
+        "expected_packets": expected,
+        "packets_decrypt_verified": expected,
+        "encrypted_transcript_sha256": hex(&transcript.finalize()),
+        "transcript_format": "u64 little-endian packet length followed by SRTP bytes; includes warmup, fixed keys/salt/SSRC/initial sequence/timestamps",
+        "udp_received": received.load(Ordering::Relaxed),
+        "receive_buffer_bytes": receive_buffer,
+        "udp_namespace_before": udp_before,
+        "udp_namespace_after": udp_after,
+        "udp_namespace_delta": udp_delta(&udp_before, &udp_after)
+    }))
 }
 
 fn metadata() -> Value {
