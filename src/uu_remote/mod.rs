@@ -2,6 +2,7 @@
 //! KVM target through NetEase's cloud signaling and a WebRTC peer per connection.
 //! The HDMI input is the desktop; keyboard and mouse go through One-KVM HID.
 
+mod capabilities;
 pub mod cloud;
 #[cfg(target_os = "linux")]
 mod files;
@@ -704,8 +705,9 @@ async fn room_loop(
     mut events: mpsc::Receiver<SignalingEvent>,
 ) {
     // be-controlled announces the capture type and ICE servers before the offer arrives.
-    let mut pending: HashMap<String, (u64, ice::SessionIce)> = HashMap::new();
-    let mut next_pending: Option<(u64, ice::SessionIce)> = None;
+    let mut pending: HashMap<String, (u64, ice::SessionIce, capabilities::ViewerCapabilities)> =
+        HashMap::new();
+    let mut next_pending: Option<(u64, ice::SessionIce, capabilities::ViewerCapabilities)> = None;
     let profile = inner.profile.lock().clone();
     let deps = PeerDeps {
         system: profile.system,
@@ -737,15 +739,16 @@ async fn room_loop(
                 capture_type,
                 ice_id,
                 transport,
+                capabilities,
             } => {
                 if pending.len() >= 32 {
                     pending.clear();
                 }
                 match ice_id {
                     Some(id) => {
-                        pending.insert(id, (capture_type, transport));
+                        pending.insert(id, (capture_type, transport, capabilities));
                     }
-                    None => next_pending = Some((capture_type, transport)),
+                    None => next_pending = Some((capture_type, transport, capabilities)),
                 }
             }
             SignalingEvent::Soac(soac) => {
@@ -800,8 +803,8 @@ async fn handle_soac(
     deps: &PeerDeps,
     signaling: &SignalingClient,
     soac: SoacMessage,
-    pending: &mut HashMap<String, (u64, ice::SessionIce)>,
-    next_pending: &mut Option<(u64, ice::SessionIce)>,
+    pending: &mut HashMap<String, (u64, ice::SessionIce, capabilities::ViewerCapabilities)>,
+    next_pending: &mut Option<(u64, ice::SessionIce, capabilities::ViewerCapabilities)>,
 ) {
     let Some(ice) = soac.ice_key() else {
         warn!("UU message ignored: invalid session identifier");
@@ -820,10 +823,14 @@ async fn handle_soac(
     }
     match soac.msg_type.as_str() {
         "offer" => {
-            let (capture_type, transport) = pending
+            let (capture_type, transport, capabilities) = pending
                 .remove(&ice)
                 .or_else(|| next_pending.take())
-                .unwrap_or((1, ice::SessionIce::default()));
+                .unwrap_or((
+                    1,
+                    ice::SessionIce::default(),
+                    capabilities::ViewerCapabilities::default(),
+                ));
             if capture_type > MAX_DESKTOP_CAPTURE_TYPE
                 && capture_type != 8
                 && !(cfg!(target_os = "linux") && capture_type == 5)
@@ -846,13 +853,14 @@ async fn handle_soac(
             if let Some(peer) = peers.remove(&ice) {
                 peer.close().await;
             }
-            let peer = match Peer::new(deps.clone(), transport, &soac, capture_type).await {
-                Ok(peer) => Arc::new(peer),
-                Err(e) => {
-                    error!("UU peer creation failed: {e}");
-                    return;
-                }
-            };
+            let peer =
+                match Peer::new(deps.clone(), transport, capabilities, &soac, capture_type).await {
+                    Ok(peer) => Arc::new(peer),
+                    Err(e) => {
+                        error!("UU peer creation failed: {e}");
+                        return;
+                    }
+                };
             // Shutdown can cancel negotiation after the answer starts reaching the
             // viewer; register first so close_all still owns that connection.
             peers.insert(ice.clone(), peer.clone());

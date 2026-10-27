@@ -93,7 +93,7 @@ fn pipeline_with_software_scaler(
         .build()
         .unwrap();
     let filter = output
-        .filter(resolution, 60)
+        .filter(resolution, 60, 16)
         .replace("amlvconv", "videoconvertscale");
     let pipeline = gst::parse::launch(&format!(
         "appsrc name=source format=time ! {filter}identity name=encoder ! \

@@ -339,7 +339,9 @@ impl OutputSettings {
         self.frame_rate(source_fps, maximum)
     }
 
-    pub fn filter(self, source: Resolution, fps: u32) -> String {
+    /// Build a scaled stream with the encoder's horizontal pixel alignment.
+    /// Callers use two for ordinary 4:2:0, sixteen for vendor HEVC DMA rows.
+    pub fn filter(self, source: Resolution, fps: u32, width_alignment: u32) -> String {
         let mut filter =
             format!("videorate name=output_rate drop-only=true ! video/x-raw,framerate={fps}/1 ! ");
         if self.height > 0 && self.height < source.height {
@@ -353,8 +355,8 @@ impl OutputSettings {
                 ("amlvconv name=scaler", "NV12")
             };
             let width = (u64::from(source.width) * u64::from(self.height)
-                / u64::from(source.height)) as u32
-                & !1;
+                / u64::from(source.height)) as u32;
+            let width = width.max(width_alignment) / width_alignment * width_alignment;
             filter.push_str(&format!(
                 "{scaler} ! video/x-raw,format={format},width={},height={} ! \
                  queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! ",
@@ -674,13 +676,13 @@ mod tests {
         assert_eq!(settings.frame_rate(60, 60), 30);
         assert_eq!(settings.frame_rate(60, 10), 10);
         assert!(settings
-            .filter(Resolution::new(3840, 2160), 30)
+            .filter(Resolution::new(3840, 2160), 30, 2)
             .contains("width=1920,height=1080"));
         assert!(settings
-            .filter(Resolution::new(2880, 2160), 30)
+            .filter(Resolution::new(2880, 2160), 30, 2)
             .contains("width=1440,height=1080"));
         assert!(!settings
-            .filter(Resolution::new(1280, 720), 30)
+            .filter(Resolution::new(1280, 720), 30, 2)
             .contains("amlvconv"));
         assert!(OutputSettings {
             height: 719,

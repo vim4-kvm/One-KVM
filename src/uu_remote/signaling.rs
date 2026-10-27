@@ -13,6 +13,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
+use super::capabilities::ViewerCapabilities;
 use super::ice::SessionIce;
 use super::wire;
 
@@ -55,6 +56,7 @@ pub enum SignalingEvent {
         capture_type: u64,
         ice_id: Option<String>,
         transport: SessionIce,
+        capabilities: ViewerCapabilities,
     },
     Soac(SoacMessage),
     Released(Value),
@@ -390,6 +392,7 @@ impl SignalingClient {
                             capture_type,
                             ice_id,
                             transport: SessionIce::from_header(&header),
+                            capabilities: ViewerCapabilities::from_header(&header),
                         };
                         if enqueue(&events, event).await.is_err() {
                             break;

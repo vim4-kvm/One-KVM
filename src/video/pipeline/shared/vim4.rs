@@ -86,7 +86,14 @@ fn description(
     } else {
         3
     };
-    let filter = config.output.filter(source, fps);
+    // The old HEVC SDK needs complete eight-pixel blocks and 16-byte DMA
+    // pitches. GE2D emits tightly packed NV12 rows, so satisfy both here.
+    let width_alignment = if config.output_codec == VideoEncoderType::H265 {
+        16
+    } else {
+        2
+    };
+    let filter = config.output.filter(source, fps, width_alignment);
     let capture = vendor_capture(
         std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").ok().as_deref(),
         source,

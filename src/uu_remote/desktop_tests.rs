@@ -11,7 +11,7 @@ struct Viewer {
     binary: Arc<RTCDataChannel>,
     _file: Arc<RTCDataChannel>,
     incoming: mpsc::UnboundedReceiver<(u8, Vec<u8>)>,
-    packets: mpsc::UnboundedReceiver<()>,
+    packets: mpsc::UnboundedReceiver<bool>,
     _directory: tempfile::TempDir,
 }
 
@@ -21,7 +21,14 @@ impl Viewer {
     }
 
     async fn connect_kind(desktop: Arc<DesktopCoordinator>, capture_type: u64) -> Self {
-        Self::connect_configured(desktop, capture_type, None, false).await
+        Self::connect_configured(
+            desktop,
+            capture_type,
+            None,
+            false,
+            ViewerCapabilities::default(),
+        )
+        .await
     }
 
     async fn connect_configured(
@@ -29,6 +36,7 @@ impl Viewer {
         capture_type: u64,
         configured_video: Option<Arc<VideoStreamManager>>,
         main10: bool,
+        capabilities: ViewerCapabilities,
     ) -> Self {
         let mut media = MediaEngine::default();
         media.register_default_codecs().unwrap();
@@ -74,8 +82,8 @@ impl Viewer {
             let packets = packets.clone();
             Box::pin(async move {
                 if track.kind() == RTPCodecType::Video {
-                    while track.read_rtp().await.is_ok() {
-                        let _ = packets.send(());
+                    while let Ok((packet, _)) = track.read_rtp().await {
+                        let _ = packets.send(packet.header.marker);
                     }
                 }
             })
@@ -145,7 +153,7 @@ impl Viewer {
             PeerDeps {
                 system: crate::config::UuRemoteSystem::Windows,
                 reverse_scroll: false,
-                video_codec: if main10 {
+                video_codec: if main10 || capabilities.supports_main10(1280, 720) {
                     crate::config::UuVideoCodec::H265
                 } else {
                     crate::config::UuVideoCodec::H264
@@ -160,6 +168,7 @@ impl Viewer {
                 files: super::super::files::storage::Storage::new(directory.path().join("files")),
             },
             SessionIce::host_only(),
+            capabilities,
             &soac,
             capture_type,
         )
@@ -245,10 +254,15 @@ impl Viewer {
 
     #[cfg(feature = "vim4")]
     async fn set_hdr(&mut self, enabled: bool, id: u64) {
-        let mut header = Vec::new();
-        wire::put_varint(1, id, &mut header);
         let mut setting = Vec::new();
         wire::put_varint(11, u64::from(enabled), &mut setting);
+        self.set_capture_setting(setting, id).await;
+    }
+
+    #[cfg(feature = "vim4")]
+    async fn set_capture_setting(&mut self, setting: Vec<u8>, id: u64) {
+        let mut header = Vec::new();
+        wire::put_varint(1, id, &mut header);
         let mut request = Vec::new();
         wire::put_bytes(1, &header, &mut request);
         wire::put_bytes(2, &setting, &mut request);
@@ -283,7 +297,38 @@ impl Viewer {
     }
 }
 
-/// Run as the service user, with its GStreamer environment and all KVM services stopped.
+fn native_main10_capabilities() -> ViewerCapabilities {
+    ViewerCapabilities::from_header(&serde_json::json!({
+        "streamer_data": serde_json::json!({"device_capability": {
+            "display_info": [{"hdr":0}],
+            "video_codec_capability": [{"video_codec":2,"bit_depth":10,
+                "chroma_sampling":1,"width":3840,"height":2160}]
+        }}).to_string()
+    }))
+}
+
+#[tokio::test]
+async fn native_main10_capability_keeps_main_sdp_and_transport_binding() {
+    let viewer = Viewer::connect_configured(
+        Arc::new(DesktopCoordinator::default()),
+        1,
+        None,
+        false,
+        native_main10_capabilities(),
+    )
+    .await;
+    let answer = viewer.host.pc.local_description().await.unwrap().sdp;
+    assert!(!answer.contains("profile-id=2"));
+    assert_eq!(viewer.host.shared.codec, VideoCodecType::H265);
+    assert_eq!(viewer.host.shared.hevc_receive_profile, 2);
+    assert!(viewer.host.shared.hdr_display_available);
+    assert_eq!(viewer.pc.connection_state(), PcState::Connected);
+    viewer.host.close().await;
+    viewer.pc.close().await.unwrap();
+}
+
+/// Requires 3840x2160 HDR10/PQ HDMI input; run as the service user with its GStreamer
+/// environment and all KVM services stopped.
 #[cfg(feature = "vim4")]
 #[tokio::test]
 #[ignore = "requires exclusive VIM4 capture and encoder access"]
@@ -293,6 +338,11 @@ async fn live_uu_hdr_switch_and_takeover_restore_the_default() {
         .try_init();
     assert_eq!(std::env::var("VIM4_HARDWARE_TEST").as_deref(), Ok("1"));
     assert!(crate::platform::vim4::hdr_remote_available());
+    assert!(
+        crate::platform::vim4::pq_input(),
+        "HDR10/PQ HDMI input is required"
+    );
+    let default_hdr = crate::platform::vim4::global_hdr_default().unwrap_or(false);
     gstreamer::init().unwrap();
     let streamer = crate::webrtc::WebRtcStreamer::new();
     streamer
@@ -300,8 +350,9 @@ async fn live_uu_hdr_switch_and_takeover_restore_the_default() {
         .await;
     streamer
         .set_vim4_output(crate::platform::vim4::OutputSettings {
-            height: 720,
-            fps: 15,
+            height: 0,
+            fps: 60,
+            hdr: default_hdr,
             ..Default::default()
         })
         .await
@@ -312,9 +363,23 @@ async fn live_uu_hdr_switch_and_takeover_restore_the_default() {
         streamer.clone(),
     );
     let owner = Arc::new(DesktopCoordinator::default());
-    let mut first = Viewer::connect_configured(owner.clone(), 1, Some(video.clone()), true).await;
+    let mut first = Viewer::connect_configured(
+        owner.clone(),
+        1,
+        Some(video.clone()),
+        false,
+        native_main10_capabilities(),
+    )
+    .await;
+    let answer = first.host.pc.local_description().await.unwrap().sdp;
+    assert!(
+        !answer.contains("profile-id=2"),
+        "native capability must not rewrite SDP"
+    );
+    assert_eq!(first.host.shared.hevc_receive_profile, 2);
     assert!(first.host.shared.hdr_control_available());
-    for (id, hdr) in [(70, true), (71, false), (72, true)] {
+    assert!(!video.vim4_output_settings().await.unwrap().hdr);
+    for (id, hdr) in [(69, false), (70, true), (71, false), (72, true)] {
         first.set_hdr(hdr, id).await;
         let config = video.get_encoding_config().await.unwrap();
         assert_eq!(config.output.hdr, hdr);
@@ -327,12 +392,10 @@ async fn live_uu_hdr_switch_and_takeover_restore_the_default() {
                     crate::video::codec::h265_bitstream::conforms_to_profile(&frame.data, 2)
                 {
                     assert!(compatible);
-                    if hdr {
-                        assert_eq!(
-                            crate::video::codec::h265_bitstream::profile_id(&frame.data),
-                            Some(2)
-                        );
-                    }
+                    assert_eq!(
+                        crate::video::codec::h265_bitstream::profile_id(&frame.data),
+                        Some(if hdr { 2 } else { 1 })
+                    );
                     return;
                 }
             }
@@ -340,32 +403,83 @@ async fn live_uu_hdr_switch_and_takeover_restore_the_default() {
         })
         .await
         .unwrap();
-        println!("UU HDR={hdr}: compatible keyframe and same peer confirmed");
+        // A single keyframe does not prove that capture, encoding and RTP
+        // delivery keep running after switching the hardware encoder SDK.
+        while first.packets.try_recv().is_ok() {}
+        let started = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let mut frames = 0;
+            while frames < 240 {
+                if first.packets.recv().await.expect("Video receiver closed") {
+                    frames += 1;
+                }
+            }
+        })
+        .await
+        .expect("Did not deliver 240 complete RTP frames within 30 seconds");
+        println!(
+            "UU HDR={hdr}: 240 complete RTP frames in {:?}, same peer",
+            started.elapsed()
+        );
     }
-    let mut second = Viewer::connect_configured(owner, 1, Some(video.clone()), true).await;
+    // A native MacBook window produced this 3022x1700 output. The HEVC SDK
+    // used to pass the unaligned width to firmware and hang on the first frame.
+    let mut setting = Vec::new();
+    wire::put_varint(16, 3024, &mut setting);
+    wire::put_varint(17, 1700, &mut setting);
+    first.set_capture_setting(setting, 74).await;
+    for (id, hdr) in [(74, true), (75, false), (76, true)] {
+        if id != 74 {
+            first.set_hdr(hdr, id).await;
+        }
+        let config = video.get_encoding_config().await.unwrap();
+        assert_eq!(
+            config.resolution,
+            crate::video::format::Resolution::new(if hdr { 3022 } else { 3008 }, 1700)
+        );
+        assert_eq!(config.output.hdr, hdr);
+        while first.packets.try_recv().is_ok() {}
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let mut frames = 0;
+            while frames < 30 {
+                if first.packets.recv().await.expect("Video receiver closed") {
+                    frames += 1;
+                }
+            }
+        })
+        .await
+        .expect("Scaled video stopped before delivering 30 complete RTP frames");
+        println!("UU scaled HDR={hdr}: 30 complete RTP frames, same peer");
+    }
+    let mut second = Viewer::connect_configured(
+        owner,
+        1,
+        Some(video.clone()),
+        true,
+        ViewerCapabilities::default(),
+    )
+    .await;
     assert!(!first.host.is_desktop());
-    let config = video.get_encoding_config().await.unwrap();
-    assert!(
-        !config.output.hdr,
-        "Takeover inherited the previous viewer's temporary HDR"
+    let output = video.vim4_output_settings().await.unwrap();
+    assert_eq!(
+        output.hdr, false,
+        "New desktop must start in SDR before the viewer requests HDR"
     );
-    second.set_hdr(true, 73).await;
+    second.set_hdr(!default_hdr, 73).await;
     first.close().await;
-    assert!(
+    assert_eq!(
         video.get_encoding_config().await.unwrap().output.hdr,
+        !default_hdr,
         "Closing the old viewer changed the new owner's setting"
     );
     second.close().await;
-    let config = video.get_encoding_config().await.unwrap();
-    assert!(!config.output.hdr);
-    streamer
-        .ensure_video_pipeline_for_external()
-        .await
-        .unwrap()
-        .stop_and_wait(Duration::from_secs(5))
-        .await
-        .unwrap();
-    println!("UU takeover/disconnect restored SDR default and released Main10 override");
+    // The final subscriber may stop the encoder. Check the retained output
+    // preference, which must also restore correctly while the pipeline is idle.
+    let output = video.vim4_output_settings().await.unwrap();
+    assert_eq!(output.hdr, default_hdr);
+    assert_eq!((output.height, output.fps), (1700, 60));
+    video.stop().await.unwrap();
+    println!("UU takeover/disconnect restored HDR default={default_hdr} and released the override");
 }
 
 #[tokio::test]

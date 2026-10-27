@@ -33,6 +33,7 @@ use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
 
+use super::capabilities::ViewerCapabilities;
 use super::ice::SessionIce;
 use super::input::{self, HidAction, SessionInput, SessionInputEvent};
 use super::signaling::{SignalingClient, SoacMessage};
@@ -445,7 +446,8 @@ struct Shared {
     context: Arc<Mutex<Context>>,
     input: SessionInput,
     codec: VideoCodecType,
-    hevc_profile: u8,
+    hevc_receive_profile: u8,
+    hdr_display_available: bool,
     video_diagnostics: Mutex<VideoDiagnostics>,
 }
 
@@ -469,7 +471,7 @@ impl Shared {
     fn hdr_control_available(&self) -> bool {
         #[cfg(feature = "vim4")]
         return self.codec == VideoCodecType::H265
-            && self.hevc_profile == 2
+            && self.hevc_receive_profile == 2
             && crate::platform::vim4::hdr_remote_available();
         #[cfg(not(feature = "vim4"))]
         false
@@ -487,9 +489,10 @@ impl Shared {
             .await
             .ok_or("Video output settings unavailable")?;
         *self.hdr_restore.lock().await = Some(output.hdr);
-        if !self.hdr_control_available() && output.hdr {
-            // A global HDR preference cannot make an eight-bit-only viewer
-            // decode Main10. Keep this session SDR and restore the default later.
+        if output.hdr {
+            // A decoder capability is not a request to enable HDR. Establish
+            // the native client's initial SDR stream before enable_hdr opts in;
+            // restore the global preference when this desktop session ends.
             self.deps.video.restore_vim4_hdr(false).await;
         }
         Ok(())
@@ -524,16 +527,7 @@ impl Shared {
         if self.hdr_control_available() {
             #[cfg(feature = "vim4")]
             {
-                let enabled = self
-                    .deps
-                    .video
-                    .vim4_output_settings()
-                    .await
-                    .is_some_and(|output| output.hdr);
-                capability["data"]["device_capability"]["display_info"][0]["hdr"] =
-                    u8::from(enabled).into();
-                capability["data"]["device_capability"]["video_codec_capability"][0]["bit_depth"] =
-                    10.into();
+                advertise_hdr(&mut capability);
             }
         }
         if let Err(error) = self
@@ -790,6 +784,7 @@ impl Peer {
     pub async fn new(
         deps: PeerDeps,
         transport: SessionIce,
+        capabilities: ViewerCapabilities,
         offer: &SoacMessage,
         capture_type: u64,
     ) -> Result<Self, String> {
@@ -918,6 +913,20 @@ impl Peer {
             .unwrap_or(BitratePreset::Balanced);
         let closed = CancellationToken::new();
         let sequence = Arc::new(AtomicU64::new(1));
+        let native = native_screen(initial.0);
+        // The native UU SDK advertises 10-bit decoding in streamer_data even
+        // with a Main-only SDP. It reconfigures its decoder from the SPS on a
+        // keyframe; keep the SDP/RTP binding unchanged and require that separate
+        // declaration before accepting Main10 on this UU connection.
+        let native_main10 = capabilities.supports_main10(native.width, native.height);
+        let hevc_receive_profile = if native_main10 { 2 } else { hevc_profile };
+        let hdr_display_available = capabilities.hdr_display() != Some(false);
+        info!(
+            hevc_profile,
+            hevc_receive_profile,
+            ?capabilities,
+            "UU receiver capabilities"
+        );
         let shared = Arc::new(Shared {
             #[cfg(target_os = "linux")]
             files: super::files::Connection::new(
@@ -946,7 +955,8 @@ impl Peer {
             input: SessionInput::new(deps.system, deps.reverse_scroll),
             codec,
             video_diagnostics: Mutex::new(VideoDiagnostics::default()),
-            hevc_profile,
+            hevc_receive_profile,
+            hdr_display_available,
         });
         // Also cancel application tasks if constructing or owning the peer ends early.
         let shutdown_guard = shared.closed.clone().drop_guard();
@@ -1373,6 +1383,19 @@ fn device_capability(
     })
 }
 
+fn advertise_hdr(capability: &mut serde_json::Value) {
+    let capability = &mut capability["data"]["device_capability"];
+    // hdr describes display support, not the live switch. Advertising 1 when
+    // enabled makes the official SDK reject an otherwise capable display.
+    capability["display_info"][0]["hdr"] = 0.into();
+    if let Some(codecs) = capability["video_codec_capability"].as_array_mut() {
+        // Preserve 8-bit support so the SDK can negotiate both SDR and HDR.
+        let mut main10 = codecs[0].clone();
+        main10["bit_depth"] = 10.into();
+        codecs.push(main10);
+    }
+}
+
 fn sender_parameters(client_id: &str, ice_id: &str) -> serde_json::Value {
     let media = serde_json::json!({
         "capture_impl": "HDMI", "encoder_impl": "One-KVM", "video_track_index": 0
@@ -1517,7 +1540,7 @@ async fn stream_video(
             if codec == VideoCodecType::H265
                 && crate::video::codec::h265_bitstream::conforms_to_profile(
                     &frame.data,
-                    shared.hevc_profile,
+                    shared.hevc_receive_profile,
                 )
                 .is_some_and(|compatible| !compatible)
             {
@@ -2164,6 +2187,9 @@ async fn apply_capture_setting(
     if request.hdr.is_some() && !shared.hdr_control_available() {
         return Err("HDR requires a negotiated Main10 receiver and native HDR capture".into());
     }
+    if request.hdr == Some(true) && !shared.hdr_display_available {
+        return Err("The UU viewer display does not support HDR".into());
+    }
     let quality = request
         .quality
         .unwrap_or_else(|| shared.quality.load(Ordering::Relaxed));
@@ -2259,16 +2285,21 @@ mod tests {
     async fn forwarded_capability_is_readable_by_the_viewer_message_dispatcher() {
         let (outgoing, mut received) = tokio::sync::mpsc::channel(2);
         let signaling = SignalingClient::with_test_sender(outgoing);
-        for codec in [VideoCodecType::H264, VideoCodecType::H265] {
+        for (codec, hdr) in [
+            (VideoCodecType::H264, false),
+            (VideoCodecType::H265, false),
+            (VideoCodecType::H265, true),
+        ] {
             let size = Rect {
                 width: 3840,
                 height: 2160,
             };
+            let mut advertised = device_capability("test-client", "test-ice", size, 60, codec);
+            if hdr {
+                advertise_hdr(&mut advertised);
+            }
             signaling
-                .emit_event(
-                    FORWARD_SETTING_EVENT,
-                    device_capability("test-client", "test-ice", size, 60, codec),
-                )
+                .emit_event(FORWARD_SETTING_EVENT, advertised)
                 .await
                 .unwrap();
             let packet = received.recv().await.unwrap();
@@ -2279,7 +2310,14 @@ mod tests {
             let capability = &dispatch[dispatch["type"].as_str().unwrap()];
             assert_eq!(capability["ice_id"], "test-ice");
             let formats = capability["video_codec_capability"].as_array().unwrap();
-            assert_eq!(formats.len(), 1);
+            assert_eq!(formats.len(), if hdr { 2 } else { 1 });
+            assert_eq!(formats[0]["bit_depth"], 8);
+            if hdr {
+                assert_eq!(capability["display_info"][0]["hdr"], 0);
+                assert_eq!(formats[1]["bit_depth"], 10);
+                assert_eq!(formats[1]["width"], 3840);
+                assert_eq!(formats[1]["height"], 2160);
+            }
             assert_eq!(formats[0]["width"], size.width);
             assert_eq!(formats[0]["height"], size.height);
             assert_eq!(
@@ -2287,7 +2325,10 @@ mod tests {
                 if codec == VideoCodecType::H265 { 2 } else { 1 }
             );
             assert_eq!(formats[0]["chroma_sampling"], 1);
-            assert_eq!(capability["display_info"][0]["hdr"], -1);
+            assert_eq!(
+                capability["display_info"][0]["hdr"],
+                if hdr { 0 } else { -1 }
+            );
         }
         signaling
             .emit_event(
@@ -2395,6 +2436,7 @@ mod tests {
             SessionIce::from_header(
                 &serde_json::json!({"iceServers":[{"urls":"stun:127.0.0.1:9"}]}),
             ),
+            ViewerCapabilities::default(),
             &soac,
             8,
         )
