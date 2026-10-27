@@ -482,6 +482,85 @@ async fn live_uu_hdr_switch_and_takeover_restore_the_default() {
     println!("UU takeover/disconnect restored HDR default={default_hdr} and released the override");
 }
 
+/// Requires a 4K60 HDMI input; run with the service environment and all KVM
+/// services stopped. No EDID, source mode or persistent output setting is changed.
+#[cfg(feature = "vim4")]
+#[tokio::test]
+#[ignore = "requires exclusive VIM4 capture and encoder access"]
+async fn live_uu_resolution_with_saved_hdr_on_an_sdr_viewer() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("warn,one_kvm=info")
+        .try_init();
+    assert_eq!(std::env::var("VIM4_HARDWARE_TEST").as_deref(), Ok("1"));
+    let native = crate::platform::vim4::signal().unwrap().0;
+    assert_eq!((native.width, native.height), (3840, 2160));
+    gstreamer::init().unwrap();
+    let streamer = crate::webrtc::WebRtcStreamer::new();
+    streamer
+        .set_capture_device(crate::platform::vim4::VIDEO_DEVICE.into(), 80, None)
+        .await;
+    streamer
+        .set_vim4_output(crate::platform::vim4::OutputSettings {
+            fps: 60,
+            hdr: false,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let video =
+        VideoStreamManager::with_webrtc_streamer(crate::video::streamer::Streamer::new(), streamer);
+    let capabilities = ViewerCapabilities::from_header(&serde_json::json!({
+        "streamer_data": serde_json::json!({"device_capability": {
+            "display_info": [{"hdr": -1}, {"hdr": -1}],
+            "video_codec_capability": [{"video_codec": 2, "bit_depth": 10,
+                "chroma_sampling": 1, "width": 3840, "height": 2160}]
+        }}).to_string()
+    }));
+    let mut viewer = Viewer::connect_configured(
+        Arc::new(DesktopCoordinator::default()),
+        1,
+        Some(video.clone()),
+        false,
+        capabilities,
+    )
+    .await;
+    assert!(!viewer.host.shared.hdr_display_available);
+    for (id, width, height) in [(81, 1920, 1080), (82, 1280, 720), (83, 3840, 2160)] {
+        let mut setting = Vec::new();
+        // The official client repeats a saved HDR preference with its size.
+        wire::put_varint(11, 1, &mut setting);
+        wire::put_varint(16, width, &mut setting);
+        wire::put_varint(17, height, &mut setting);
+        wire::put_varint(18, 60, &mut setting);
+        viewer.set_capture_setting(setting, id).await;
+        let config = video.get_encoding_config().await.unwrap();
+        assert_eq!(
+            (config.resolution.width, config.resolution.height),
+            (width as u32, height as u32)
+        );
+        assert!(!config.output.hdr);
+        assert_eq!(viewer.pc.connection_state(), PcState::Connected);
+        while viewer.packets.try_recv().is_ok() {}
+        let started = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let mut frames = 0;
+            while frames < 120 {
+                if viewer.packets.recv().await.expect("Video receiver closed") {
+                    frames += 1;
+                }
+            }
+        })
+        .await
+        .expect("Resolution switch stopped video delivery");
+        println!(
+            "UU SDR viewer: {width}x{height}, 120 RTP frames in {:?}",
+            started.elapsed()
+        );
+    }
+    viewer.close().await;
+    video.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn tool_promotion_is_idempotent_and_keeps_terminal_and_video_on_the_same_peer() {
     tokio::time::timeout(Duration::from_secs(30), async {

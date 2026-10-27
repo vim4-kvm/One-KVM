@@ -2041,7 +2041,7 @@ async fn handle_control(channel: &RTCDataChannel, shared: &Arc<Shared>, data: &[
         if let Some((request, response)) = wire::capture_setting_rpc(&rpc) {
             // Do not send a success RPC if the encoder could not apply the request.
             if let Err(error) = apply_capture_setting(shared, request).await {
-                warn!("UU capture settings not applied: {error}");
+                warn!(?request, "UU capture settings not applied: {error}");
                 return;
             }
             let sync = shared.capture_sync();
@@ -2176,6 +2176,36 @@ fn requested_output(
     output
 }
 
+fn capture_hdr_setting(
+    request: &wire::CaptureRequest,
+    hdr_control_available: bool,
+    hdr_display_available: bool,
+) -> Result<Option<bool>, &'static str> {
+    // Turning HDR off is safe even for an SDR-only receiver. The native client
+    // also repeats its saved HDR preference in combined size/quality requests;
+    // an unavailable preference must not discard those independent controls.
+    if request.hdr != Some(true) {
+        return Ok(request.hdr);
+    }
+    let error = if !hdr_control_available {
+        "HDR requires a negotiated Main10 receiver and native HDR capture"
+    } else if !hdr_display_available {
+        "The UU viewer display does not support HDR"
+    } else {
+        return Ok(Some(true));
+    };
+    if request.output.is_some()
+        || request.fps.is_some()
+        || request.quality.is_some()
+        || request.custom_bitrate.is_some()
+    {
+        warn!(?request, "UU retained current HDR setting: {error}");
+        Ok(None)
+    } else {
+        Err(error)
+    }
+}
+
 async fn apply_capture_setting(
     shared: &Shared,
     mut request: wire::CaptureRequest,
@@ -2184,12 +2214,11 @@ async fn apply_capture_setting(
     if !*shared.desktop.borrow() || shared.closed.is_cancelled() {
         return Err("Desktop session is no longer active".into());
     }
-    if request.hdr.is_some() && !shared.hdr_control_available() {
-        return Err("HDR requires a negotiated Main10 receiver and native HDR capture".into());
-    }
-    if request.hdr == Some(true) && !shared.hdr_display_available {
-        return Err("The UU viewer display does not support HDR".into());
-    }
+    request.hdr = capture_hdr_setting(
+        &request,
+        shared.hdr_control_available(),
+        shared.hdr_display_available,
+    )?;
     let quality = request
         .quality
         .unwrap_or_else(|| shared.quality.load(Ordering::Relaxed));
@@ -2721,6 +2750,47 @@ mod tests {
             &both
         )
         .is_err());
+    }
+
+    #[cfg(feature = "vim4")]
+    #[test]
+    fn unavailable_saved_hdr_does_not_block_combined_output_settings() {
+        let mut setting = Vec::new();
+        wire::put_varint(11, 1, &mut setting);
+        wire::put_varint(16, 1920, &mut setting);
+        wire::put_varint(17, 1080, &mut setting);
+        wire::put_varint(18, 60, &mut setting);
+        let mut rpc = Vec::new();
+        wire::put_bytes(2, &setting, &mut rpc);
+        let (mut request, _) = wire::capture_setting_rpc(&wire::decode(&rpc).unwrap()).unwrap();
+        for (main10, display) in [(true, false), (false, true), (false, false)] {
+            request.hdr = Some(true);
+            request.hdr = capture_hdr_setting(&request, main10, display).unwrap();
+            assert_eq!(request.hdr, None);
+            let output = requested_output(
+                &request,
+                Rect {
+                    width: 3840,
+                    height: 2160,
+                },
+                crate::platform::vim4::OutputSettings::default(),
+            );
+            assert_eq!((output.height, output.fps), (1080, 60));
+        }
+        request.hdr = Some(true);
+        assert_eq!(capture_hdr_setting(&request, true, true), Ok(Some(true)));
+    }
+
+    #[test]
+    fn hdr_only_requests_require_support_but_disabling_always_works() {
+        let mut request = wire::CaptureRequest {
+            hdr: Some(true),
+            ..Default::default()
+        };
+        assert!(capture_hdr_setting(&request, true, false).is_err());
+        assert!(capture_hdr_setting(&request, false, true).is_err());
+        request.hdr = Some(false);
+        assert_eq!(capture_hdr_setting(&request, false, false), Ok(Some(false)));
     }
 
     #[cfg(feature = "vim4")]
