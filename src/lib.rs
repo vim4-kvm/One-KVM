@@ -9,6 +9,8 @@ pub mod atx;
 pub mod audio;
 #[cfg(feature = "desktop")]
 pub mod auth;
+#[cfg(feature = "vim4")]
+pub mod broadcast;
 #[cfg(feature = "desktop")]
 pub mod computer_use;
 #[cfg(feature = "desktop")]

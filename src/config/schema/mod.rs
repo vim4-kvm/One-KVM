@@ -5,6 +5,7 @@ pub use crate::extensions::ExtensionsConfig;
 pub use crate::rustdesk::config::RustDeskConfig;
 
 mod atx;
+mod broadcast;
 mod common;
 mod computer_use;
 mod hid;
@@ -17,6 +18,7 @@ mod watchdog;
 mod web;
 
 pub use atx::*;
+pub use broadcast::*;
 pub use common::*;
 pub use computer_use::*;
 pub use hid::*;
@@ -33,6 +35,7 @@ pub use web::*;
 #[serde(default)]
 #[derive(Default)]
 pub struct AppConfig {
+    pub broadcast: BroadcastConfig,
     pub mcp: McpConfig,
     pub recording: RecordingConfig,
     pub initialized: bool,

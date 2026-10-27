@@ -68,6 +68,8 @@ pub struct AppState {
     pub snapshot: Arc<crate::video::snapshot::SnapshotService>,
     #[cfg(feature = "vim4")]
     pub recording: Arc<crate::recording::Recorder>,
+    #[cfg(feature = "vim4")]
+    pub broadcast: Arc<crate::broadcast::Broadcaster>,
     pub db: DatabasePool,
     pub config: ConfigStore,
     pub sessions: SessionStore,
@@ -162,6 +164,8 @@ impl AppState {
                 data_dir.join("recordings"),
                 config.clone(),
             )),
+            #[cfg(feature = "vim4")]
+            broadcast: Arc::new(crate::broadcast::Broadcaster::default()),
             db,
             config,
             sessions,

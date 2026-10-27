@@ -22,6 +22,12 @@ impl RuntimeSupervisor {
     ) -> Self {
         let mut tasks = spawn_device_info_broadcaster(state.clone(), events);
         #[cfg(feature = "vim4")]
+        tasks.push(state.broadcast.clone().watch(
+            config.clone(),
+            state.stream_manager.clone(),
+            state.audio.clone(),
+        ));
+        #[cfg(feature = "vim4")]
         tasks.push(super::hdr::watch(state));
         tasks.push(spawn_extension_health_check(extensions, config));
         Self { tasks }
@@ -187,6 +193,8 @@ async fn cleanup(state: &Arc<AppState>) {
     state.snapshot.shutdown().await;
     #[cfg(feature = "vim4")]
     state.recording.stop().await;
+    #[cfg(feature = "vim4")]
+    state.broadcast.stop().await;
     state.extensions.stop_all().await;
     tracing::info!("Extensions stopped");
 

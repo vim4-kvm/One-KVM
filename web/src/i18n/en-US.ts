@@ -1,4 +1,14 @@
 export default {
+  broadcast: {
+    title: 'SRT / RTMP output', hint: 'Shares the current KVM video encoder and continues when the browser closes. Resolution, frame rate and quality follow KVM; input changes reconnect automatically.',
+    srtHint: 'Receive H.264 or H.265 in OBS / VLC over SRT. Enabling opens this UDP port; without a passphrase, LAN clients can receive directly.',
+    rtmpHint: 'Publish to a streaming server using the current H.264 video. Other codecs pause publishing; selecting H.264 resumes automatically.',
+    port: 'SRT port (UDP)', latency: 'SRT recovery buffer (ms)', passphrase: 'SRT encryption passphrase', optionalSecret: 'Optional, 10–79 printable ASCII characters',
+    keepSecret: 'Configured; leave blank to keep', clearPassphrase: 'Remove SRT passphrase', audio: 'Include HDMI audio (audio capture must be enabled)',
+    receiveUrl: 'Receive URL (applies after saving)', receiverSecret: 'Configure the same passphrase and a 256-bit key length on the receiver.',
+    publishUrl: 'Full publishing URL (including stream key)', keepUrl: 'Publishing URL saved; leave blank to keep', clients: 'receivers', save: 'Save and apply', unavailable: 'Output status unavailable; check the connection.',
+    states: { disabled: 'Disabled', connecting: 'Connecting', listening: 'Waiting for receiver', streaming: 'Streaming', retrying: 'Retrying', requires_h264: 'Waiting for H.264 video', requires_h26x: 'Waiting for H.264 / H.265 video', invalid_config: 'Invalid configuration' },
+  },
   recording: {
     saveTo: 'Save to', local: 'Local', folder: 'Folder', changeLocation: 'Change', done: 'Done',
     manageNas: 'Manage NAS', nasOmitted: '{name} is not responding; its recordings are not listed',

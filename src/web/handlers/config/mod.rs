@@ -65,6 +65,8 @@ use crate::config::AppConfig;
 use crate::state::AppState;
 
 fn sanitize_config_for_api(config: &mut AppConfig) {
+    config.broadcast.srt.passphrase.clear();
+    config.broadcast.rtmp.url.clear();
     config.stream.turn_password = None;
     config.computer_use.api_key = None;
 
@@ -83,4 +85,19 @@ pub async fn get_all_config(State(state): State<Arc<AppState>>) -> Json<AppConfi
     let mut config = (*state.config.get()).clone();
     sanitize_config_for_api(&mut config);
     Json(config)
+}
+
+#[cfg(test)]
+mod broadcast_secret_tests {
+    use super::*;
+    #[test]
+    fn full_config_response_also_redacts_broadcast_credentials() {
+        let mut config = AppConfig::default();
+        config.broadcast.srt.passphrase = "secret-passphrase".into();
+        config.broadcast.rtmp.url = "rtmp://server/live/secret-publish-key".into();
+        sanitize_config_for_api(&mut config);
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(!json.contains("secret-passphrase"));
+        assert!(!json.contains("secret-publish-key"));
+    }
 }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import HidDeviceSettings from '@/components/HidDeviceSettings.vue'
 import UuRemoteCard from '@/components/uu-remote/UuRemoteCard.vue'
+import BroadcastCard from '@/components/BroadcastCard.vue'
 import { useUuRemote } from '@/components/uu-remote/useUuRemote'
 import McpCard from '@/components/mcp/McpCard.vue'
 import { useMcp } from '@/components/mcp/useMcp'
@@ -4831,6 +4832,7 @@ watch(isWindows, () => {
           <McpCard v-if="activeSection === 'ext-mcp'" :controller="mcp" @navigate="activeSection = $event" />
 
           <!-- RTSP Section -->
+          <BroadcastCard v-if="isVim4 && activeSection === 'third-party-access'" />
           <div v-show="activeSection === 'third-party-access'" class="space-y-4">
             <Card>
               <CardHeader>

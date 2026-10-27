@@ -1,4 +1,14 @@
 export default {
+  broadcast: {
+    title: 'SRT / RTMP 输出', hint: '共享当前 KVM 视频编码，关闭网页后继续输出。分辨率、帧率和画质跟随 KVM，修改 HDMI 输入时自动重连。',
+    srtHint: '供 OBS / VLC 等客户端通过 SRT 拉流，支持 H.264 和 H.265。启用后监听此端口；未设置密码时局域网内可直接接收。',
+    rtmpHint: '推送到直播服务器，需要当前 KVM 使用 H.264；切换到其他编码后暂停，恢复 H.264 后自动继续。',
+    port: 'SRT 端口（UDP）', latency: 'SRT 恢复缓冲（毫秒）', passphrase: 'SRT 加密密码', optionalSecret: '可选，10–79 个可打印 ASCII 字符',
+    keepSecret: '已设置，留空保留', clearPassphrase: '移除 SRT 密码', audio: '包含 HDMI 声音（需已启用音频采集）',
+    receiveUrl: '接收地址（保存后生效）', receiverSecret: '接收端还需设置同一密码和 256-bit 加密密钥长度。',
+    publishUrl: '完整推流地址（包含推流密钥）', keepUrl: '已保存推流地址，留空保留', clients: '个接收端', save: '保存并应用', unavailable: '无法读取输出状态，请检查连接。',
+    states: { disabled: '已关闭', connecting: '正在连接', listening: '等待接收端', streaming: '正在传输', retrying: '正在重试', requires_h264: '等待 H.264 视频', requires_h26x: '等待 H.264 / H.265 视频', invalid_config: '配置无效' },
+  },
   recording: {
     saveTo: '保存到', local: '本机', folder: '文件夹', changeLocation: '更改', done: '完成',
     manageNas: '管理 NAS', nasOmitted: '{name} 无响应，其中的录像未列出',

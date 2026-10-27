@@ -383,6 +383,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     #[cfg(feature = "vim4")]
     let protected_routes = protected_routes
         .route(
+            "/broadcast",
+            get(handlers::broadcast::status).patch(handlers::broadcast::update),
+        )
+        .route(
             "/vim4/video",
             get(handlers::vim4::status).post(handlers::vim4::update),
         )

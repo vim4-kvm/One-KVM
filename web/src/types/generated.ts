@@ -394,6 +394,7 @@ export interface UacConfig {
 }
 
 export interface AppConfig {
+	broadcast: BroadcastConfig;
 	mcp: McpConfig;
 	recording: RecordingConfig;
 	initialized: boolean;
@@ -416,6 +417,25 @@ export interface AppConfig {
 	redfish: RedfishConfig;
 	watchdog: WatchdogConfig;
 	uac: UacConfig;
+}
+
+export interface BroadcastConfig {
+	srt: SrtOutputConfig;
+	rtmp: RtmpOutputConfig;
+}
+
+export interface SrtOutputConfig {
+	enabled: boolean;
+	port: number;
+	latency_ms: number;
+	passphrase: string;
+	audio: boolean;
+}
+
+export interface RtmpOutputConfig {
+	enabled: boolean;
+	url: string;
+	audio: boolean;
 }
 
 /** Update for a single ATX output binding */
