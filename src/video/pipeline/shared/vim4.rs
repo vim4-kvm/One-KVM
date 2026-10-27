@@ -153,7 +153,12 @@ fn vendor_capture(secondary: Option<&str>, source: Resolution, fps: u32) -> Resu
     }
 }
 
-fn secondary_allocation(pipeline: &gst::Pipeline, source: Resolution, name: &str) -> Result<()> {
+fn secondary_allocation(
+    pipeline: &gst::Pipeline,
+    source: Resolution,
+    name: &str,
+    encoder_branch: bool,
+) -> Result<()> {
     let pad = pipeline
         .by_name(name)
         .and_then(|source| source.static_pad("src"))
@@ -165,11 +170,15 @@ fn secondary_allocation(pipeline: &gst::Pipeline, source: Resolution, name: &str
         .and_then(|pixels| pixels.checked_mul(3))
         .map(|bytes| bytes / 2)
         .ok_or_else(|| AppError::VideoError("Secondary capture geometry overflow".into()))?;
+    // v4l2src adds its driver minimum to the downstream budget. The HDR
+    // secondary source feeds only the bounded JPEG tap and a discard sink;
+    // reserving the SDR encoder's queue here consumes ten full 4K buffers.
+    let (minimum, maximum) = if encoder_branch { (6, 8) } else { (3, 3) };
     pad.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, move |_, info| {
         if let Some(query) = info.query_mut() {
             if let gst::QueryViewMut::Allocation(allocation) = query.view_mut() {
                 allocation.add_allocation_meta::<gstreamer_video::VideoMeta>(None);
-                allocation.add_allocation_pool(None::<&gst::BufferPool>, bytes, 6, 8);
+                allocation.add_allocation_pool(None::<&gst::BufferPool>, bytes, minimum, maximum);
                 return gst::PadProbeReturn::Handled;
             }
         }
@@ -355,7 +364,7 @@ impl SharedVideoPipeline {
             } else {
                 "source"
             };
-            secondary_allocation(&capture.0, source.0, name)?;
+            secondary_allocation(&capture.0, source.0, name, !capture_hdr)?;
         }
         capture
             .0

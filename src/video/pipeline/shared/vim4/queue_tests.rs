@@ -65,7 +65,7 @@ fn secondary_dma_allocation_retains_real_video_meta_across_snapshot_branches() {
     .unwrap()
     .downcast::<gst::Pipeline>()
     .unwrap();
-    secondary_allocation(&pipeline, Resolution::new(3840, 2160), "source").unwrap();
+    secondary_allocation(&pipeline, Resolution::new(3840, 2160), "source", true).unwrap();
     let mut query = gst::query::Allocation::new(None, true);
     assert!(pipeline
         .by_name("source")
