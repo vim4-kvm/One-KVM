@@ -20,7 +20,9 @@ impl RuntimeSupervisor {
         extensions: Arc<ExtensionManager>,
         config: ConfigStore,
     ) -> Self {
-        let mut tasks = spawn_device_info_broadcaster(state, events);
+        let mut tasks = spawn_device_info_broadcaster(state.clone(), events);
+        #[cfg(feature = "vim4")]
+        tasks.push(super::hdr::watch(state));
         tasks.push(spawn_extension_health_check(extensions, config));
         Self { tasks }
     }

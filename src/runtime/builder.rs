@@ -88,6 +88,10 @@ impl RuntimeBuilder {
         #[cfg(feature = "vim4")]
         crate::platform::vim4::video_backend::validate_runtime(&data_dir)?;
         let (db, config_store, mut config) = load_runtime_config(&data_dir).await?;
+        #[cfg(feature = "vim4")]
+        if let Some(hdr) = crate::platform::vim4::global_hdr_default() {
+            config.video.output.hdr = hdr && crate::platform::vim4::hdr_remote_available();
+        }
         prepare_web_config(&config_store, &mut config, web_overrides).await?;
 
         let sessions = SessionStore::new(config.auth.session_timeout_secs as i64);

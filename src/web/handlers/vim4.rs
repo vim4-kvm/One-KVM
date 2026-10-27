@@ -151,7 +151,7 @@ pub async fn update(
     status().await
 }
 
-async fn run_helper(helper: &str, args: &[String]) -> Result<String> {
+pub(crate) async fn run_helper(helper: &str, args: &[String]) -> Result<String> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         tokio::process::Command::new("sudo")

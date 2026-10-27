@@ -92,7 +92,7 @@ fn description(
         source,
         source_fps,
     )?;
-    Ok(format!("{capture} ! {}queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! {filter}\
+    Ok(format!("{capture} ! {}queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! {filter}\
         amlvenc name=encoder bitrate={} gop=0 framerate={} intra-refresh-rows={refresh_rows} min-force-key-unit-interval=250000000 ! \
         video/x-{codec} ! {codec}parse config-interval=-1 ! \
         video/x-{codec},stream-format=byte-stream,alignment=au ! appsink name=frames sync=false max-buffers=2",
@@ -170,10 +170,12 @@ fn secondary_allocation(
         .and_then(|pixels| pixels.checked_mul(3))
         .map(|bytes| bytes / 2)
         .ok_or_else(|| AppError::VideoError("Secondary capture geometry overflow".into()))?;
-    // v4l2src adds its driver minimum to the downstream budget. The HDR
-    // secondary source feeds only the bounded JPEG tap and a discard sink;
-    // reserving the SDR encoder's queue here consumes ten full 4K buffers.
-    let (minimum, maximum) = if encoder_branch { (6, 8) } else { (3, 3) };
+    // v4l2src adds the driver's two-buffer minimum and two working slots.
+    // The SDR queue and encoder hold one frame each; the bounded JPEG tap
+    // may hold two more. Six total slots cover these consumers and capture.
+    // Larger pools can consume the contiguous CMA needed by the encoder
+    // after VDIN0 reallocates its pool for a source HDR/SDR transition.
+    let (minimum, maximum) = if encoder_branch { (2, 2) } else { (1, 1) };
     pad.add_probe(gst::PadProbeType::QUERY_DOWNSTREAM, move |_, info| {
         if let Some(query) = info.query_mut() {
             if let gst::QueryViewMut::Allocation(allocation) = query.view_mut() {
@@ -321,6 +323,26 @@ impl SharedVideoPipeline {
         config: &SharedVideoPipelineConfig,
         source: (Resolution, u32),
     ) -> Result<()> {
+        // First open reserves a shared contiguous 200 MiB in the driver. Do
+        // this before GPU/VDIN1 allocations split CMA. After the first encoded
+        // frame the SDK owns its own reference; drop this bootstrap reference
+        // so final SDK teardown also resets the driver before a different SDK
+        // (eight-bit or Main10) starts. Open errors use the normal capture retry.
+        let mut encoder_memory = if VideoBackend::current() == VideoBackend::Vendor {
+            Some(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open("/dev/amvenc_multi")
+                    .map_err(|error| {
+                        AppError::VideoError(format!(
+                            "Cannot reserve vendor encoder memory: {error}"
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
         let fps = config
             .output
             .h26x_frame_rate(source.0, source.1, VideoBackend::current());
@@ -445,6 +467,7 @@ impl SharedVideoPipeline {
                 continue;
             };
             last_frame = Instant::now();
+            encoder_memory.take();
             if total_frames == 0
                 && VideoBackend::current() == VideoBackend::Vendor
                 && config.output.height > 0

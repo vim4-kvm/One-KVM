@@ -8,6 +8,28 @@ pub use video_backend::VideoBackend;
 pub const VIDEO_DEVICE: &str = "/dev/video_cap";
 pub const GADGET: &str = "/sys/kernel/config/usb_gadget/kvm";
 
+/// Shared default; absent on older installations that still use the app preference.
+pub fn global_hdr_default() -> Option<bool> {
+    let text = std::fs::read_to_string("/etc/default/vim4-kvm-hdr").ok()?;
+    parse_global_hdr_default(&text)
+}
+
+fn parse_global_hdr_default(text: &str) -> Option<bool> {
+    text.lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            if key.trim() != "HDR_SDR_ENABLED" {
+                return None;
+            }
+            match value.trim() {
+                "0" => Some(true),
+                "1" => Some(false),
+                _ => None,
+            }
+        })
+        .last()
+}
+
 pub fn hdr_remote_available() -> bool {
     VideoBackend::current() == VideoBackend::Vendor
         && std::path::Path::new("/usr/lib/vim4-kvm/gstreamer-1.0/libgstvim4hevc10.so").exists()
@@ -521,6 +543,25 @@ pub async fn configure_media_result(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_hdr_default_migrates_only_an_explicit_valid_setting() {
+        for text in [
+            "",
+            "HDR_SDR_WHITE=203\n",
+            "HDR_SDR_ENABLED=false\n",
+            "HDR_SDR_ENABLED=2\n",
+        ] {
+            assert_eq!(super::parse_global_hdr_default(text), None);
+        }
+        assert_eq!(
+            super::parse_global_hdr_default("HDR_SDR_ENABLED=0\nHDR_SDR_WHITE=250\n"),
+            Some(true)
+        );
+        assert_eq!(
+            super::parse_global_hdr_default("HDR_SDR_ENABLED=0\nHDR_SDR_ENABLED=1\n"),
+            Some(false)
+        );
+    }
     use super::*;
     #[test]
     fn shared_config_roundtrip_preserves_user_settings_and_resolves_hardware() {

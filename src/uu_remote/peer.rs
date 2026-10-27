@@ -477,7 +477,7 @@ impl Shared {
 
     #[cfg(feature = "vim4")]
     async fn save_hdr_default(&self) -> Result<(), String> {
-        if !self.hdr_control_available() {
+        if !crate::platform::vim4::hdr_remote_available() {
             return Ok(());
         }
         let output = self
@@ -487,6 +487,11 @@ impl Shared {
             .await
             .ok_or("Video output settings unavailable")?;
         *self.hdr_restore.lock().await = Some(output.hdr);
+        if !self.hdr_control_available() && output.hdr {
+            // A global HDR preference cannot make an eight-bit-only viewer
+            // decode Main10. Keep this session SDR and restore the default later.
+            self.deps.video.restore_vim4_hdr(false).await;
+        }
         Ok(())
     }
 
@@ -497,6 +502,9 @@ impl Shared {
         let Some(hdr) = self.hdr_restore.lock().await.take() else {
             return;
         };
+        let hdr = crate::platform::vim4::global_hdr_default()
+            .map(|hdr| hdr && crate::platform::vim4::hdr_remote_available())
+            .unwrap_or(hdr);
         self.deps.video.restore_vim4_hdr(hdr).await;
     }
 
@@ -666,18 +674,19 @@ fn spawn_until_closed(
     });
 }
 
-async fn hevc_profile(video: &VideoStreamManager) -> u8 {
-    #[cfg(feature = "vim4")]
-    if crate::platform::vim4::VideoBackend::current() == crate::platform::vim4::VideoBackend::Vendor
-        && video
-            .get_encoding_config()
-            .await
-            .is_some_and(|config| config.output.hdr)
+fn offered_hevc_profile(
+    sdp: &str,
+    preference: crate::config::UuVideoCodec,
+    allowed: &[VideoCodecType],
+    main10_available: bool,
+) -> u8 {
+    if main10_available
+        && select_video_codec_with_profile(sdp, preference, allowed, 2) == Ok(VideoCodecType::H265)
     {
-        return 2;
+        2
+    } else {
+        1
     }
-    let _ = video;
-    1
 }
 
 #[cfg(test)]
@@ -787,18 +796,16 @@ impl Peer {
         let terminal = capture_type > 2;
         let sdp = offer_sdp(offer).ok_or("Offer SDP is empty")?;
         let constraints = deps.video.codec_constraints().await;
-        let mut hevc_profile = hevc_profile(&deps.video).await;
+        #[cfg(not(feature = "vim4"))]
+        let main10_available = false;
         #[cfg(feature = "vim4")]
-        if crate::platform::vim4::hdr_remote_available()
-            && select_video_codec_with_profile(
-                &sdp,
-                deps.video_codec,
-                &constraints.allowed_webrtc_codecs,
-                2,
-            ) == Ok(VideoCodecType::H265)
-        {
-            hevc_profile = 2;
-        }
+        let main10_available = crate::platform::vim4::hdr_remote_available();
+        let hevc_profile = offered_hevc_profile(
+            &sdp,
+            deps.video_codec,
+            &constraints.allowed_webrtc_codecs,
+            main10_available,
+        );
         let offered_codec = select_video_codec_with_profile(
             &sdp,
             deps.video_codec,
@@ -812,7 +819,7 @@ impl Peer {
             Err(error) => return Err(error),
         };
         if !terminal {
-            info!(?codec, preference = ?deps.video_codec, "UU negotiated video codec");
+            info!(?codec, hevc_profile, preference = ?deps.video_codec, "UU negotiated video codec");
         }
         let mut media = MediaEngine::default();
         media
@@ -2559,6 +2566,28 @@ mod tests {
             VideoCodecType::H265
         );
         let main_only = offer.replace("profile-id=2", "profile-id=1");
+        assert_eq!(
+            offered_hevc_profile(offer, Preference::Auto, &allowed, true),
+            2
+        );
+        assert_eq!(
+            offered_hevc_profile(offer, Preference::Auto, &allowed, false),
+            1
+        );
+        assert_eq!(
+            offered_hevc_profile(&main_only, Preference::H265, &allowed, true),
+            1
+        );
+        assert_eq!(
+            select_video_codec_with_profile(
+                &main_only,
+                Preference::H265,
+                &allowed,
+                offered_hevc_profile(&main_only, Preference::H265, &allowed, true)
+            )
+            .unwrap(),
+            VideoCodecType::H265
+        );
         assert_eq!(
             select_video_codec_with_profile(&main_only, Preference::Auto, &allowed, 2).unwrap(),
             VideoCodecType::H264

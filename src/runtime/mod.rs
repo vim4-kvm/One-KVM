@@ -1,5 +1,7 @@
 mod builder;
 mod config_apply;
+#[cfg(feature = "vim4")]
+mod hdr;
 mod remote_access;
 mod supervisor;
 mod usb;

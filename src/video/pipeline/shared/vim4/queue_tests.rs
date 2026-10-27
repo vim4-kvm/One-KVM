@@ -80,7 +80,7 @@ fn secondary_dma_allocation_retains_real_video_meta_across_snapshot_branches() {
     assert_eq!(pools.len(), 1);
     let (_, bytes, minimum, maximum) = &pools[0];
     assert_eq!(*bytes, 3840 * 2160 * 3 / 2);
-    assert!(*minimum >= 6 && *maximum >= *minimum);
+    assert!(*minimum >= 2 && *maximum >= *minimum);
 }
 
 fn pipeline_with_software_scaler(

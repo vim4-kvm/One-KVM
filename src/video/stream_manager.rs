@@ -931,9 +931,42 @@ impl VideoStreamManager {
             .vim4_output_settings()
             .await
             .is_some_and(|current| current.hdr != hdr);
+        if changed_profile {
+            self.publish_event(SystemEvent::StreamConfigChanging {
+                transition_id: None,
+                reason: "HDR output profile changed".into(),
+            })
+            .await;
+        }
         self.webrtc_streamer.restore_vim4_hdr(hdr).await;
         if changed_profile {
-            self.webrtc_streamer.close_all_sessions().await;
+            if let Err(error) = self
+                .webrtc_streamer
+                .close_all_sessions_and_release_device()
+                .await
+            {
+                warn!(%error, "Cannot release the previous HDR output pipeline");
+                return;
+            }
+            // Main/Main10 requires a new SDP offer. Closing the old peer alone
+            // leaves an open browser waiting on its retired video track.
+            let (device, resolution, format, fps, _) = self.streamer.current_capture_config().await;
+            self.publish_event(SystemEvent::WebRTCReady {
+                transition_id: None,
+                codec: codec_to_string(self.current_video_codec().await),
+                hardware: self.is_hardware_encoding().await,
+            })
+            .await;
+            self.publish_event(SystemEvent::StreamConfigApplied {
+                transition_id: None,
+                device: device
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                resolution: (resolution.width, resolution.height),
+                format: format.to_string(),
+                fps,
+            })
+            .await;
         }
     }
 
