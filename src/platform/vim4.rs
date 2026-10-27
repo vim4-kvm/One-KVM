@@ -345,12 +345,10 @@ impl OutputSettings {
         let mut filter =
             format!("videorate name=output_rate drop-only=true ! video/x-raw,framerate={fps}/1 ! ");
         if self.height > 0 && self.height < source.height {
-            // The vendor GE2D plugin ignores padded input VideoMeta. Standard
-            // scaling keeps native HDMI widths such as 3440 from shearing.
+            // The vendor plugin assumes tightly packed input. The common DMA
+            // scaler separates visible width from pitch for widths like 3440.
             let (scaler, format) = if source.width % 64 != 0 {
-                // Scale NV21 directly: converting the full DMA frame first
-                // adds an expensive CPU read before reducing its dimensions.
-                ("videoscale name=scaler n-threads=4", "NV21")
+                ("vim4scale name=scaler", "NV12")
             } else {
                 ("amlvconv name=scaler", "NV12")
             };
