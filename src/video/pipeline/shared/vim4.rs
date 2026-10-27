@@ -401,7 +401,7 @@ impl SharedVideoPipeline {
             .attach(&capture.0)
             .map_err(|e| error(&e))?;
         let mut check = Instant::now();
-        let mut rate_changes = 0;
+        let mut source_changes = crate::platform::vim4::SignalChange::default();
         let mut frames = 0;
         let mut stats_time = Instant::now();
         let mut idle_since = None;
@@ -429,7 +429,7 @@ impl SharedVideoPipeline {
                         .build(),
                 );
             }
-            if check.elapsed() >= Duration::from_millis(250) {
+            if check.elapsed() >= Duration::from_millis(100) {
                 check = Instant::now();
                 let current = self.config.blocking_read();
                 if current.bitrate_preset != config.bitrate_preset
@@ -442,12 +442,7 @@ impl SharedVideoPipeline {
                     break;
                 }
                 let signal = crate::platform::vim4::signal();
-                rate_changes = if signal != Some(source) {
-                    rate_changes + 1
-                } else {
-                    0
-                };
-                if rate_changes >= 3 {
+                if source_changes.observe(source, signal) {
                     break;
                 }
             }
@@ -456,6 +451,13 @@ impl SharedVideoPipeline {
                     last_frame_ms = last_frame.elapsed().as_millis() as u64,
                     signal = ?crate::platform::vim4::signal(),
                     pipeline_state = ?capture.0.state(gst::ClockTime::ZERO), "VIM4 capture bus stop");
+                // A source transition is an expected rebuild. Do not add the
+                // hardware-error backoff after the old buffers have retired.
+                if crate::platform::vim4::signal() != Some(source)
+                    || native_hdr(config) != capture_hdr
+                {
+                    return Ok(());
+                }
                 return Err(AppError::VideoError(format!(
                     "Capture stopped: {:?}",
                     msg.view()

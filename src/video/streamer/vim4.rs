@@ -136,18 +136,13 @@ impl Streamer {
             let mut last_frame = std::time::Instant::now();
             let mut idle_since = None;
             let mut check = std::time::Instant::now();
-            let mut source_changes = 0;
+            let mut source_changes = crate::platform::vim4::SignalChange::default();
             let mut fps_since = std::time::Instant::now();
             let mut fps_frames = 0u32;
             while !self.direct_stop.load(Ordering::SeqCst) {
-                if check.elapsed() >= Duration::from_millis(250) {
+                if check.elapsed() >= Duration::from_millis(100) {
                     check = std::time::Instant::now();
-                    source_changes = if crate::platform::vim4::signal() != Some(source) {
-                        source_changes + 1
-                    } else {
-                        0
-                    };
-                    if source_changes >= 3 {
+                    if source_changes.observe(source, crate::platform::vim4::signal()) {
                         // Recompute size/rate limits: a smaller new input must never be upscaled.
                         return Ok(true);
                     }
@@ -165,9 +160,15 @@ impl Streamer {
                     if last_frame.elapsed() > Duration::from_secs(2) {
                         *self.state.blocking_write() = StreamerState::NoSignal;
                     }
+                    if last_frame.elapsed() > Duration::from_secs(3) {
+                        anyhow::bail!("HDMI JPEG capture stalled");
+                    }
                     if let Some(msg) = pipeline.bus().and_then(|bus| {
                         bus.pop_filtered(&[gst::MessageType::Error, gst::MessageType::Eos])
                     }) {
+                        if crate::platform::vim4::signal() != Some(source) {
+                            return Ok(true);
+                        }
                         anyhow::bail!("Capture stopped: {:?}", msg.view());
                     }
                     continue;

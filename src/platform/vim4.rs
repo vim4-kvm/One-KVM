@@ -443,7 +443,47 @@ pub fn signal() -> Option<(Resolution, u32)> {
             status.fps?.round() as u32,
         ));
     }
-    parse_capture_signal(&std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/info").ok()?)
+    if !vendor_signal_ready() {
+        return None;
+    }
+    let info = std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/info").ok()?;
+    vendor_signal_ready().then(|| parse_capture_signal(&info))?
+}
+
+// hw_info reports cached RX state, without register access. Bit 16 is
+// FSM_SIG_READY in hdmi_rx_repeater.h; timing values stay stale during loss.
+fn signal_locked(text: &str) -> bool {
+    u32::from_str_radix(text.trim(), 16).is_ok_and(|value| value & (1 << 16) != 0)
+}
+
+fn vendor_signal_ready() -> bool {
+    match std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/hw_info") {
+        Ok(text) => signal_locked(&text),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Confirm the same changed timing twice. A fleeting read or alternating modes
+/// must not tear down a healthy DMA pipeline; sustained loss must release it.
+#[derive(Default)]
+pub(crate) struct SignalChange {
+    candidate: Option<(Resolution, u32)>,
+    count: u8,
+}
+
+impl SignalChange {
+    pub fn observe(&mut self, current: (Resolution, u32), next: Option<(Resolution, u32)>) -> bool {
+        if next == Some(current) {
+            self.count = 0;
+            return false;
+        }
+        if next != self.candidate {
+            self.candidate = next;
+            self.count = 0;
+        }
+        self.count = self.count.saturating_add(1);
+        self.count >= 2
+    }
 }
 
 // Capture caps and encoder budgets follow the base timing during VRR. Actual
@@ -543,6 +583,36 @@ pub async fn configure_media_result(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stale_timings_do_not_establish_receiver_lock() {
+        for text in ["3b11", "0", "", "invalid"] {
+            assert!(!signal_locked(text));
+        }
+        assert!(signal_locked("13b11\n"));
+    }
+
+    #[test]
+    fn signal_change_confirms_geometry_or_loss_without_restarting_on_flapping() {
+        let current = (Resolution::new(3840, 2160), 60);
+        let next = (Resolution::new(3440, 1440), 60);
+        for target in [Some(next), None] {
+            let mut change = SignalChange::default();
+            assert!(!change.observe(current, target));
+            assert!(change.observe(current, target));
+        }
+        let mut change = SignalChange::default();
+        for target in [
+            Some(next),
+            None,
+            Some(next),
+            Some(current),
+            None,
+            Some(current),
+        ] {
+            assert!(!change.observe(current, target));
+        }
+    }
+
     #[test]
     fn shared_hdr_default_migrates_only_an_explicit_valid_setting() {
         for text in [
