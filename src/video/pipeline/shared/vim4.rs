@@ -130,7 +130,7 @@ fn hdr_description(
     let snapshot = vendor_capture(Some("1"), source, source_fps)?
         .replace("name=source", "name=snapshot_source");
     Ok(format!("{snapshot} ! {}fakesink sync=false async=false \
-        vfmcapsrc name=source ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! \
+        vfmcapsrc name=source ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! \
         videorate drop-only=true ! video/x-raw,framerate={fps}/1 ! \
         videoconvert n-threads=4 ! video/x-raw,format=P010_10LE ! {scaled}\
         vim4hevc10enc name=encoder bitrate={} framerate={fps} ! \
