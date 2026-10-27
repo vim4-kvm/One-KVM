@@ -119,31 +119,27 @@ fn hdr_description(
     source_fps: u32,
     fps: u32,
 ) -> Result<String> {
-    let scaled = if config.output.height > 0 && config.output.height < source.height {
-        let width = (u64::from(source.width) * u64::from(config.output.height)
-            / u64::from(source.height)) as u32
-            & !1;
-        // GE2D's existing NV12 scaler would discard HDR precision.
-        format!(
-            "videoscale name=scaler n-threads=4 ! video/x-raw,width={},height={} ! ",
-            width.max(2),
-            config.output.height
-        )
+    let capture = if config.output.height > 0 && config.output.height < source.height {
+        // Fuse ten-bit scaling into the Mali unpacker. A system-memory scaler
+        // also forces the SDK's slow CPU upload instead of its DMA input path.
+        format!("vfmcapsrc name=source height={}", config.output.height)
     } else {
-        String::new()
+        "vfmcapsrc name=source".to_owned()
     };
     // JPEG snapshots continue to use the independent SDR capture. They must
     // never reinterpret raw PQ samples as an ordinary eight-bit JPEG.
     let snapshot = vendor_capture(Some("1"), source, source_fps)?
         .replace("name=source", "name=snapshot_source");
-    Ok(format!("{snapshot} ! {}fakesink sync=false async=false \
-        vfmcapsrc name=source ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! \
-        videorate drop-only=true ! video/x-raw,framerate={fps}/1 ! \
-        videoconvert n-threads=4 ! video/x-raw,format=P010_10LE ! {scaled}\
+    Ok(format!(
+        "{snapshot} ! {}fakesink sync=false async=false \
+        {capture} ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! \
+        videorate drop-only=true ! video/x-raw,format=P010_10LE,framerate={fps}/1 ! \
         vim4hevc10enc name=encoder bitrate={} framerate={fps} ! \
         h265parse config-interval=-1 ! video/x-h265,stream-format=byte-stream,alignment=au,profile=main-10 ! \
         appsink name=frames sync=false max-buffers=2",
-        crate::video::snapshot::vim4::BRANCH, config.bitrate_kbps().clamp(1000, 60000)))
+        crate::video::snapshot::vim4::BRANCH,
+        config.bitrate_kbps().clamp(1000, 60000)
+    ))
 }
 
 fn vendor_capture(secondary: Option<&str>, source: Resolution, fps: u32) -> Result<String> {

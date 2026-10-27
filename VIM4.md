@@ -144,6 +144,9 @@ MJPEG 使用 `vim4jpegenc` 硬件编码，`quality` 1–100 在重启与调整�
 远程画面的「HDR 转 SDR」由管理器「视频输入」统一设置，默认开启（`output.hdr=false`）。关闭后
 H.265 在实际输入为PQ时使用VDIN0原生十位采集、P010和独立Main10编码器，保留PQ/BT.2020；
 SDR输入继续走VDIN1八位DMA路径，不因保留HDR的偏好而增加P010转换。
+HDR降分辨率要求配套`vfmcapsrc height`：由Mali完成十位解包和双线性缩放，
+P010 DMA直接送Main10编码器，避免CPU `videoscale`及SDK内存上传。
+原尺寸仍用原来的GPU转换；SDR缩放仍用GE2D。
 源端EOTF变化会重建采集管线，保持已有Main10接收连接和用户偏好。
 H.264、JPEG和截图继续使用VDIN1的SDR。HDMI OUT的HDR偏好独立控制。
 该功能仅在5.15原生双路径及匹配采集驱动、插件和私有编码库可用时允许开启；
