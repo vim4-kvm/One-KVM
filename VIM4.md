@@ -22,7 +22,7 @@
 | ISO/IMG | 板级 `mass_storage.disk0/lun.0`，单 LUN；共享 USB 端点预算 |
 | USB 麦克风 | 板级 UAC2，48 kHz 双声道；浏览器经认证 WebSocket 发送 Opus/PCM |
 | USB 网卡 | NCM / ECM / RNDIS，独立 NetworkManager DHCP/NAT 连接 |
-| HDR / EDID | 原生视频菜单和设置页调用共享板级助手，与 vim4-manager 共用 HDR 曲线 |
+| HDR / EDID | HDR开关与曲线由vim4-manager统一设置；原生视频菜单和设置页保留EDID选择 |
 
 5.15 原生 HDR 双路径在驱动参数 `vdin0_native_hdr=Y` 时，由公共启动器自动设置
 `VIM4_SECONDARY_HDMI_CAPTURE=1`，H.264/H.265 共享管线改用 `/dev/video71`
@@ -141,7 +141,7 @@ MJPEG 使用 `vim4jpegenc` 硬件编码，`quality` 1–100 在重启与调整�
 缺少插件时保留最高 10 fps 的软件回退。实际帧率受 JPEG 编码、缩放、网络和浏览器
 限制，状态显示实际编码输出帧率，不将设定的上限当作实测值。
 
-远程画面提供「HDR 转 SDR」选择，默认开启（`output.hdr=false`）。关闭后
+远程画面的「HDR 转 SDR」由管理器「视频输入」统一设置，默认开启（`output.hdr=false`）。关闭后
 H.265 在实际输入为PQ时使用VDIN0原生十位采集、P010和独立Main10编码器，保留PQ/BT.2020；
 SDR输入继续走VDIN1八位DMA路径，不因保留HDR的偏好而增加P010转换。
 源端EOTF变化会重建采集管线，保持已有Main10接收连接和用户偏好。
@@ -164,7 +164,8 @@ HDR缩放在CPU保留十位精度，性能与SDR的GE2D路径不同。
 应用在GPU/VDIN1分配前预留厂商编码器连续内存，首帧后由SDK持有；
 SDR编码和HDR截图分支分别申请六/五个VDIN1缓冲，防止源端切换后CMA碎片或不足。
 管理器「视频输入 → HDR 转 SDR」保存 `/etc/default/vim4-kvm-hdr` 中的
-`HDR_SDR_ENABLED=1|0`；One-KVM的同名开关同步这份全局默认值，曲线保存不会覆盖它。
+`HDR_SDR_ENABLED=1|0`；One-KVM不再提供HDR开关、SDR白点和峰值调节入口。
+保存输出尺寸/帧率不改HDR偏好；API省略`output.hdr`时保留现值，也不写全局默认。
 旧系统缺少此项时沿用应用偏好，在管理器首次保存开关后以全局值为准；不支持Main10的内核保持SDR。
 H.264/H.265 支持 1/4/8/12 Mbps 四个快捷档和 1000–60000 kbps 自定义码率，
 越界请求返回错误。部署时须同时升级支持 60000 kbps 的 vim4-amlvenc 插件；

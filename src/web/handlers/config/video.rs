@@ -44,11 +44,12 @@ pub async fn update_video_config(
     let old_video_config = state.config.get().video.clone();
 
     #[cfg(feature = "vim4")]
-    if let Some(output) = req
+    if let Some(hdr) = req
         .output
+        .and_then(|output| output.hdr)
         .filter(|_| crate::platform::vim4::global_hdr_default().is_some())
     {
-        let enabled = if output.hdr { "false" } else { "true" };
+        let enabled = if hdr { "false" } else { "true" };
         crate::web::handlers::vim4::run_helper(
             "/usr/libexec/vim4-manager-helper",
             &["hdr-mapping".into(), enabled.into()],

@@ -10,20 +10,17 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
-interface OutputSettings { height: number; fps: number; hdr?: boolean }
-interface BoardStatus { edid: string; hdr_eotf: string; white: number; peak: number; hdr_remote_available: boolean }
+interface OutputSettings { height: number; fps: number }
+interface BoardStatus { edid: string }
 const props = defineProps<{ outputOnly?: boolean }>()
 const { t } = useI18n()
 const store = useConfigStore()
 const height = ref('0')
 const fps = ref('0')
-const dynamicRange = ref('sdr')
 const quality = ref(80)
 const bitrate = ref(4000)
 const board = ref<BoardStatus | null>(null)
 const edid = ref('VIM4-4K60')
-const white = ref(203)
-const peak = ref(1000)
 const ready = ref(false)
 const busy = ref(false)
 const heights = computed(() => [...new Set([720, 900, 1080, 1440, 2160, Number(height.value)])].filter(v => v > 0).sort((a, b) => a - b))
@@ -39,12 +36,9 @@ async function load() {
     ])
     height.value = String(video.output.height)
     fps.value = String(video.output.fps)
-    dynamicRange.value = video.output.hdr ? 'hdr' : 'sdr'
     quality.value = video.quality
     board.value = status
     edid.value = status.edid
-    white.value = status.white
-    peak.value = status.peak
     const preset = store.stream?.bitrate_preset
     bitrate.value = preset?.type === 'Custom' ? preset.value : ({ Speed: 1000, Balanced: 4000, Quality: 8000 }[preset?.type ?? 'Balanced'])
     const runtime = (await uuRemoteApi.getStatus()).video
@@ -57,21 +51,21 @@ async function load() {
   } catch { /* request displays the error and leaves controls disabled */ }
 }
 
-async function apply(action: 'output' | 'bitrate' | 'edid' | 'hdr') {
+async function apply(action: 'output' | 'bitrate' | 'edid') {
   busy.value = true
   try {
     if (action === 'output') {
       await request('/config/video', { method: 'PATCH', body: JSON.stringify({
-        output: { height: Number(height.value), fps: Number(fps.value), hdr: dynamicRange.value === 'hdr' }, quality: Number(quality.value),
+        output: { height: Number(height.value), fps: Number(fps.value) }, quality: Number(quality.value),
       }) })
       await store.refreshVideo()
     } else if (action === 'bitrate') {
       await streamApi.setBitratePreset({ type: 'Custom', value: Number(bitrate.value) })
       await store.refreshStream()
     } else {
-      board.value = await request<BoardStatus>('/vim4/video', { method: 'POST', body: JSON.stringify(
-        action === 'edid' ? { action, preset: edid.value } : { action, white: Number(white.value), peak: Number(peak.value) },
-      ) })
+      board.value = await request<BoardStatus>('/vim4/video', { method: 'POST',
+        body: JSON.stringify({ action, preset: edid.value }),
+      })
     }
     toast.success(t('vim4Video.applied'))
   } catch { /* request displays the error */ }
@@ -109,15 +103,6 @@ onMounted(load)
           <Input id="vim4-quality" v-model="quality" type="number" min="1" max="100" required />
         </template>
         <p class="text-muted-foreground">{{ t('vim4Video.outputHint') }}</p>
-        <Label>{{ t('vim4Video.dynamicRange') }}</Label>
-        <Select v-model="dynamicRange" :disabled="!ready || busy">
-          <SelectTrigger class="w-full"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="sdr">{{ t('vim4Video.sdrOutput') }}</SelectItem>
-            <SelectItem value="hdr" :disabled="!board?.hdr_remote_available">{{ t('vim4Video.hdrOutput') }}</SelectItem>
-          </SelectContent>
-        </Select>
-        <p class="text-muted-foreground">{{ t('vim4Video.dynamicRangeHint') }}</p>
         <Button type="submit" size="sm" class="w-full">{{ t('common.apply') }}</Button>
       </form>
       <form class="space-y-2" @submit.prevent="apply('bitrate')">
@@ -138,15 +123,6 @@ onMounted(load)
           </SelectContent>
         </Select>
         <p class="text-muted-foreground">{{ t('vim4Video.edidHint') }}</p>
-        <Button type="submit" size="sm" variant="outline" class="w-full">{{ t('common.apply') }}</Button>
-      </form>
-      <form v-if="!props.outputOnly && dynamicRange === 'sdr'" class="space-y-2" @submit.prevent="apply('hdr')">
-        <h5 class="font-medium">HDR → SDR · {{ board?.hdr_eotf }}</h5>
-        <Label for="vim4-white">{{ t('vim4Video.white') }}</Label>
-        <Input id="vim4-white" v-model="white" type="number" min="160" max="1000" required />
-        <Label for="vim4-peak">{{ t('vim4Video.peak') }}</Label>
-        <Input id="vim4-peak" v-model="peak" type="number" :min="Number(white) + 1" max="10000" required />
-        <p class="text-muted-foreground">{{ t('vim4Video.hdrHint') }}</p>
         <Button type="submit" size="sm" variant="outline" class="w-full">{{ t('common.apply') }}</Button>
       </form>
     </fieldset>

@@ -47,13 +47,23 @@ impl AuthConfigUpdate {
 pub struct VideoConfigUpdate {
     #[cfg(feature = "vim4")]
     #[typeshare(skip)]
-    pub output: Option<crate::platform::vim4::OutputSettings>,
+    pub output: Option<VideoOutputUpdate>,
     pub device: Option<String>,
     pub format: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub fps: Option<u32>,
     pub quality: Option<u32>,
+}
+
+/// Output limits may change independently of the manager's HDR default.
+#[cfg(feature = "vim4")]
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VideoOutputUpdate {
+    pub height: u32,
+    pub fps: u32,
+    pub hdr: Option<bool>,
 }
 
 impl VideoConfigUpdate {
@@ -76,8 +86,13 @@ impl VideoConfigUpdate {
     pub fn validate(&self) -> crate::error::Result<()> {
         #[cfg(feature = "vim4")]
         if let Some(output) = self.output {
-            output.validate()?;
-            if output.hdr && !crate::platform::vim4::hdr_remote_available() {
+            crate::platform::vim4::OutputSettings {
+                height: output.height,
+                fps: output.fps,
+                hdr: output.hdr.unwrap_or(false),
+            }
+            .validate()?;
+            if output.hdr == Some(true) && !crate::platform::vim4::hdr_remote_available() {
                 return Err(AppError::BadRequest(
                     "Remote HDR requires the native HDR capture and Main10 encoder runtime".into(),
                 ));
@@ -115,7 +130,11 @@ impl VideoConfigUpdate {
     pub fn apply_to(&self, config: &mut VideoConfig) {
         #[cfg(feature = "vim4")]
         if let Some(output) = self.output {
-            config.output = output;
+            config.output.height = output.height;
+            config.output.fps = output.fps;
+            if let Some(hdr) = output.hdr {
+                config.output.hdr = hdr;
+            }
         }
         if let Some(ref device) = self.device {
             config.device = Some(device.clone());
@@ -141,6 +160,30 @@ impl VideoConfigUpdate {
 #[cfg(test)]
 mod video_config_update_tests {
     use super::VideoConfigUpdate;
+
+    #[cfg(feature = "vim4")]
+    #[test]
+    fn saving_output_limits_preserves_hdr_unless_explicitly_requested() {
+        for original in [false, true] {
+            for requested in [None, Some(false), Some(true)] {
+                let mut output = serde_json::json!({"height": 1080, "fps": 30});
+                if let Some(hdr) = requested {
+                    output["hdr"] = hdr.into();
+                }
+                let update: VideoConfigUpdate =
+                    serde_json::from_value(serde_json::json!({"output": output, "quality": 70}))
+                        .unwrap();
+                let mut config = crate::config::VideoConfig::default();
+                config.output.hdr = original;
+                update.apply_to(&mut config);
+                assert_eq!(config.output.hdr, requested.unwrap_or(original));
+                assert_eq!(
+                    (config.output.height, config.output.fps, config.quality),
+                    (1080, 30, 70)
+                );
+            }
+        }
+    }
 
     #[test]
     fn source_following_parameters_are_silently_discarded() {

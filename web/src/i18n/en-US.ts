@@ -57,16 +57,11 @@ export default {
     network: 'USB networking uses a dedicated NetworkManager shared connection with DHCP/NAT; Ethernet bridging is unavailable. The USB microphone uses 48 kHz stereo; browser capture requires HTTPS or a secure context.',
   },
   vim4Video: {
-    dynamicRange: 'Remote video · HDR to SDR',
-    sdrOutput: 'Convert: compatible SDR', hdrOutput: 'Preserve HDR10 (H.265)',
-    dynamicRangeHint: 'HDR requires a Main10 receiver. H.264, JPEG and snapshots remain SDR. HDMI OUT is controlled separately.',
     title: 'VIM4 video settings', applied: 'Settings applied',
     outputSize: 'Maximum output resolution', outputFps: 'Maximum output frame rate', source: 'Follow input',
     jpegQuality: 'MJPEG quality (1–100)', bitrate: 'Custom bitrate (1000–60000 kbps; higher rates require more bandwidth)',
     outputHint: 'Preserves aspect ratio without upscaling. MJPEG frame rate depends on resolution, JPEG quality and network bandwidth.',
     edidHint: 'Changing display capabilities makes the host detect the display again and may briefly interrupt video.',
-    white: 'SDR white point (nits)', peak: 'HDR peak (nits)',
-    hdrHint: 'Shares the manager curve and applies immediately when saved. SDR input is unaffected.',
   },
   hidGuide: {
     missingDevice: 'The previous device {device} is unavailable. Check the current selection.',
