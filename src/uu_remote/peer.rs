@@ -374,6 +374,7 @@ impl DesktopCoordinator {
             return Err("Connection closed".into());
         }
         if *next.desktop.borrow() {
+            start_desktop_streams(next.clone());
             return Ok(());
         }
         if next.media.get().is_none() {
@@ -636,10 +637,14 @@ fn start_desktop_streams(shared: Arc<Shared>) {
             biased;
             _ = running.closed.cancelled() => {},
             _ = async {
-                tokio::join!(
-                    stream_video(pc.clone(), video, running.clone(), running.codec),
-                    stream_audio(pc, audio, running.deps.audio.clone())
-                );
+                let video = stream_video(pc.clone(), video, running.clone(), running.codec);
+                tokio::pin!(video);
+                // A video failure must finish this task so capture_desktop can retry.
+                // Audio can end independently without stopping healthy video.
+                tokio::select! {
+                    _ = &mut video => {},
+                    _ = stream_audio(pc.clone(), audio, running.deps.audio.clone()) => video.await,
+                }
             } => {},
         }
     }));

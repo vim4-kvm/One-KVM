@@ -562,6 +562,55 @@ async fn live_uu_resolution_with_saved_hdr_on_an_sdr_viewer() {
 }
 
 #[tokio::test]
+async fn capture_desktop_restarts_an_ended_task_without_replacing_the_tool_peer() {
+    // Switching codec tries to open an unavailable capture device. Video returns
+    // early while the audio subscriber would otherwise continue waiting forever.
+    let output = crate::webrtc::WebRtcStreamer::with_config(crate::webrtc::WebRtcStreamerConfig {
+        video_codec: VideoCodecType::H265,
+        ..Default::default()
+    });
+    let directory = tempfile::tempdir().unwrap();
+    output
+        .set_capture_device(directory.path().join("missing-video-device"), 80, None)
+        .await;
+    let video =
+        VideoStreamManager::with_webrtc_streamer(crate::video::streamer::Streamer::new(), output);
+    let mut viewer = Viewer::connect_configured(
+        Arc::new(DesktopCoordinator::default()),
+        8,
+        Some(video),
+        false,
+        ViewerCapabilities::default(),
+    )
+    .await;
+    viewer.capture().await;
+    viewer.terminal_list(51).await;
+    let shared = viewer.host.shared.clone();
+    let ended_id = shared.desktop_task.lock().as_ref().unwrap().id();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !shared.desktop_task.lock().as_ref().unwrap().is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("audio masked the failed video task");
+    viewer.capture().await;
+    viewer.terminal_list(52).await;
+    let restarted_id = shared.desktop_task.lock().as_ref().unwrap().id();
+    assert_ne!(
+        restarted_id, ended_id,
+        "capture_desktop left the video task stopped"
+    );
+    assert_eq!(viewer.pc.connection_state(), PcState::Connected);
+    assert_eq!(viewer.host.pc.get_senders().await.len(), 2);
+    assert_eq!(
+        shared.deps.video.uu_negotiated_codec().await,
+        Some(shared.codec)
+    );
+    viewer.close().await;
+}
+
+#[tokio::test]
 async fn tool_promotion_is_idempotent_and_keeps_terminal_and_video_on_the_same_peer() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let owner = Arc::new(DesktopCoordinator::default());
