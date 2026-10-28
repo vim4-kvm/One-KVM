@@ -240,6 +240,11 @@ VIM4 构建还启用私有 SRTP 的 `openssl-hmac`，以已有 OpenSSL 计算 HM
 保持原样；实现及库测试见 [SRTP 后端](libs/srtp/VIM4.md)，CPU 回放方法见
 [RTP 基准](test/rtp-bench/README.md)。该特性要求 OpenSSL 提供低层 SHA1 API，
 正式构建使用匹配的 vendored OpenSSL。
+Linux VIM4 另提供默认关闭的 `ONEKVM_UDP_BATCH=1` 实验开关，在同一视频帧内
+批量发送已加密 UDP 包，帧尾立即交付。它只覆盖本应用的 H.264/H.265 WebRTC
+发送轨道，不能外推到原生 UU、SRT/RTMP 或其他 KVM；音频与反馈任务仍即时发送。
+范围、取消与背压语义见 [UDP 批处理](libs/webrtc-util/VIM4.md)，验收须同时报告
+完整发送路径和浏览器尾延迟，不能仅根据减少系统调用就启用。
 VIM4 H.264 使用 `gop=0 intra-refresh-rows=3`，H.265 使用
 `gop=0 intra-refresh-rows=1`，分别每帧刷新三行 MB、一行 CTU，避免周期
 整幅 I 帧造成编码和发送突发。保留厂商 QP 范围；静态画面也可能接近目标码率。

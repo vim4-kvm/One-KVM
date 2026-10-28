@@ -141,6 +141,8 @@ impl UniversalSession {
             bitrate_kbps: config.bitrate_preset.bitrate_kbps(),
             fps: config.fps,
             sdp_fmtp_line: config.video_sdp_fmtp_line.clone(),
+            batch_udp: cfg!(feature = "vim4")
+                && std::env::var("ONEKVM_UDP_BATCH").as_deref() == Ok("1"),
         };
         let video_track = Arc::new(UniversalVideoTrack::new(track_config));
 

@@ -115,6 +115,41 @@ unavailable there. Record host CPU/frequency/load separately for comparisons.
 Run performance cases alone under the workspace heavy lock. A board replay
 needs coordination even though it does not open codec devices: it consumes CPU.
 
+## UDP batching comparison
+
+The default `vim4` benchmark feature includes the optional
+[task-scoped UDP batching implementation](../../libs/webrtc-util/VIM4.md).
+Use the same executable, fixtures and cipher profiles for both arms; the
+environment switch selects only whether the production video track enters that
+scope. An unset variable is the baseline (the benchmark checks presence, so do
+not set it to `0`). Reports include `udp_batch_sender` and the UDP source hashes.
+
+```sh
+env -u RTP_BENCH_UDP_BATCH test/rtp-bench/target/release/onekvm-rtp-bench \
+  h264.frames.bin h265.frames.bin 1 100 baseline.json peer_udp_buffered
+RTP_BENCH_UDP_BATCH=1 test/rtp-bench/target/release/onekvm-rtp-bench \
+  h264.frames.bin h265.frames.bin 1 100 batch.json peer_udp_buffered
+env -u RTP_BENCH_UDP_BATCH test/rtp-bench/target/release/onekvm-rtp-bench \
+  h264.frames.bin h265.frames.bin 1 100 baseline-repeat.json peer_udp_buffered
+```
+
+Repeat the complete A/B/A sequence under the same affinity and load. Require
+successful authentication and exact packet/frame/duplicate counts before using
+sender timings. A receiver whose actual socket buffer is capped by the host may
+overflow during burst tests; retain that failed report, and use a separately
+documented private receiver buffer for a new diagnostic. Do not change global
+socket defaults to make the test pass.
+
+The timer includes packetization, encryption, batch assembly and the final
+flush. It does not start at the first `sendmmsg`, which would hide the cost of
+building that batch. Loopback peers share CPU/runtime scheduling with the sender:
+median gains do not excuse worse tails or establish browser latency. Measure
+both ends of the real video path before changing the application default.
+
+`RTP_BENCH_UNCONSTRAINED=1` separately removes Tokio's cooperative budget around
+the timed frame future for a scheduler diagnostic. It is not a production
+option. Leave it unset in UDP comparisons; reports record `unconstrained_sender`.
+
 ## Isolated OpenSSL HMAC experiment
 
 This section preserves the original experiment against the unmodified 0.17.2

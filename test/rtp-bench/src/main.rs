@@ -34,7 +34,9 @@ use webrtc::rtp_transceiver::rtp_codec::{
 use webrtc::srtp::{context::Context, protection_profile::ProtectionProfile};
 use webrtc::util::{Marshal, MarshalSize};
 
-// These three modules are the production implementations, not benchmark copies.
+// These modules are the production implementations, not benchmark copies.
+#[path = "../../../src/webrtc/color_space.rs"]
+pub mod color_space;
 #[path = "../../../src/video/codec/h264_bitstream.rs"]
 pub mod h264_bitstream;
 #[path = "../../../src/webrtc/h265_payloader.rs"]
@@ -490,6 +492,7 @@ async fn full_stack(
         })
     }));
     let track = Arc::new(UniversalVideoTrack::new(UniversalVideoTrackConfig {
+        batch_udp: std::env::var_os("RTP_BENCH_UDP_BATCH").is_some(),
         codec: fixtures[0].codec,
         fps: 60,
         ..Default::default()
@@ -507,7 +510,7 @@ async fn full_stack(
         for _ in 0..30 {
             setup_frames += 1;
             track
-                .write_frame_bytes_at(fixtures[0].data.clone(), false, Some(setup_frames * 17))
+                .write_frame_bytes_at(fixtures[0].data.clone(), false, Some(setup_frames * 17), None)
                 .await?;
             tokio::time::sleep(Duration::from_millis(20)).await;
             if counts.markers.load(Ordering::Relaxed) > 0 {
@@ -530,15 +533,21 @@ async fn full_stack(
         let mut frame_index = setup_frames;
         let mut expected_packets = 0u64;
         let mut expected_frames = 0u64;
+        let unconstrained = std::env::var_os("RTP_BENCH_UNCONSTRAINED").is_some();
         for round in 0..rounds {
             for f in fixtures {
                 let mut raw = Vec::new();
                 for iteration in 0..iterations + 10 {
                     frame_index += 1;
                     let started = Instant::now();
-                    track
-                        .write_frame_bytes_at(f.data.clone(), false, Some(frame_index * 17))
-                        .await?;
+                    let write = track.write_frame_bytes_at(f.data.clone(), false, Some(frame_index * 17), None);
+                    // Diagnostic upper bound only: production must retain a bounded
+                    // scheduling budget for audio, feedback and data channels.
+                    if unconstrained {
+                        tokio::task::unconstrained(write).await?;
+                    } else {
+                        write.await?;
+                    }
                     let elapsed = started.elapsed().as_secs_f64() * 1e6;
                     expected_packets += f.packets as u64;
                     expected_frames += 1;
@@ -780,6 +789,18 @@ fn metadata() -> Value {
             &include_bytes!("../../../src/webrtc/video_track.rs")[..],
         ),
         (
+            "src/webrtc/color_space.rs",
+            &include_bytes!("../../../src/webrtc/color_space.rs")[..],
+        ),
+        (
+            "libs/webrtc-util/src/conn/udp_batch.rs",
+            &include_bytes!("../../../libs/webrtc-util/src/conn/udp_batch.rs")[..],
+        ),
+        (
+            "libs/webrtc-util/src/conn/conn_udp.rs",
+            &include_bytes!("../../../libs/webrtc-util/src/conn/conn_udp.rs")[..],
+        ),
+        (
             "src/webrtc/h265_payloader.rs",
             &include_bytes!("../../../src/webrtc/h265_payloader.rs")[..],
         ),
@@ -811,7 +832,9 @@ fn metadata() -> Value {
     ] {
         files.insert(name.into(), json!(digest(bytes)));
     }
-    json!({"checkout_revision_at_runtime":command(&["git","rev-parse","HEAD"]),"checkout_status_at_runtime":command(&["git","status","--porcelain"]),"uname":command(&["uname","-a"]),"rustc":command(&["rustc","-Vv"]),"arch":std::env::consts::ARCH,"target_features":crypto_features(),"openssl_hmac_feature":cfg!(feature="openssl-hmac"),"source_sha256":files,"build_manifest_sha256":digest(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),"/Cargo.toml"))),"build_lock_sha256":digest(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),"/Cargo.lock"))),"executable_sha256":std::fs::read("/proc/self/exe").map(|b|digest(&b)).ok(),"build":"release opt3 lto codegen-units1; webrtc/vendored-openssl; see cargo-features.txt for actual crypto backend"})
+    let mut result = json!({"checkout_revision_at_runtime":command(&["git","rev-parse","HEAD"]),"checkout_status_at_runtime":command(&["git","status","--porcelain"]),"uname":command(&["uname","-a"]),"rustc":command(&["rustc","-Vv"]),"arch":std::env::consts::ARCH,"target_features":crypto_features(),"openssl_hmac_feature":cfg!(feature="openssl-hmac"),"unconstrained_sender":std::env::var_os("RTP_BENCH_UNCONSTRAINED").is_some(),"source_sha256":files,"build_manifest_sha256":digest(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),"/Cargo.toml"))),"build_lock_sha256":digest(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),"/Cargo.lock"))),"executable_sha256":std::fs::read("/proc/self/exe").map(|b|digest(&b)).ok(),"build":"release opt3 lto codegen-units1; webrtc/vendored-openssl; see cargo-features.txt for actual crypto backend"});
+    result["udp_batch_sender"] = json!(std::env::var_os("RTP_BENCH_UDP_BATCH").is_some());
+    result
 }
 
 fn crypto_features() -> Value {
@@ -876,6 +899,7 @@ async fn chrome(args: &[String]) -> Result<()> {
     ensure!(!clip.is_empty(), "empty clip");
     let peer = make_peer_options(codec, profiles, None, true, server_role, false, None).await?;
     let track = Arc::new(UniversalVideoTrack::new(UniversalVideoTrackConfig {
+        batch_udp: std::env::var_os("RTP_BENCH_UDP_BATCH").is_some(),
         codec,
         fps: 60,
         ..Default::default()
@@ -917,7 +941,7 @@ async fn chrome(args: &[String]) -> Result<()> {
         total_bytes += data.len();
         let send = Instant::now();
         track
-            .write_frame_bytes_at(data, false, Some(frames as i64 * 1000 / 60))
+            .write_frame_bytes_at(data, false, Some(frames as i64 * 1000 / 60), None)
             .await?;
         sends.push(send.elapsed().as_secs_f64() * 1e6);
         frames += 1;

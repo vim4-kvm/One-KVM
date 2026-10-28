@@ -88,6 +88,7 @@ pub struct UniversalVideoTrackConfig {
     pub bitrate_kbps: u32,
     pub fps: u32,
     pub sdp_fmtp_line: Option<String>,
+    pub batch_udp: bool,
 }
 
 impl Default for UniversalVideoTrackConfig {
@@ -100,6 +101,7 @@ impl Default for UniversalVideoTrackConfig {
             bitrate_kbps: 8000,
             fps: 30,
             sdp_fmtp_line: None,
+            batch_udp: false,
         }
     }
 }
@@ -300,12 +302,23 @@ impl UniversalVideoTrack {
             return Ok(());
         }
 
-        match self.codec {
-            VideoCodec::H264 => self.write_h264_frame(data, pts_ms).await,
-            VideoCodec::H265 => self.send_h265_rtp(data, pts_ms, color_space).await,
-            VideoCodec::VP8 => self.write_vp8_frame(data, is_keyframe).await,
-            VideoCodec::VP9 => self.write_vp9_frame(data, is_keyframe).await,
+        let write = async {
+            match self.codec {
+                VideoCodec::H264 => self.write_h264_frame(data, pts_ms).await,
+                VideoCodec::H265 => self.send_h265_rtp(data, pts_ms, color_space).await,
+                VideoCodec::VP8 => self.write_vp8_frame(data, is_keyframe).await,
+                VideoCodec::VP9 => self.write_vp9_frame(data, is_keyframe).await,
+            }
+        };
+        #[cfg(all(feature = "vim4", target_os = "linux"))]
+        if self.config.batch_udp && matches!(self.codec, VideoCodec::H264 | VideoCodec::H265) {
+            return webrtc::util::conn::udp_batch::send_frame(write)
+                .await
+                .map_err(|error| {
+                    AppError::WebRtcError(format!("Video UDP batch failed: {error}"))
+                })?;
         }
+        write.await
     }
 
     pub async fn write_frame(&self, data: &[u8], is_keyframe: bool) -> Result<()> {

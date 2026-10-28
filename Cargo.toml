@@ -11,7 +11,7 @@ categories = ["embedded", "network-programming"]
 
 [features]
 default = ["desktop"]
-vim4 = ["desktop", "hwcodec/vim4", "libyuv/vim4", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:gstreamer-allocators", "dep:srtp", "srtp/openssl-hmac"]
+vim4 = ["desktop", "hwcodec/vim4", "libyuv/vim4", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:gstreamer-allocators", "dep:srtp", "srtp/openssl-hmac", "dep:webrtc-util"]
 desktop = [
     "dep:tokio",
     "dep:tokio-util",
@@ -158,6 +158,7 @@ arc-swap = { version = "1.8", optional = true }
 webrtc = { version = "0.17", features = ["vendored-openssl"], optional = true }
 # Enable the authentication backend through `vim4`, preserving other builds.
 srtp = { package = "webrtc-srtp", version = "=0.17.2", optional = true }
+webrtc-util = { version = "=0.17.2", features = ["udp-batch"], optional = true }
 rtp = { version = "0.17", optional = true }
 rtsp-types = { version = "0.1", optional = true }
 sdp-types = { version = "0.1", optional = true }
@@ -226,6 +227,7 @@ required-features = ["vim4"]
 [patch.crates-io]
 dtls = { path = "libs/dtls" }
 webrtc-srtp = { path = "libs/srtp" }
+webrtc-util = { path = "libs/webrtc-util" }
 
 [profile.release]
 opt-level = 3
