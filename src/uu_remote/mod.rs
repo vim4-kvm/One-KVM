@@ -14,6 +14,7 @@ mod peer;
 mod signaling;
 mod status;
 pub mod terminal;
+mod transport;
 mod video_metrics;
 mod wire;
 

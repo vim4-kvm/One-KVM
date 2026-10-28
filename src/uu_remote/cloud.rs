@@ -195,7 +195,7 @@ impl CloudClient {
     }
 
     pub fn for_system(creds: Credentials, system: UuRemoteSystem) -> Self {
-        let http = reqwest::Client::builder()
+        let http = super::transport::http_client_builder()
             .timeout(Duration::from_secs(12))
             .build()
             .expect("failed to build UU HTTP client");
@@ -323,6 +323,7 @@ impl CloudClient {
         body: Option<&Value>,
         timeout: Duration,
     ) -> Result<(u16, Value), String> {
+        let started = tokio::time::Instant::now();
         let body = body
             .map(serde_json::to_string)
             .transpose()
@@ -339,9 +340,13 @@ impl CloudClient {
         let response = request
             .send()
             .await
-            .map_err(|e| format!("UU request {path} failed: {}", e.without_url()))?;
+            .map_err(|e| request_error(path, "send", started, None, &e))?;
         let status = response.status().as_u16();
-        Ok((status, response.json().await.unwrap_or(Value::Null)))
+        let body = response
+            .json()
+            .await
+            .map_err(|e| request_error(path, "response", started, Some(status), &e))?;
+        Ok((status, body))
     }
 
     pub async fn rename_device(&self, name: &str) -> Result<(), String> {
@@ -380,6 +385,31 @@ impl CloudClient {
             "create room failed: http {status} code {code}"
         )))
     }
+}
+
+/// Keep transport diagnostics useful without displaying URLs or server response content.
+fn request_error(
+    path: &str,
+    phase: &str,
+    started: tokio::time::Instant,
+    status: Option<u16>,
+    error: &reqwest::Error,
+) -> String {
+    let kind = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_decode() {
+        "decode"
+    } else if error.is_body() {
+        "body"
+    } else {
+        "request"
+    };
+    format!(
+        "UU request {path} failed: phase={phase} kind={kind} elapsed_ms={} http_status={status:?}",
+        started.elapsed().as_millis()
+    )
 }
 
 /// Successful API body `data`, else an error naming the request and API code only.
@@ -490,6 +520,52 @@ pub fn device_summary(creds: &Credentials, screen: (u32, u32), profile: &UuRemot
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn login_connection_failure_is_distinct_from_qr_expiry() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client =
+            CloudClient::at_test_server(format!("http://{}", listener.local_addr().unwrap()));
+        drop(listener);
+        let error = client
+            .login_post("/api/v1/qrcode/login/status", None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("kind=connect"), "{error}");
+        assert!(error.contains("phase=send"), "{error}");
+        assert!(!error.contains("expired"));
+        assert!(!error.contains("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn malformed_login_response_reports_decode_failure_without_content() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client =
+            CloudClient::at_test_server(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            let body = "fixture-response-secret";
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let result = client.login_post("/api/v1/qrcode/login/status", None).await;
+        server.await.unwrap();
+        let error = result.expect_err("malformed JSON must not become a successful null response");
+        assert!(error.contains("decode"), "{error}");
+        assert!(error.contains("200"), "{error}");
+        assert!(!error.contains("fixture-response-secret"));
+    }
 
     #[test]
     fn signature_covers_only_x_param_headers_in_sorted_order() {

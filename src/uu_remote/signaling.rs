@@ -188,9 +188,7 @@ impl SignalingClient {
                 .parse()
                 .map_err(|_| "Invalid room token header")?,
         );
-        let (stream, _) = tokio_tungstenite::connect_async(request)
-            .await
-            .map_err(|e| format!("Signaling connect failed: {e}"))?;
+        let stream = super::transport::connect(request).await?;
         info!("UU signaling connected");
         let (mut write, mut read) = stream.split();
         let (outgoing, mut outgoing_rx) = mpsc::channel::<String>(64);
@@ -456,6 +454,27 @@ mod tests {
         ] {
             assert!(leave_event(&json!({"ice_id":id})).is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn stalled_handshake_releases_the_reconnect_loop() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (events, _received) = mpsc::channel(1);
+        let connecting = tokio::spawn(async move {
+            SignalingClient::connect(&url, "fixture-room-token", events).await
+        });
+        // Hold the accepted TCP connection without answering the WebSocket upgrade.
+        let (_socket, _) = listener.accept().await.unwrap();
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(21)).await;
+        tokio::task::yield_now().await;
+        let finished = connecting.is_finished();
+        if !finished {
+            connecting.abort();
+        }
+        assert!(finished, "stalled handshake prevented reconnect retry");
+        assert!(connecting.await.unwrap().is_err());
     }
 
     #[tokio::test(start_paused = true)]
