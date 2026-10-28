@@ -287,6 +287,28 @@ pub fn validate_bitrate(preset: crate::config::BitratePreset) -> crate::error::R
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", content = "qp", rename_all = "snake_case")]
+pub enum HevcQuality {
+    #[default]
+    Bitrate,
+    FixedQp(u8),
+    Lossless,
+}
+
+impl HevcQuality {
+    fn is_bitrate(&self) -> bool {
+        matches!(self, Self::Bitrate)
+    }
+    pub fn encoder_properties(self) -> String {
+        match self {
+            Self::Bitrate => String::new(),
+            Self::FixedQp(qp) => format!("fixed-qp={qp}"),
+            Self::Lossless => "lossless=true".into(),
+        }
+    }
+}
+
 /// Output limits are separate from HDMI timings, which always follow the source.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -297,10 +319,17 @@ pub struct OutputSettings {
     pub fps: u32,
     /// Preserve HDR10 in HEVC Main10. AVC and JPEG retain SDR compatibility.
     pub hdr: bool,
+    #[serde(skip_serializing_if = "HevcQuality::is_bitrate")]
+    pub hevc_quality: HevcQuality,
 }
 
 impl OutputSettings {
     pub fn validate(self) -> crate::error::Result<()> {
+        if matches!(self.hevc_quality, HevcQuality::FixedQp(qp) if qp > 51) {
+            return Err(crate::error::AppError::BadRequest(
+                "HEVC QP must be between 0 and 51".into(),
+            ));
+        }
         if (self.height != 0 && (!(180..=2160).contains(&self.height) || self.height % 2 != 0))
             || (self.fps != 0 && !(5..=120).contains(&self.fps))
         {

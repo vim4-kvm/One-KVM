@@ -1638,6 +1638,7 @@ mod tests {
             height: 720,
             fps: 15,
             hdr: true,
+            ..Default::default()
         };
         streamer.set_vim4_output(output).await.unwrap();
         let video = crate::video::stream_manager::VideoStreamManager::with_webrtc_streamer(

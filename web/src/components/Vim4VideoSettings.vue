@@ -10,13 +10,15 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
-interface OutputSettings { height: number; fps: number }
-interface BoardStatus { edid: string }
+interface OutputSettings { height: number; fps: number; hevc_quality?: { type: string; qp?: number } }
+interface BoardStatus { edid: string; hevc_quality_available: boolean }
 const props = defineProps<{ outputOnly?: boolean }>()
 const { t } = useI18n()
 const store = useConfigStore()
 const height = ref('0')
 const fps = ref('0')
+const hevcMode = ref('bitrate')
+const hevcQp = ref(28)
 const quality = ref(80)
 const bitrate = ref(4000)
 const board = ref<BoardStatus | null>(null)
@@ -36,6 +38,8 @@ async function load() {
     ])
     height.value = String(video.output.height)
     fps.value = String(video.output.fps)
+    hevcMode.value = video.output.hevc_quality?.type ?? 'bitrate'
+    hevcQp.value = video.output.hevc_quality?.qp ?? 28
     quality.value = video.quality
     board.value = status
     edid.value = status.edid
@@ -56,7 +60,9 @@ async function apply(action: 'output' | 'bitrate' | 'edid') {
   try {
     if (action === 'output') {
       await request('/config/video', { method: 'PATCH', body: JSON.stringify({
-        output: { height: Number(height.value), fps: Number(fps.value) }, quality: Number(quality.value),
+        output: { height: Number(height.value), fps: Number(fps.value), hevc_quality: {
+          type: hevcMode.value, ...(hevcMode.value === 'fixed_qp' ? { qp: Number(hevcQp.value) } : {}),
+        } }, quality: Number(quality.value),
       }) })
       await store.refreshVideo()
     } else if (action === 'bitrate') {
@@ -103,6 +109,17 @@ onMounted(load)
           <Input id="vim4-quality" v-model="quality" type="number" min="1" max="100" required />
         </template>
         <p class="text-muted-foreground">{{ t('vim4Video.outputHint') }}</p>
+        <Label>{{ t('vim4Video.hevcMode') }}</Label>
+        <Select v-model="hevcMode" :disabled="!board?.hevc_quality_available">
+          <SelectTrigger class="w-full"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="bitrate">{{ t('vim4Video.hevcBitrate') }}</SelectItem>
+            <SelectItem value="fixed_qp">{{ t('vim4Video.hevcFixedQp') }}</SelectItem>
+            <SelectItem value="lossless">{{ t('vim4Video.hevcLossless') }}</SelectItem>
+          </SelectContent>
+        </Select>
+        <Input v-if="hevcMode === 'fixed_qp'" v-model="hevcQp" aria-label="HEVC QP" type="number" min="0" max="51" required />
+        <p class="text-muted-foreground">{{ t('vim4Video.hevcHint') }}</p>
         <Button type="submit" size="sm" class="w-full">{{ t('common.apply') }}</Button>
       </form>
       <form class="space-y-2" @submit.prevent="apply('bitrate')">

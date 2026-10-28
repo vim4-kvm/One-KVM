@@ -55,6 +55,9 @@ fn description(
         .output
         .h26x_frame_rate(source, source_fps, VideoBackend::current());
     if VideoBackend::current() == VideoBackend::Wave5 {
+        if config.output.hevc_quality != crate::platform::vim4::HevcQuality::Bitrate {
+            warn!("Saved HEVC quality mode requires vendor backend; Wave5 uses bitrate control");
+        }
         return wave5::description(config, source, fps);
     }
     if native_hdr {
@@ -99,11 +102,22 @@ fn description(
         source,
         source_fps,
     )?;
+    let encoder = if config.output_codec == VideoEncoderType::H265
+        && config.output.hevc_quality != crate::platform::vim4::HevcQuality::Bitrate
+    {
+        format!(
+            "vim4hevc10enc name=encoder bitrate={} framerate={fps} {}",
+            config.bitrate_kbps().clamp(1000, 60000),
+            config.output.hevc_quality.encoder_properties()
+        )
+    } else {
+        format!("amlvenc name=encoder bitrate={} gop=0 framerate={fps} intra-refresh-rows={refresh_rows} min-force-key-unit-interval=250000000", config.bitrate_kbps().clamp(1000, 60000))
+    };
     Ok(format!("{capture} ! {}queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! {filter}\
-        amlvenc name=encoder bitrate={} gop=0 framerate={} intra-refresh-rows={refresh_rows} min-force-key-unit-interval=250000000 ! \
+        {encoder} ! \
         video/x-{codec} ! {codec}parse config-interval=-1 ! \
         video/x-{codec},stream-format=byte-stream,alignment=au ! appsink name=frames sync=false max-buffers=2",
-        crate::video::snapshot::vim4::BRANCH, config.bitrate_kbps().clamp(1000, 60000), fps))
+        crate::video::snapshot::vim4::BRANCH))
 }
 
 fn native_hdr(config: &SharedVideoPipelineConfig) -> bool {
@@ -134,11 +148,11 @@ fn hdr_description(
         "{snapshot} ! {}fakesink sync=false async=false \
         {capture} ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! \
         videorate drop-only=true ! video/x-raw,format=P010_10LE,framerate={fps}/1 ! \
-        vim4hevc10enc name=encoder bitrate={} framerate={fps} ! \
+        vim4hevc10enc name=encoder bitrate={} framerate={fps} {} ! \
         h265parse config-interval=-1 ! video/x-h265,stream-format=byte-stream,alignment=au,profile=main-10 ! \
         appsink name=frames sync=false max-buffers=2",
         crate::video::snapshot::vim4::BRANCH,
-        config.bitrate_kbps().clamp(1000, 60000)
+        config.bitrate_kbps().clamp(1000, 60000), config.output.hevc_quality.encoder_properties()
     ))
 }
 

@@ -9,6 +9,41 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use typeshare::typeshare;
 
+#[cfg(all(test, feature = "vim4"))]
+mod hevc_quality_tests {
+    use super::*;
+    use crate::platform::vim4::{HevcQuality, OutputSettings};
+
+    #[test]
+    fn legacy_output_defaults_and_resize_preserve_quality_choice() {
+        let old: OutputSettings =
+            serde_json::from_str(r#"{"height":720,"fps":60,"hdr":false}"#).unwrap();
+        assert_eq!(old.hevc_quality, HevcQuality::Bitrate);
+        // Default-mode saves remain readable by the earlier strict output schema.
+        assert!(serde_json::to_value(old)
+            .unwrap()
+            .get("hevc_quality")
+            .is_none());
+        let mut config = VideoConfig::default();
+        config.output.hevc_quality = HevcQuality::Lossless;
+        let resize: VideoConfigUpdate =
+            serde_json::from_str(r#"{"output":{"height":1080,"fps":30}}"#).unwrap();
+        resize.apply_to(&mut config);
+        assert_eq!(config.output.hevc_quality, HevcQuality::Lossless);
+        let invalid = OutputSettings {
+            hevc_quality: HevcQuality::FixedQp(52),
+            ..old
+        };
+        assert!(invalid.validate().is_err());
+        assert!(OutputSettings {
+            hevc_quality: HevcQuality::FixedQp(0),
+            ..old
+        }
+        .validate()
+        .is_ok());
+    }
+}
+
 #[typeshare]
 #[derive(Debug, Deserialize)]
 pub struct WatchdogConfigUpdate {
@@ -64,6 +99,7 @@ pub struct VideoOutputUpdate {
     pub height: u32,
     pub fps: u32,
     pub hdr: Option<bool>,
+    pub hevc_quality: Option<crate::platform::vim4::HevcQuality>,
 }
 
 impl VideoConfigUpdate {
@@ -90,8 +126,19 @@ impl VideoConfigUpdate {
                 height: output.height,
                 fps: output.fps,
                 hdr: output.hdr.unwrap_or(false),
+                hevc_quality: output.hevc_quality.unwrap_or_default(),
             }
             .validate()?;
+            if output
+                .hevc_quality
+                .is_some_and(|q| q != crate::platform::vim4::HevcQuality::Bitrate)
+                && crate::platform::vim4::VideoBackend::current()
+                    != crate::platform::vim4::VideoBackend::Vendor
+            {
+                return Err(AppError::BadRequest(
+                    "HEVC quality modes require the vendor encoder backend".into(),
+                ));
+            }
             if output.hdr == Some(true) && !crate::platform::vim4::hdr_remote_available() {
                 return Err(AppError::BadRequest(
                     "Remote HDR requires the native HDR capture and Main10 encoder runtime".into(),
@@ -134,6 +181,9 @@ impl VideoConfigUpdate {
             config.output.fps = output.fps;
             if let Some(hdr) = output.hdr {
                 config.output.hdr = hdr;
+            }
+            if let Some(quality) = output.hevc_quality {
+                config.output.hevc_quality = quality;
             }
         }
         if let Some(ref device) = self.device {
