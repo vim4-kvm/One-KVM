@@ -89,9 +89,21 @@ pub(super) fn run_capture(
     let mut buffer = vec![0u8; period_frames * config.channels as usize * 2];
     let io: IO<u8> = pcm.io_bytes();
     let mut consecutive_errors = 0;
-    let mut native_stats = crate::audio::diagnostics::PcmStats::new("native", config.sample_rate);
+    let mut native_stats = if config.channels == 2 {
+        crate::audio::diagnostics::PcmStats::new("native", config.sample_rate)
+    } else {
+        None
+    };
+    if let (Some(stats), Ok(params)) = (&mut native_stats, pcm.hw_params_current()) {
+        if let (Ok(period), Ok(buffer)) = (params.get_period_size(), params.get_buffer_size()) {
+            stats.set_pcm_geometry(period as u64, buffer as u64);
+        }
+    }
 
     while !stop_flag.load(Ordering::Acquire) {
+        if let Some(stats) = &mut native_stats {
+            stats.tick();
+        }
         // Check before XRUN recovery too: the old native clock must never be
         // restarted after a source change. The controller opens a fresh native PCM.
         #[cfg(feature = "vim4")]
@@ -132,10 +144,8 @@ pub(super) fn run_capture(
             Ok(frames_read) => {
                 consecutive_errors = 0;
                 let byte_count = frames_read * config.channels as usize * 2;
-                if config.channels == 2 {
-                    if let Some(stats) = &mut native_stats {
-                        stats.observe(&buffer[..byte_count]);
-                    }
+                if let Some(stats) = &mut native_stats {
+                    stats.observe(&buffer[..byte_count]);
                 }
                 if frame_tx.receiver_count() > 0 {
                     #[cfg(feature = "vim4")]
