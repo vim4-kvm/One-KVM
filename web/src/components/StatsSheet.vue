@@ -3,12 +3,8 @@ import { ref, watch, onMounted, onUnmounted, nextTick, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import uPlot from 'uplot'
 import 'uplot/dist/uPlot.min.css'
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet'
+import { BarChart3, X } from 'lucide-vue-next'
+import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Badge } from '@/components/ui/badge'
 import { Item, ItemContent, ItemDescription, ItemTitle } from '@/components/ui/item'
@@ -177,18 +173,6 @@ function initCharts() {
   if (!props.open) return
 
   nextTick(() => {
-    if (timestamps.value.length === 0) {
-      const now = Date.now() / 1000
-      for (let i = MAX_POINTS - 1; i >= 0; i--) {
-        timestamps.value.push(now - i)
-      }
-      jitterHistory.value = new Array(MAX_POINTS).fill(0)
-      delayHistory.value = new Array(MAX_POINTS).fill(0)
-      packetLossHistory.value = new Array(MAX_POINTS).fill(0)
-      fpsHistory.value = new Array(MAX_POINTS).fill(0)
-      bitrateHistory.value = new Array(MAX_POINTS).fill(0)
-    }
-
     if (stabilityChartRef.value && !stabilityChart) {
       const opts = createChartOptions(stabilityChartRef.value, 'ms', (v) => `${v.toFixed(0)} ms`)
       opts.plugins = [createTooltipPlugin('stability', 'ms')]
@@ -405,21 +389,18 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <Sheet :open="props.open" @update:open="emit('update:open', $event)">
-    <SheetContent
-      side="right"
-      class="w-[90vw] max-w-[440px] gap-0 overflow-hidden border-l bg-background p-0"
-    >
-      <!-- Header -->
-      <SheetHeader class="shrink-0 border-b px-6 py-3">
-        <div class="flex items-center gap-2">
-          <SheetTitle class="text-base">{{ t('stats.title') }}</SheetTitle>
-          <Badge variant="secondary">WebRTC</Badge>
+  <section v-show="props.open" data-stats-panel class="stats-panel bg-background text-foreground" :aria-label="t('stats.title')">
+      <header class="flex h-9 min-h-9 shrink-0 items-center justify-between gap-1 border-b pl-3 pr-2">
+        <div class="flex min-w-0 items-center gap-1.5 text-xs">
+          <BarChart3 class="size-4 shrink-0" />
+          <span class="truncate font-semibold">{{ t('stats.title') }}</span>
+          <Badge variant="secondary" class="h-5 px-1.5 text-[10px]">WebRTC</Badge>
         </div>
-      </SheetHeader>
+        <Button variant="ghost" size="icon-sm" :aria-label="t('stats.close')" :title="t('stats.close')" @click="emit('update:open', false)"><X class="size-3.5" /></Button>
+      </header>
 
       <ScrollArea class="min-h-0 flex-1">
-        <div class="px-6 py-4 space-y-6">
+        <div class="px-4 py-4 space-y-6">
           <!-- Video Information -->
           <div class="space-y-3">
             <h3 class="text-sm font-medium">{{ t('stats.video') }}</h3>
@@ -542,9 +523,16 @@ onUnmounted(() => {
           </div>
         </div>
       </ScrollArea>
-    </SheetContent>
-  </Sheet>
+  </section>
 </template>
+
+<style scoped>
+/* Docked beside the video like the board terminal, so the target stays operable. */
+.stats-panel { position: relative; display: flex; flex-direction: column; flex-shrink: 0; width: 400px; max-width: calc(100vw - 360px); height: 100%; border-left: 1px solid var(--border); }
+@media (max-width: 767px) {
+  .stats-panel { position: fixed; inset: 0; z-index: 60; width: 100%; max-width: none; border-left: 0; }
+}
+</style>
 
 <style>
 /* Override uPlot styles for dark mode */

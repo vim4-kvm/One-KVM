@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
-import { Keyboard, Maximize, Scaling } from 'lucide-vue-next'
+import { Keyboard, Maximize, Minimize, Scaling } from 'lucide-vue-next'
 import type { VideoScaleMode } from '@/composables/useVideoScaling'
 import { Button } from '@/components/ui/button'
 import {
@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/tooltip'
 
 const props = defineProps<{
+  isFullscreen?: boolean
   minimal?: boolean
   textOnlyScale?: boolean
   scaleMode?: VideoScaleMode
@@ -40,15 +41,15 @@ function toggleScaleMode() {
           variant="ghost"
           size="sm"
           class="size-8 p-0 text-xs sm:w-auto sm:gap-1.5 sm:px-2"
-          :aria-label="t('actionbar.fullscreen')"
+          :aria-label="t(props.isFullscreen ? 'actionbar.exitFullscreen' : 'actionbar.fullscreen')"
           @click="emit('toggleFullscreen')"
         >
-          <Maximize class="size-3.5 sm:size-4" />
-          <span class="hidden xl:inline">{{ t('actionbar.fullscreen') }}</span>
+          <component :is="props.isFullscreen ? Minimize : Maximize" class="size-3.5 sm:size-4" />
+          <span data-action-label>{{ t(props.isFullscreen ? 'actionbar.exitFullscreen' : 'actionbar.fullscreen') }}</span>
         </Button>
       </TooltipTrigger>
       <TooltipContent>
-        <p>{{ t('actionbar.fullscreenTip') }}</p>
+        <p>{{ t(props.isFullscreen ? 'actionbar.exitFullscreen' : 'actionbar.fullscreenTip') }}</p>
       </TooltipContent>
     </Tooltip>
   </TooltipProvider>
@@ -89,7 +90,7 @@ function toggleScaleMode() {
           @click="emit('toggleVirtualKeyboard')"
         >
           <Keyboard class="size-3.5 sm:size-4" />
-          <span class="hidden xl:inline">{{ t('actionbar.keyboard') }}</span>
+          <span data-action-label>{{ t('actionbar.keyboard') }}</span>
         </Button>
       </TooltipTrigger>
       <TooltipContent>
@@ -101,6 +102,7 @@ function toggleScaleMode() {
   <div
     v-if="!minimal"
     data-fixed-action
+    data-console-divider
     aria-hidden="true"
     class="mx-2 h-5 w-px shrink-0 self-center bg-border"
   />

@@ -15,6 +15,7 @@ import { useComputerUseSocket, type ComputerUseServerMessage } from '@/composabl
 import { computerUseEntryEnabled, useFeatureVisibility } from '@/composables/useFeatureVisibility'
 import { useTheme } from '@/composables/useTheme'
 import { useConsoleLayout } from '@/composables/useConsoleLayout'
+import { useConsoleStatus } from '@/composables/useConsoleStatus'
 import { getUnifiedAudio } from '@/composables/useUnifiedAudio'
 import { getMicrophone } from '@/composables/useMicrophone'
 import { streamApi, hidApi, atxApi, atxConfigApi, authApi, computerUseApi, uacApi } from '@/api'
@@ -32,9 +33,8 @@ import { isAudioDeviceLostStateReason, isAudioStreamDeviceLostPayload } from '@/
 import type { StreamDeviceLostEventData, StreamStateChangedEventData } from '@/types/websocket'
 import type { VideoMode } from '@/components/VideoConfigPopover.vue'
 
-import StatusCard, { type StatusDetail, type ConnectionStatus } from '@/components/StatusCard.vue'
+import { type StatusDetail, type ConnectionStatus } from '@/components/StatusCard.vue'
 import ActionBar from '@/components/ActionBar.vue'
-import ConsoleHeaderActions from '@/components/ConsoleHeaderActions.vue'
 import RecordingIndicator from '@/components/RecordingIndicator.vue'
 import { useMcpActivity } from '@/composables/useMcpActivity'
 import { useDeviceRecording } from '@/composables/useDeviceRecording'
@@ -43,18 +43,18 @@ import ConsoleStatusSummary, { type ConsoleStatusItem } from '@/components/Conso
 import InfoBar from '@/components/InfoBar.vue'
 import VirtualKeyboard from '@/components/VirtualKeyboard.vue'
 import StatsSheet from '@/components/StatsSheet.vue'
+import StatsHud from '@/components/StatsHud.vue'
+import { HUD_CORNERS, type HudCorner } from '@/lib/connectionStats'
 import ComputerUseSheet from '@/components/ComputerUseSheet.vue'
 import TerminalDialog from '@/components/TerminalDialog.vue'
 import type { ComputerUseTimelineItem, NewComputerUseTimelineItem } from '@/types/computerUseTimeline'
-import LanguageToggleButton from '@/components/LanguageToggleButton.vue'
+import ConsoleMoreMenuItems from '@/components/ConsoleMoreMenuItems.vue'
 import BrandMark from '@/components/BrandMark.vue'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import {
@@ -69,12 +69,9 @@ import { Label } from '@/components/ui/label'
 import {
   MonitorOff,
   RefreshCw,
-  LogOut,
-  Sun,
-  Moon,
   ChevronDown,
+  ChevronUp,
   MoreHorizontal,
-  KeyRound,
   Loader2,
 } from 'lucide-vue-next'
 
@@ -245,8 +242,44 @@ function syncMouseModeFromConfig() {
 
 const virtualKeyboardVisible = ref(false)
 const virtualKeyboardAttached = ref(true)
+const infoOverlayRef = ref<HTMLDivElement | null>(null)
+const pointerNearInfoOverlay = ref(false)
+let lastWorkspacePointer: Pick<MouseEvent, 'clientX' | 'clientY'> | null = null
+
+function updateInfoBarProximity(event: Pick<MouseEvent, 'clientX' | 'clientY'>) {
+  lastWorkspacePointer = { clientX: event.clientX, clientY: event.clientY }
+  const box = infoOverlayRef.value?.getBoundingClientRect()
+  pointerNearInfoOverlay.value = !!box && event.clientX >= box.left - 16
+    && event.clientX <= box.right + 16 && event.clientY >= box.top - 16
+    && event.clientY <= box.bottom + 16
+}
+
+// A key press can reveal the overlay underneath a stationary pointer.
+watch(infoOverlayRef, () => {
+  if (lastWorkspacePointer) updateInfoBarProximity(lastWorkspacePointer)
+}, { flush: 'post' })
+
+function clearInfoBarProximity() {
+  lastWorkspacePointer = null
+  pointerNearInfoOverlay.value = false
+}
+
+function handleWorkspaceMouseMove(event: MouseEvent) {
+  // Video events already pass through handleMouseMove; include the letterbox too.
+  if (!(event.target instanceof Node) || !videoContainerRef.value?.contains(event.target)) {
+    updateInfoBarProximity(event)
+  }
+}
 const statsSheetOpen = ref(false)
+const statsHudOpen = ref(false)
+const storedHudCorner = localStorage.getItem('statsHudCorner') as HudCorner | null
+const statsHudCorner = ref<HudCorner>(storedHudCorner && HUD_CORNERS.includes(storedHudCorner) ? storedHudCorner : 'top-right')
+const storedHudCollapsed = localStorage.getItem('statsHudCollapsed')
+const statsHudCollapsed = ref(storedHudCollapsed === null ? window.innerWidth < 640 : storedHudCollapsed === 'true')
+watch(statsHudCorner, value => localStorage.setItem('statsHudCorner', value))
+watch(statsHudCollapsed, value => localStorage.setItem('statsHudCollapsed', String(value)))
 const showConnectionStats = computed(() => videoMode.value !== 'mjpeg')
+const statsHudVisible = computed(() => statsHudOpen.value && !statsSheetOpen.value)
 const virtualKeyboardConsumerEnabled = computed(() => {
   const hid = configStore.hid
   if (!hid) return true
@@ -262,10 +295,47 @@ const changingPassword = ref(false)
 
 const ttydStatus = ref<{ available: boolean; running: boolean } | null>(null)
 const showTerminalDialog = ref(false)
+const terminalMaximized = ref(false)
+const terminalPanelWidth = ref(0)
+// Floating toolbars centre over the video, so they need the docked panel's width.
+const dockWidth = computed(() => showTerminalDialog.value ? terminalPanelWidth.value
+  : statsSheetOpen.value && window.innerWidth >= 768 ? Math.min(400, window.innerWidth - 360) : 0)
 const featureVisibility = useFeatureVisibility()
 const { isDark, toggleTheme } = useTheme()
 const { consoleLayout } = useConsoleLayout()
-provideConsoleAppearance(consoleLayout)
+const immersive = computed(() => consoleLayout.value === 'floating' || isFullscreen.value)
+const actionLayout = computed(() => immersive.value ? 'current' : consoleLayout.value)
+provideConsoleAppearance(computed(() => immersive.value ? 'floating' : consoleLayout.value))
+const floatingCollapsed = ref(localStorage.getItem('consoleFloatingCollapsed') !== 'false')
+watch(floatingCollapsed, value => localStorage.setItem('consoleFloatingCollapsed', String(value)))
+const actionBarRef = ref<InstanceType<typeof ActionBar> | null>(null)
+const pillRef = ref<HTMLButtonElement | null>(null)
+const moreOpen = ref(false)
+const sidebarMoreOpen = ref(false)
+const actionNaturalWidth = ref(1400)
+const statusOpen = ref(false)
+async function collapseToolbar(returnFocus = false) {
+  floatingCollapsed.value = true
+  if (returnFocus) {
+    await nextTick()
+    pillRef.value?.focus()
+  }
+}
+function handleVideoPointerDown() {
+  if (immersive.value && !actionBarRef.value?.hasOpenSurface && !moreOpen.value && !statusOpen.value
+    && !statsSheetOpen.value && !showTerminalDialog.value && !computerUseOpen.value
+    && !changePasswordDialogOpen.value
+    && !document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"], [data-reka-popper-content-wrapper]')) {
+    void collapseToolbar()
+  }
+}
+function handleToolbarEscape(event: KeyboardEvent) {
+  if (event.key === 'Escape' && immersive.value && !actionBarRef.value?.hasOpenSurface && !moreOpen.value && !statusOpen.value) {
+    event.preventDefault()
+    void collapseToolbar(true)
+  }
+}
+watch(deviceRecording.openRequests, () => { floatingCollapsed.value = false }, { flush: 'sync' })
 const terminalAvailable = computed(() => ttydStatus.value?.available !== false)
 const showPower = computed(() => featureVisibility.value.power)
 const showTerminal = computed(() => terminalAvailable.value && featureVisibility.value.webTerminal)
@@ -298,7 +368,12 @@ const consoleStatusItems = computed<ConsoleStatusItem[]>(() => {
     { id: 'audio', title: t('statusCard.audio'), status: audioStatus.value,
       quickInfo: audioQuickInfo.value, details: audioDetails.value, errorMessage: audioErrorMessage.value },
     { id: 'hid', title: t('statusCard.hid'), status: hidStatus.value,
-      quickInfo: hidQuickInfo.value, details: hidDetails.value, errorMessage: hidErrorMessage.value, required: true },
+      quickInfo: hidQuickInfo.value, details: [...hidDetails.value, {
+        label: t('settings.otgKeyboardLeds'),
+        value: keyboardLedEnabled.value
+          ? `Caps: ${t(keyboardLed.value.capsLock ? 'common.on' : 'common.off')} · Num: ${t(keyboardLed.value.numLock ? 'common.on' : 'common.off')} · Scroll: ${t(keyboardLed.value.scrollLock ? 'common.on' : 'common.off')}`
+          : t('infobar.keyboardLedUnavailable'),
+      }], errorMessage: hidErrorMessage.value, required: true },
   ]
   if (showMsdStatusCard.value) items.push({
     id: 'msd', title: t('statusCard.msd'), status: msdStatus.value,
@@ -313,15 +388,27 @@ const consoleStatusItems = computed<ConsoleStatusItem[]>(() => {
   return items
 })
 
-function openStatsSheet() {
-  if (showConnectionStats.value) {
-    statsSheetOpen.value = true
+const { issues: statusIssues, summary: statusSummary, hasError: statusHasError } = useConsoleStatus(() => consoleStatusItems.value, t)
+
+// The toolbar button toggles the lightweight HUD; full charts open from the HUD into the dock.
+function toggleStats() {
+  if (!showConnectionStats.value) return
+  if (statsHudOpen.value || statsSheetOpen.value) {
+    statsHudOpen.value = false
+    statsSheetOpen.value = false
+  } else {
+    statsHudOpen.value = true
   }
 }
+
+// The dock shows one panel at a time; the hidden terminal keeps its session.
+watch(statsSheetOpen, open => { if (open) showTerminalDialog.value = false })
+watch(showTerminalDialog, open => { if (open) statsSheetOpen.value = false })
 
 watch(showConnectionStats, (canShow) => {
   if (!canShow) {
     statsSheetOpen.value = false
+    statsHudOpen.value = false
   }
 })
 
@@ -484,13 +571,7 @@ const hidDetails = computed<StatusDetail[]>(() => {
     details.push({ label: t('common.error'), value: `${errorMessage}${codeSuffix}`, status: hidErrorStatus })
   } else if (hid.online) {
     details.push({ label: t('statusCard.currentMode'), value: mouseMode.value === 'absolute' ? t('statusCard.absolute') : t('statusCard.relative'), status: 'ok' })
-    if (hid.keyboardLedsEnabled) {
-      details.push({
-        label: t('settings.otgKeyboardLeds'),
-        value: `Caps:${hid.ledState.capsLock ? t('common.on') : t('common.off')} Num:${hid.ledState.numLock ? t('common.on') : t('common.off')} Scroll:${hid.ledState.scrollLock ? t('common.on') : t('common.off')}`,
-        status: 'ok',
-      })
-    }
+
   }
 
   let channelValue: string
@@ -768,9 +849,6 @@ const showMsdStatusCard = computed(() => {
   return !!(systemStore.msd?.available && systemStore.hid?.backend !== 'ch9329')
 })
 
-const hidHoverAlign = computed<'start' | 'end'>(() => {
-  return showMsdStatusCard.value ? 'start' : 'end'
-})
 
 let retryTimeoutId: number | null = null
 let retryCount = 0
@@ -2161,9 +2239,8 @@ watch(() => webrtc.state.value, (newState, oldState) => {
 })
 
 async function toggleFullscreen() {
-  if (!videoWorkspaceRef.value) return
   if (!document.fullscreenElement) {
-    await videoWorkspaceRef.value.requestFullscreen()
+    await document.documentElement.requestFullscreen()
     isFullscreen.value = true
   } else {
     await document.exitFullscreen()
@@ -2210,7 +2287,7 @@ async function handleChangePassword() {
 function openTerminal() {
   if (!showTerminal.value) return
   if (!ttydStatus.value?.running) return
-  showTerminalDialog.value = true
+  showTerminalDialog.value = !showTerminalDialog.value
 }
 
 async function handlePowerShort() {
@@ -2276,6 +2353,12 @@ function sendMouseEvent(data: { type: 'move' | 'move_abs' | 'down' | 'up' | 'scr
   hidApi.mouse(data).catch(err => handleHidError(err, `mouse ${data.type}`))
 }
 
+function keyboardFocusIsInControls() {
+  return document.activeElement instanceof Element && !!document.activeElement.closest(
+    'input, textarea, iframe, [data-board-terminal], [contenteditable]:not([contenteditable="false"]), .console-toolbar, [role="dialog"], [role="alertdialog"], [role="menu"], [data-reka-popper-content-wrapper]',
+  )
+}
+
 function shouldBlockKey(e: KeyboardEvent): boolean {
   if (isFullscreen.value) {
     return true
@@ -2296,7 +2379,7 @@ function handleKeyDown(e: KeyboardEvent) {
   const container = videoContainerRef.value
   if (!container) return
 
-  if (!isFullscreen.value && !container.contains(document.activeElement)) return
+  if (keyboardFocusIsInControls() || (!isFullscreen.value && !container.contains(document.activeElement))) return
 
   if (shouldBlockKey(e)) {
     e.preventDefault()
@@ -2325,7 +2408,7 @@ function handleKeyUp(e: KeyboardEvent) {
   const container = videoContainerRef.value
   if (!container) return
 
-  if (!isFullscreen.value && !container.contains(document.activeElement)) return
+  if (keyboardFocusIsInControls() || (!isFullscreen.value && !container.contains(document.activeElement))) return
 
   if (shouldBlockKey(e)) {
     e.preventDefault()
@@ -2768,6 +2851,7 @@ function handleTouchPointerCancel(e: PointerEvent) {
 }
 
 function handleMouseMove(e: MouseEvent) {
+  updateInfoBarProximity(e)
   updateLocalCrosshairFromEvent(e)
 
   const videoElement = getActiveVideoElement()
@@ -3279,196 +3363,98 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="relative h-screen h-dvh flex flex-col bg-background">
-    <header class="shrink-0 border-b bg-background" :class="consoleLayout === 'floating' && 'console-header--floating'">
-      <div class="px-2 sm:px-4">
-        <div class="console-header__row h-10 sm:h-14 flex items-center justify-between">
-          <div class="flex min-w-0 flex-1 items-center gap-2 sm:gap-6">
-            <div class="flex shrink-0 items-center gap-1.5 whitespace-nowrap sm:gap-2">
-              <BrandMark size="md" class="hidden sm:block" />
-              <BrandMark size="sm" class="sm:hidden" />
-              <span class="font-bold text-sm sm:text-lg">One-KVM</span>
-            </div>
-            <ConsoleStatusSummary
-              v-if="consoleLayout !== 'current'"
-              :items="consoleStatusItems"
-              :show-video-info="consoleLayout === 'sidebar'"
-            />
-            <div v-else class="flex md:hidden items-center gap-1">
-              <ConsoleStatusSummary :items="consoleStatusItems" />
-            </div>
-          </div>
-          <div class="console-header__account flex shrink-0 items-center gap-1 sm:gap-2">
-            <ConsoleHeaderActions
-              v-if="consoleLayout === 'floating'"
-              :show-stats="showConnectionStats"
-              :show-terminal="showTerminal"
-              :terminal-running="!!ttydStatus?.running"
-              :show-computer-use="showComputerUse"
-              @open-stats="openStatsSheet"
-              @open-terminal="openTerminal"
-              @open-computer-use="openComputerUse"
-            />
-            <div v-if="consoleLayout === 'current'" class="hidden md:flex items-center gap-2">
-              <StatusCard
-                :title="t('statusCard.video')"
-                type="video"
-                :status="videoStatus"
-                :quick-info="videoQuickInfo"
-                :error-message="videoErrorMessage"
-                :details="videoDetails"
-              />
-              <StatusCard
-                :title="t('statusCard.audio')"
-                type="audio"
-                :status="audioStatus"
-                :quick-info="audioQuickInfo"
-                :error-message="audioErrorMessage"
-                :details="audioDetails"
-              />
-              <StatusCard
-                :title="t('statusCard.hid')"
-                type="hid"
-                :status="hidStatus"
-                :quick-info="hidQuickInfo"
-                :error-message="hidErrorMessage"
-                :details="hidDetails"
-                :hover-align="hidHoverAlign"
-              />
-              <StatusCard
-                v-if="showMsdStatusCard"
-                :title="t('statusCard.msd')"
-                type="msd"
-                :status="msdStatus"
-                :quick-info="msdQuickInfo"
-                :error-message="msdErrorMessage"
-                :details="msdDetails"
-                hover-align="end"
-              />
-              <StatusCard
-                v-if="mcpActivity.enabled.value"
-                :title="t('extensions.mcp.title')"
-                type="mcp"
-                :status="mcpActivity.status.value"
-                :quick-info="mcpActivity.quickInfo.value"
-                :status-label="mcpActivity.quickInfo.value"
-                :details="mcpActivity.details.value"
-                hover-align="end"
-              >
-                <template #footer>
-                  <p v-if="mcpActivity.hint.value" class="mt-3 text-xs text-muted-foreground">{{ mcpActivity.hint.value }}</p>
-                  <RouterLink class="mt-3 inline-block text-xs underline" to="/settings?tab=ext-mcp">{{ t('extensions.mcp.settings') }}</RouterLink>
-                </template>
-              </StatusCard>
-            </div>
-            <RecordingIndicator v-if="isVim4" />
-            <div class="mx-1 hidden h-6 w-px bg-border md:block" />
-            <Button variant="ghost" size="icon-sm" class="hidden md:flex" :aria-label="t('common.toggleTheme')" @click="toggleTheme">
-              <Sun v-if="isDark" class="size-4" />
-              <Moon v-else class="size-4" />
-            </Button>
-            <LanguageToggleButton class="size-8 hidden md:flex" />
-            <DropdownMenu v-if="authStore.managed">
-              <DropdownMenuTrigger as-child>
-                <Button variant="ghost" size="icon-sm" class="md:hidden" :aria-label="t('common.more')">
-                  <MoreHorizontal class="size-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" class="md:hidden">
-                <DropdownMenuItem @click="toggleTheme">
-                  <Sun v-if="isDark" class="size-4 mr-2" />
-                  <Moon v-else class="size-4 mr-2" />
-                  {{ isDark ? t('settings.lightMode') : t('settings.darkMode') }}
-                </DropdownMenuItem>
-                <DropdownMenuItem as-child class="p-0">
-                  <LanguageToggleButton label-mode="next" size="sm" variant="ghost"
-                    class="w-full justify-start rounded-sm px-2 py-1.5 font-normal shadow-none" />
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            <DropdownMenu v-else>
-              <DropdownMenuTrigger as-child>
-                <Button variant="outline" size="sm" class="gap-1 sm:gap-1.5 px-2 sm:px-3">
-                  <span class="text-xs max-w-[60px] sm:max-w-[100px] truncate">{{ authStore.user || 'admin' }}</span>
-                  <ChevronDown class="size-3 sm:size-3.5" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem class="md:hidden" @click="toggleTheme">
-                  <Sun v-if="isDark" class="size-4 mr-2" />
-                  <Moon v-else class="size-4 mr-2" />
-                  {{ isDark ? t('settings.lightMode') : t('settings.darkMode') }}
-                </DropdownMenuItem>
-                <DropdownMenuItem as-child class="md:hidden p-0">
-                  <LanguageToggleButton
-                    label-mode="next"
-                    size="sm"
-                    variant="ghost"
-                    class="w-full justify-start rounded-sm px-2 py-1.5 font-normal shadow-none"
-                  />
-                </DropdownMenuItem>
-                <DropdownMenuSeparator class="md:hidden" />
-                <DropdownMenuItem @click="changePasswordDialogOpen = true">
-                  <KeyRound class="size-4 mr-2" />
-                  {{ t('auth.changePassword') }}
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem v-if="!authStore.managed" @click="logout">
-                  <LogOut class="size-4 mr-2" />
-                  {{ t('auth.logout') }}
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </div>
+  <div class="relative h-screen h-dvh flex flex-col bg-background" :style="{ '--terminal-panel-width': dockWidth + 'px' }">
+    <button v-if="immersive && floatingCollapsed && !(showTerminalDialog && terminalMaximized)" ref="pillRef" class="console-pill rounded-full outline-none focus-visible:ring-ring/50 focus-visible:ring-3"
+      :class="{ 'console-pill--issue': statusIssues.length }"
+      :aria-label="t('actionbar.expandToolbar')" :aria-expanded="false" @click="floatingCollapsed = false">
+      <span class="console-pill__visual">
+        <span class="size-2 shrink-0 rounded-full" :class="statusHasError ? 'bg-destructive' : statusIssues.length ? 'bg-warning' : 'bg-status-active'" />
+        <span class="max-w-[220px] truncate">{{ statusIssues.length ? statusSummary : videoQuickInfo }}</span>
+        <ChevronDown class="size-3 shrink-0" />
+      </span>
+    </button>
+    <component :is="immersive ? 'div' : 'header'"
+      v-show="!(immersive && showTerminalDialog && terminalMaximized)"
+      class="console-toolbar flex shrink-0 items-center gap-1 px-2"
+      :class="[immersive ? 'console-toolbar--floating' : 'h-10 border-b bg-background', { 'console-toolbar--collapsed': immersive && floatingCollapsed }]"
+      @keydown="handleToolbarEscape">
+      <BrandMark v-if="!immersive" size="sm" class="shrink-0" :class="actionLayout === 'sidebar' ? 'console-brand--sidebar' : ''" aria-label="One-KVM" title="One-KVM" />
+      <ConsoleStatusSummary v-show="!immersive || !floatingCollapsed" v-model:open="statusOpen" :items="consoleStatusItems" show-video-info />
+      <div v-show="!immersive || !floatingCollapsed" data-console-divider class="h-5 w-px shrink-0 bg-border" />
+      <div v-show="!immersive || !floatingCollapsed" class="console-inline-actions" :style="immersive ? { width: actionNaturalWidth + 'px' } : undefined">
+        <ActionBar
+          :layout="actionLayout"
+          v-model:more-open="moreOpen"
+          @natural-width="actionNaturalWidth = $event"
+          :is-fullscreen="isFullscreen"
+          ref="actionBarRef"
+          :mouse-mode="mouseMode"
+          :video-mode="videoMode"
+          :video-rotation="videoRotation"
+          :ttyd-running="ttydStatus?.running"
+          :show-power="showPower"
+          :atx-enabled="systemStore.atx?.available === true"
+          :show-terminal="showTerminal"
+          :terminal-open="showTerminalDialog"
+          :stats-open="statsHudOpen || statsSheetOpen"
+          :show-computer-use="showComputerUse"
+          :show-paste-text="showPasteText"
+          :show-recording="isVim4"
+          :show-mic="microphoneTransferEnabled"
+          :scale-mode="videoScaleMode"
+          :source-size-available="sourceSizeAvailable"
+          @toggle-fullscreen="toggleFullscreen"
+          @update:scale-mode="setVideoScaleMode"
+          @toggle-stats="toggleStats"
+          @toggle-virtual-keyboard="handleToggleVirtualKeyboard"
+          @toggle-mouse-mode="handleToggleMouseMode"
+          @update:video-mode="handleVideoModeChange"
+          @update:video-rotation="setVideoRotation"
+          @power-short="handlePowerShort"
+          @power-long="handlePowerLong"
+          @reset="handleReset"
+          @wol="handleWol"
+          @open-terminal="openTerminal"
+          @open-computer-use="openComputerUse"
+        >
+          <template #trailing>
+            <RecordingIndicator v-if="isVim4 && actionLayout !== 'sidebar'" />
+            <div v-if="actionLayout !== 'sidebar'" data-console-divider class="mx-1 h-5 w-px shrink-0 bg-border" />
+          </template>
+          <template #more>
+            <ConsoleMoreMenuItems v-if="actionLayout !== 'sidebar'" :is-dark="isDark" :managed="authStore.managed" :user="authStore.user"
+              @toggle-theme="toggleTheme" @change-password="changePasswordDialogOpen = true" @logout="logout" />
+          </template>
+        </ActionBar>
       </div>
-    </header>
-    <div
-      class="console-actionbar-host"
-      :class="`console-actionbar-host--${consoleLayout}`"
-    >
-      <ActionBar
-        :layout="consoleLayout"
-        :mouse-mode="mouseMode"
-        :video-mode="videoMode"
-        :video-rotation="videoRotation"
-        :ttyd-running="ttydStatus?.running"
-        :show-power="showPower"
-        :atx-enabled="systemStore.atx?.available === true"
-        :show-terminal="showTerminal"
-        :show-computer-use="showComputerUse"
-        :show-paste-text="showPasteText"
-        :show-recording="isVim4"
-        :show-mic="microphoneTransferEnabled"
-        :scale-mode="videoScaleMode"
-        :source-size-available="sourceSizeAvailable"
-        @toggle-fullscreen="toggleFullscreen"
-        @update:scale-mode="setVideoScaleMode"
-        @toggle-stats="openStatsSheet"
-        @toggle-virtual-keyboard="handleToggleVirtualKeyboard"
-        @toggle-mouse-mode="handleToggleMouseMode"
-        @update:video-mode="handleVideoModeChange"
-        @update:video-rotation="setVideoRotation"
-        @power-short="handlePowerShort"
-        @power-long="handlePowerLong"
-        @reset="handleReset"
-        @wol="handleWol"
-        @open-terminal="openTerminal"
-        @open-computer-use="openComputerUse"
-      />
-    </div>
+      <div v-if="consoleLayout === 'sidebar' && !immersive" class="flex-1" />
+      <RecordingIndicator v-if="isVim4 && actionLayout === 'sidebar'" />
+      <div v-if="actionLayout === 'sidebar'" data-console-divider class="h-5 w-px shrink-0 bg-border" />
+      <DropdownMenu v-if="consoleLayout === 'sidebar' && !immersive" v-model:open="sidebarMoreOpen">
+        <DropdownMenuTrigger as-child>
+          <Button v-show="!immersive || !floatingCollapsed" variant="ghost" size="icon-sm" class="shrink-0" :aria-label="t('common.more')"><MoreHorizontal class="size-4" /></Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <ConsoleMoreMenuItems :is-dark="isDark" :managed="authStore.managed" :user="authStore.user"
+              @toggle-theme="toggleTheme" @change-password="changePasswordDialogOpen = true" @logout="logout" />
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <Button v-if="immersive && !floatingCollapsed" variant="ghost" size="icon-sm" class="shrink-0"
+        :aria-label="t('actionbar.collapseToolbar')" :aria-expanded="true" @click="collapseToolbar(true)"><ChevronUp class="size-4" /></Button>
+    </component>
     <div
       class="flex-1 overflow-hidden relative transition-[padding] duration-300"
-      :class="consoleLayout === 'sidebar' && 'pl-14 sm:pl-16'"
+      :class="!immersive && consoleLayout === 'sidebar' && 'pl-14 sm:pl-16'"
     >
       <div class="absolute inset-0 dot-grid-bg" />
-      <div class="relative flex h-full w-full min-w-0 items-stretch gap-3">
+      <div class="relative flex h-full w-full min-w-0 items-stretch" :class="showTerminalDialog || statsSheetOpen ? 'gap-0' : 'gap-3'">
         <div
           class="flex min-w-0 flex-1 items-center justify-center transition-all duration-300"
-          :class="{ 'md:pr-1': computerUsePanelVisible }"
+          :class="{ 'md:pr-1': computerUsePanelVisible, 'md:hidden': terminalMaximized && showTerminalDialog }"
         >
+        <div class="relative h-full w-full min-w-0" @mousemove="handleWorkspaceMouseMove" @mouseleave="clearInfoBarProximity">
         <div
-          ref="videoWorkspaceRef"
+          :ref="el => { videoWorkspaceRef = el as HTMLDivElement | null }"
           class="video-workspace relative h-full w-full min-h-[120px] overflow-auto fullscreen:bg-black"
         >
           <div
@@ -3482,7 +3468,7 @@ onUnmounted(() => {
               :style="videoContainerStyle"
               tabindex="0"
               @mouseleave="handleMouseLeaveVideo"
-              @pointerdown="handleTouchPointerDown"
+              @pointerdown="handleVideoPointerDown(); handleTouchPointerDown($event)"
               @pointermove="handleTouchPointerMove"
               @pointerup="handleTouchPointerUp"
               @pointercancel="handleTouchPointerCancel"
@@ -3682,7 +3668,30 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+        <StatsHud
+          v-if="statsHudVisible"
+          v-model:corner="statsHudCorner"
+          v-model:collapsed="statsHudCollapsed"
+          :webrtc-stats="webrtc.stats.value"
+          :top-inset="immersive ? 56 : 8"
+          @details="statsSheetOpen = true"
+          @close="statsHudOpen = false"
+        />
+        <Transition name="info-fade">
+          <div v-if="pressedKeys.length > 0 || isPointerLocked || (keyboardLedEnabled && keyboardLed.capsLock)"
+            ref="infoOverlayRef" class="console-info-overlay" :class="{ 'console-info-overlay--hidden': pointerNearInfoOverlay, 'console-info-overlay--left': statsHudVisible && statsHudCorner === 'bottom-right' }">
+            <InfoBar compact minimal :captured="isPointerLocked"
+              :pressed-keys="pressedKeys" :caps-lock="keyboardLed.capsLock" :keyboard-led-enabled="keyboardLedEnabled" />
+          </div>
+        </Transition>
         </div>
+        </div>
+        <TerminalDialog v-if="showTerminal" v-model:open="showTerminalDialog" @maximized="terminalMaximized = $event" @width="terminalPanelWidth = $event" />
+        <StatsSheet
+          v-if="showConnectionStats"
+          v-model:open="statsSheetOpen"
+          :webrtc-stats="webrtc.stats.value"
+        />
         <ComputerUseSheet
           v-if="showComputerUse"
           v-model:open="computerUseOpen"
@@ -3709,28 +3718,6 @@ onUnmounted(() => {
       />
     </Teleport>
     <div id="keyboard-anchor"></div>
-    <InfoBar
-      v-if="consoleLayout !== 'floating' || pressedKeys.length > 0 || isPointerLocked"
-      :compact="consoleLayout !== 'current'"
-      :captured="isPointerLocked"
-      :minimal="consoleLayout === 'floating'"
-      :class="consoleLayout === 'floating'
-        ? 'pointer-events-none absolute bottom-2 left-1/2 z-30 max-w-[calc(100%-1rem)] -translate-x-1/2 rounded-lg border shadow-sm !w-auto'
-        : 'shrink-0'"
-      :pressed-keys="pressedKeys"
-      :caps-lock="keyboardLed.capsLock"
-      :num-lock="keyboardLed.numLock"
-      :scroll-lock="keyboardLed.scrollLock"
-      :keyboard-led-enabled="keyboardLedEnabled"
-      :mouse-position="mousePosition"
-      :debug-mode="false"
-    />
-    <StatsSheet
-      v-if="showConnectionStats"
-      v-model:open="statsSheetOpen"
-      :webrtc-stats="webrtc.stats.value"
-    />
-    <TerminalDialog v-if="showTerminal" v-model:open="showTerminalDialog" />
     <Dialog v-if="!authStore.managed" v-model:open="changePasswordDialogOpen">
       <DialogContent class="w-[95vw] max-w-md">
         <DialogHeader>
@@ -3784,81 +3771,53 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-/* Keep the action bar in one DOM location while changing only its placement.
-   Moving a live Teleport target during a layout switch can leave stale portal
-   nodes behind when the target is conditionally rendered. */
-.console-actionbar-host {
-  position: relative;
-  z-index: 40;
+.console-toolbar { z-index: 40; min-width: 0; }
+.console-info-overlay {
+  position: absolute; right: 8px; bottom: 8px; z-index: 30;
+  max-width: min(320px, 50%); height: 24px; pointer-events: none;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: color-mix(in srgb, var(--background) 85%, transparent);
+  backdrop-filter: blur(8px); box-shadow: 0 1px 3px rgb(0 0 0 / 10%);
+  opacity: .85; transition: opacity 150ms;
 }
-
-.console-actionbar-host--floating {
-  position: absolute;
-  inset: 0 0 auto;
-  height: 60px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
+.console-info-overlay--hidden { opacity: 0; }
+.console-info-overlay--left { right: auto; left: 8px; }
+.console-toolbar :deep(button:is([aria-expanded='true'], [data-state='open'])) { background: var(--accent); }
+.console-brand--sidebar { margin-inline: 14px; }
+.console-inline-actions { flex: 1; min-width: 0; }
+.console-toolbar--floating {
+  position: absolute; top: 8px; left: calc((100% - var(--terminal-panel-width, 0px)) / 2); transform: translateX(-50%);
+  width: max-content; max-width: calc(100vw - var(--terminal-panel-width, 0px) - 16px); height: 40px;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: color-mix(in srgb, var(--background) 90%, transparent);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 8%); backdrop-filter: blur(14px);
 }
-
-.console-actionbar-host--floating :deep(.console-action-bar) {
-  pointer-events: auto;
+.console-toolbar--collapsed { visibility: hidden; pointer-events: none; }
+.console-toolbar :deep(.console-action-bar--sidebar) {
+  position: absolute; top: 40px; bottom: 0; left: 0; width: 64px; height: calc(100dvh - 40px);
 }
-
-.console-actionbar-host--sidebar :deep(.console-action-bar--sidebar) {
-  position: relative;
-  inset: auto;
-  width: 100%;
-  height: 100%;
+.console-pill {
+  position: absolute; z-index: 40; top: 8px; left: calc((100% - var(--terminal-panel-width, 0px)) / 2); transform: translateX(-50%);
+  opacity: .55; transition: opacity 150ms; cursor: pointer;
 }
-
-.console-actionbar-host--sidebar {
-  position: absolute;
-  inset: 3.5rem auto 1.75rem 0;
-  width: 4rem;
+.console-pill:hover, .console-pill:focus-visible, .console-pill--issue { opacity: 1; }
+.console-pill:hover { background: var(--accent); background-clip: content-box; }
+.console-pill:hover .console-pill__visual { background: var(--accent); }
+.console-pill__visual {
+  display: flex; height: 28px; align-items: center; gap: 6px; padding: 0 12px;
+  border: 1px solid var(--border); border-radius: 9999px; font-size: 12px;
+  background: color-mix(in srgb, var(--background) 90%, transparent);
+  backdrop-filter: blur(14px); box-shadow: 0 2px 4px rgb(0 0 0 / 8%);
 }
-
+@media (pointer: coarse) { .console-pill { padding-block: 8px; margin-top: -8px; } }
 @media (max-width: 639px) {
-  .console-actionbar-host--sidebar {
-    inset: 2.5rem auto 1.75rem 0;
-    width: 3.5rem;
-  }
+  .console-brand--sidebar { margin-inline: 10px; }
+  .console-info-overlay { max-width: 60%; }
+  .console-toolbar { gap: 2px; }
+  .console-toolbar :deep(.console-status-text) { display: none; }
+  .console-toolbar :deep(.console-action-bar--sidebar) { width: 56px; }
 }
-
-/* Expanded controls may overlap header actions, but stay outside the video stage. */
-.console-header--floating .console-header__row {
-  position: relative;
-  height: 60px;
-}
-.console-header__toolbar {
-  position: absolute;
-  z-index: 40;
-  top: 50%;
-  left: 50%;
-  width: 100%;
-  max-width: 64rem;
-  transform: translate(-50%, -50%);
-  display: flex;
-  justify-content: center;
-  pointer-events: none;
-}
-.console-header__toolbar :deep(.console-action-bar) {
-  pointer-events: auto;
-}
-
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.3s ease;
-}
-
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-}
-
-.video-workspace:fullscreen {
-  width: 100vw;
-  height: 100vh;
-}
+.info-fade-enter-active, .info-fade-leave-active { transition: opacity 150ms; }
+.info-fade-enter-from, .info-fade-leave-to, .fade-enter-from, .fade-leave-to { opacity: 0; }
+.fade-enter-active, .fade-leave-active { transition: opacity .3s ease; }
 </style>

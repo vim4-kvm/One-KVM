@@ -227,6 +227,14 @@ cargo build --locked --release --features vim4
 python3 -m unittest discover -s deploy/vim4 -p 'test_*.py'
 ```
 
+仅迭代前端时，`npm --prefix web run build` 同时执行类型检查和 Vite 构建；
+`npm --prefix web test` 运行前端单元测试。可将 `web/dist/` 上传至
+`/opt/vim4-onekvm/frontend-r1/`，在 `one-kvm.service` 的开发 drop-in 中设置
+`Environment=ONE_KVM_FRONTEND_DIR=/opt/vim4-onekvm/frontend-r1`，执行
+`systemctl daemon-reload` 和 `systemctl restart one-kvm`。此变量由现有静态文件
+处理器支持，覆盖内嵌网页，不改变管理器所选应用。后续仅更新该目录无需重启。
+删除该 drop-in 并重新加载、重启服务即可恢复二进制内嵌网页；正式组件包仍按下文构建。
+
 独立 worktree 的助手测试需设置 `VIM4_BOARD_DIR`，指向公共工作区的 `board` 目录。
 UU SSH 回环集成测试默认跳过；可在隔离构建容器安装 `openssh-client`、`openssh-server`，
 准备 root 所有、0755 的 `/run/sshd`，运行
@@ -643,7 +651,30 @@ Bearer，从桌面版或其他终端启动时读不到。键鼠工具标记为�
 单帧转换固定 1/1 帧率并先协商下游 caps。4K H.264 实测见公共工作区
 `docs/bringup/2026-10-18-onekvm-snapshot-fit.md`；验证方法见 `docs/snapshot-validation.md`。
 
+## 控制台面板与虚拟键盘
+
+「连接统计」默认是视频区角落的非模态小卡片，可拖到四角并折叠为一行；
+详细图表在右侧停靠栏打开，与板子终端互斥，视频随之缩小而不被遮挡。
+虚拟键盘的修饰键为一次性：单击只作用于下一个键，双击锁定，再次单击松开；
+关闭键盘或页面转入后台时松开全部修饰键，避免目标机残留按下状态。
+快捷键栏按 Win/Mac/Android 显示预置组合键，自定义组合键最多 12 个，
+只保存在当前浏览器（localStorage `vkbShortcuts`）；录制期间按键不发送到目标机。
+
 ## 终端、扩展与看门狗
+
+控制台「板子终端」在桌面以非模态侧栏打开，关闭只隐藏 iframe，保留当前 shell；
+刷新整个控制台或重新连接会创建新会话。宽度和字号保存在浏览器本地。
+移动端使用全屏面板；横屏触屏且高度不超过 500px 时仍使用移动布局。
+当前私有 ttyd 暴露 `window.term.fit()`，但 xterm 尚无公开 `input()`，按键行通过
+其 `coreService.triggerDataEvent` 发送原始输入，不使用会添加括号粘贴标记的 `paste()`。
+连接状态读取 ttyd 客户端的 socket，用户主机名取自服务器标题。
+前端通过 `ttydClient.ts` 适配此版本的 Preact 客户端，关闭尺寸/重连浮层与原生 Enter 重连，
+统一使用面板断线栏重连；连接正常时 Enter 仍送入 shell。
+前端验收入口为 `web/tests/terminal-panel.browser.mjs`，需要 `PLAYWRIGHT_MODULE`
+和管理器登录环境（`MANAGER_PASSWORD`，可选 `MANAGER_USERNAME`）；默认访问 8080 网关。
+测试拦截 HTTP、WebSocket 和 WebRTC 的 HID 出站，截图与测量默认写入 `/tmp/okvm-ui/term-r1/`。
+第二轮验收设置 `TERMINAL_TEST_ROUND2=1 TERMINAL_TEST_OUTPUT=/tmp/okvm-ui/term-r2`，
+额外逐帧检查原生浮层不可见、断线/重连中状态和移动按键行的滚动渐隐提示。
 
 网页终端使用 Ubuntu 的 ttyd，以 khadas 运行，经现有认证代理访问专用 Unix socket。
 包内私有副本只带程序和许可证，不安装或启用 Ubuntu 的独立 ttyd 守护服务。

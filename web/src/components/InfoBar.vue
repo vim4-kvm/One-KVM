@@ -44,10 +44,11 @@ const keysDisplay = computed(() => {
 </script>
 
 <template>
-  <div class="w-full border-t bg-background">
+  <div :class="minimal ? 'min-w-0' : 'w-full border-t bg-background'">
     <!-- Compact mode (explicit prop or auto on small screens via sm:hidden) -->
     <div :class="compact ? '' : 'sm:hidden'">
-      <div class="flex items-center justify-between gap-3 text-xs px-2 h-7">
+      <div class="flex min-w-0 items-center justify-between gap-2 text-xs px-2" :class="minimal ? 'h-[22px]' : 'h-7'">
+        <Badge v-if="minimal && keyboardLedEnabled && capsLock" variant="outline" class="h-5 gap-1 px-1 text-xs"><span class="size-1.5 rounded-full bg-status-active" />Caps</Badge>
         <div v-if="keyboardLedEnabled && !minimal" class="flex items-center gap-1">
           <Badge variant="outline" class="h-5 gap-1 px-1 text-xs text-foreground">
             <span class="size-1.5 rounded-full" :class="capsLock ? 'bg-status-active' : 'bg-muted-foreground/30'" />Caps
@@ -63,8 +64,8 @@ const keysDisplay = computed(() => {
           {{ t('infobar.keyboardLedUnavailable') }}
         </div>
         <span v-if="captured && minimal" class="min-w-0 truncate text-xs text-muted-foreground" :title="t('infobar.pointerCaptured')">{{ t('infobar.pointerCaptured') }}</span>
-        <div v-if="keysDisplay" class="text-xs text-muted-foreground truncate max-w-[200px]">
-          {{ keysDisplay }}
+        <div v-if="keysDisplay" class="min-w-0 truncate text-xs text-muted-foreground" :class="minimal ? 'info-keys-recent' : 'max-w-[200px]'">
+          <bdi dir="ltr">{{ keysDisplay }}</bdi>
         </div>
       </div>
     </div>
@@ -110,3 +111,8 @@ const keysDisplay = computed(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* Keep the end of the chronological key list visible without reversing its text. */
+.info-keys-recent { direction: rtl; text-align: right; }
+</style>

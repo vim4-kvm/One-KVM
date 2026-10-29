@@ -158,7 +158,7 @@ onUnmounted(() => {
       >
         <VolumeX v-if="playbackMuted" class="size-3.5 sm:size-4" />
         <Volume2 v-else class="size-3.5 sm:size-4" />
-        <span class="hidden sm:inline">{{ t('actionbar.audioConfig') }}</span>
+        <span data-action-label>{{ t('actionbar.audioConfig') }}</span>
       </Button>
     </PopoverTrigger>
 

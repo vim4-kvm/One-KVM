@@ -572,7 +572,7 @@ watch(
         :title="buttonText"
       >
         <Monitor class="size-3.5 sm:size-4" />
-        <span class="hidden sm:inline">{{ buttonText }}</span>
+        <span data-action-label>{{ buttonText }}</span>
       </Button>
     </PopoverTrigger>
     <PopoverContent

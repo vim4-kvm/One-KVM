@@ -168,7 +168,7 @@ watch(() => props.open, (open) => {
       >
         <MousePointer v-if="mouseMode === 'absolute'" class="size-3.5 sm:size-4" />
         <Move v-else class="size-3.5 sm:size-4" />
-        <span class="hidden sm:inline">{{ buttonText }}</span>
+        <span data-action-label>{{ buttonText }}</span>
       </Button>
     </PopoverTrigger>
     <PopoverContent

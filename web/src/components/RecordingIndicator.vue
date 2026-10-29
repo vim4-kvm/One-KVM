@@ -18,6 +18,7 @@ onUnmounted(recording.detach)
 
 <template>
   <button
+    data-recording-indicator
     v-if="status?.recording"
     type="button"
     :title="t('recording.indicator')"

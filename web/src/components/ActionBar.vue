@@ -32,6 +32,7 @@ import {
 } from '@/components/ui/sheet'
 import {
   ClipboardPaste,
+  CircleDot,
   HardDrive,
   Settings,
   Power,
@@ -39,8 +40,6 @@ import {
   Terminal,
   MoreHorizontal,
   Bot,
-  ChevronUp,
-  ChevronDown,
   Keyboard,
   Scaling,
 } from 'lucide-vue-next'
@@ -59,7 +58,7 @@ const { t, locale } = useI18n()
 const router = useRouter()
 const systemStore = useSystemStore()
 
-const overflowMenuOpen = ref(false)
+const overflowMenuOpen = defineModel<boolean>('moreOpen', { default: false })
 
 const hidBackend = computed(() => (systemStore.hid?.backend ?? '').toLowerCase())
 const isCh9329Backend = computed(() => hidBackend.value.includes('ch9329'))
@@ -68,6 +67,7 @@ const showMsd = computed(() => {
 })
 const props = defineProps<{
   layout?: ConsoleLayout
+  isFullscreen?: boolean
   mouseMode?: 'absolute' | 'relative'
   videoMode?: VideoMode
   videoRotation?: VideoRotation
@@ -75,6 +75,8 @@ const props = defineProps<{
   showPower?: boolean
   atxEnabled?: boolean
   showTerminal?: boolean
+  terminalOpen?: boolean
+  statsOpen?: boolean
   showComputerUse?: boolean
   showPasteText?: boolean
   showRecording?: boolean
@@ -83,17 +85,6 @@ const props = defineProps<{
   sourceSizeAvailable?: boolean
 }>()
 const isSidebarLayout = computed(() => props.layout === 'sidebar')
-const isFloatingLayout = computed(() => props.layout === 'floating')
-const floatingCollapsed = ref(false)
-const expandButtonRef = ref<InstanceType<typeof Button> | null>(null)
-const collapseButtonRef = ref<InstanceType<typeof Button> | null>(null)
-
-async function setFloatingCollapsed(collapsed: boolean) {
-  floatingCollapsed.value = collapsed
-  await nextTick()
-  const target = collapsed ? expandButtonRef.value : collapseButtonRef.value
-  target?.$el?.focus()
-}
 const showAtx = computed(() => props.showPower !== false)
 const atxEnabled = computed(() => props.atxEnabled === true)
 const showStats = computed(() => (props.videoMode ?? 'mjpeg') !== 'mjpeg')
@@ -105,6 +96,7 @@ const showMic = computed(() => props.showMic === true)
 
 
 const emit = defineEmits<{
+  (e: 'naturalWidth', width: number): void
   (e: 'toggleFullscreen'): void
   (e: 'update:scaleMode', mode: VideoScaleMode): void
   (e: 'toggleStats'): void
@@ -175,13 +167,7 @@ const openMobilePaste = () => openFromOverflow(() => {
 const barRef = ref<HTMLElement | null>(null)
 const measureRef = ref<HTMLElement | null>(null)
 const barWidth = ref(0)
-const barHeight = ref(0)
-const coreWidth = ref(0)
-const coreHeight = ref(0)
-const fixedHeight = ref(0)
-const actionHeight = ref(36)
-const minimalDisplayControls = computed(() => isFloatingLayout.value && barWidth.value < 640)
-const alwaysRightWidth = ref(152)
+const minimalDisplayControls = computed(() => !isSidebarLayout.value && barWidth.value < 360)
 let layoutResizeObserver: ResizeObserver | null = null
 
 type CollapsibleItem =
@@ -206,6 +192,8 @@ const ITEM_SPECS: ItemSpec[] = [
 
 const measuredWidths = ref<Map<CollapsibleItem, { icon: number; label: number }>>(new Map())
 const measurementReady = ref(false)
+const coreLabelWidth = ref(0)
+const displayLabelWidth = ref(0)
 
 const measureLayout = async () => {
   await nextTick()
@@ -215,11 +203,6 @@ const measureLayout = async () => {
 
   const style = window.getComputedStyle(bar)
   barWidth.value = bar.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
-  barHeight.value = bar.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)
-  const core = Array.from(bar.querySelectorAll<HTMLElement>('[data-core-action]'))
-  coreWidth.value = core.reduce((sum, element) => sum + element.offsetWidth, 0)
-  coreHeight.value = core.reduce((sum, element) => sum + element.offsetHeight, 0)
-  actionHeight.value = core[0]?.offsetHeight || 36
 
   const newWidths = new Map<CollapsibleItem, { icon: number; label: number }>()
   for (const spec of ITEM_SPECS) {
@@ -233,21 +216,12 @@ const measureLayout = async () => {
     }
   }
   measuredWidths.value = newWidths
-
-  const elements = Array.from(bar.querySelectorAll('[data-fixed-action]')) as HTMLElement[]
-  const width = elements.reduce((sum, element) => {
-    const style = window.getComputedStyle(element)
-    return sum
-      + element.getBoundingClientRect().width
-      + Number.parseFloat(style.marginLeft || '0')
-      + Number.parseFloat(style.marginRight || '0')
-  }, 0)
-  alwaysRightWidth.value = Math.ceil(width)
-  fixedHeight.value = elements.reduce((sum, element) => {
-    const style = window.getComputedStyle(element)
-    return sum + element.getBoundingClientRect().height
-      + parseFloat(style.marginTop || '0') + parseFloat(style.marginBottom || '0')
-  }, 0)
+  const measured = (id: string) => (measureContainer.querySelector('[data-measure="' + id + '-label"]') as HTMLElement)?.offsetWidth ?? 0
+  coreLabelWidth.value = ['video', 'audio', 'hid'].reduce((sum, id) => sum + measured(id), 0)
+  displayLabelWidth.value = measured('fullscreen') + measured('keyboard') + 57
+  const naturalWidth = coreLabelWidth.value + displayLabelWidth.value
+    + collapsibleItems.value.reduce((sum, item) => sum + (newWidths.get(item.id)?.label ?? 0), 0) + 56
+  emit('naturalWidth', naturalWidth)
 
   measurementReady.value = true
 }
@@ -277,7 +251,7 @@ watch(locale, () => {
   void measureLayout()
 })
 
-watch([() => props.layout, () => props.showComputerUse, floatingCollapsed, minimalDisplayControls], () => {
+watch([() => props.layout, () => props.showComputerUse, minimalDisplayControls], () => {
   // Layout changes can move this bar while its portal based controls are open.
   // Close every transient surface first so no old portal remains attached to
   // the document after the new layout is painted.
@@ -311,10 +285,8 @@ watch(showPasteText, (visible) => {
 
 watch(deviceRecording.openRequests, async () => {
   if (!showRecording.value) return
-  if (isFloatingLayout.value && floatingCollapsed.value) {
-    await setFloatingCollapsed(false)
-    await measureLayout()
-  }
+  await nextTick()
+  await measureLayout()
   if (isVisible('record')) recordOpen.value = true
   else {
     mobileRecordOpen.value = true
@@ -322,11 +294,9 @@ watch(deviceRecording.openRequests, async () => {
   }
 })
 
-const OVERFLOW_BUTTON_BUDGET_PX = 36
 
 const collapsibleItems = computed(() => {
   const items = ITEM_SPECS.filter(item => {
-    if (isFloatingLayout.value && item.side === 'right') return false
     if (item.id === 'msd' && !showMsd.value) return false
     if (item.id === 'atx' && !showAtx.value) return false
     if (item.id === 'paste' && !showPasteText.value) return false
@@ -341,43 +311,35 @@ const collapsibleItems = computed(() => {
 
 const visibleSet = computed(() => {
   const result = new Map<CollapsibleItem, 'icon' | 'label'>()
-  if (!measurementReady.value) return result
-
   if (isSidebarLayout.value) {
-    // Reserve More and a gap between the two groups before assigning vertical slots.
-    let available = barHeight.value - coreHeight.value - fixedHeight.value - actionHeight.value - 16
-    const priority: CollapsibleItem[] = ['paste', 'record', 'settings', 'msd', 'atx', 'stats', 'terminal', 'ai']
-    for (const id of priority) {
-      if (!collapsibleItems.value.some(item => item.id === id)) continue
-      if (available < actionHeight.value) break
-      result.set(id, 'icon')
-      available -= actionHeight.value
-    }
+    // The rail scrolls vertically; every enabled action stays in the column.
+    for (const item of collapsibleItems.value) result.set(item.id, 'icon')
     return result
   }
+  if (!measurementReady.value) return result
 
-  const available = barWidth.value - alwaysRightWidth.value - Math.max(OVERFLOW_BUTTON_BUDGET_PX, actionHeight.value) - (isFloatingLayout.value ? 48 : 12)
-  let used = coreWidth.value
-  // Keep actions reachable before spending the remaining space on labels.
-  for (const item of collapsibleItems.value) {
-    const widths = measuredWidths.value.get(item.id)
-    if (!widths || used + widths.icon > available) continue
-    result.set(item.id, 'icon')
-    used += widths.icon
+  const allLabelsWidth = coreLabelWidth.value + displayLabelWidth.value
+    + collapsibleItems.value.reduce((sum, item) => sum + (measuredWidths.value.get(item.id)?.label ?? 0), 0) + 56
+  if (allLabelsWidth <= barWidth.value) {
+    for (const item of collapsibleItems.value) result.set(item.id, 'label')
+    return result
   }
-  if (isFloatingLayout.value && barWidth.value < 640) return result
-  for (const item of collapsibleItems.value) {
-    const widths = measuredWidths.value.get(item.id)
-    if (!widths || !result.has(item.id)) continue
-    const extra = widths.label - widths.icon
-    if (used + extra <= available) {
-      result.set(item.id, 'label')
-      used += extra
-    }
+  // Preserve the right group first; overflow the end of the left group first.
+  let available = barWidth.value - 96 - (minimalDisplayControls.value ? 32 : 121) - 48
+  const priority = [...collapsibleItems.value.filter(item => item.side === 'right'),
+    ...collapsibleItems.value.filter(item => item.side === 'left')]
+  for (const item of priority) {
+    const width = measuredWidths.value.get(item.id)?.icon ?? 40
+    if (available < width) continue
+    result.set(item.id, 'icon')
+    available -= width
   }
   return result
 })
 
+const labelsVisible = computed(() => !isSidebarLayout.value && measurementReady.value
+  && coreLabelWidth.value + displayLabelWidth.value
+    + collapsibleItems.value.reduce((sum, item) => sum + (measuredWidths.value.get(item.id)?.label ?? 0), 0) + 56 <= barWidth.value)
 const isVisible = (id: CollapsibleItem) => visibleSet.value.has(id)
 const hasOverflow = computed(() => {
   return collapsibleItems.value.some(i => !visibleSet.value.has(i.id))
@@ -389,37 +351,27 @@ const hasRightOverflow = computed(() => {
   return collapsibleItems.value.some(i => i.side === 'right' && !visibleSet.value.has(i.id))
 })
 
+const hasOpenSurface = computed(() => overflowMenuOpen.value || pasteOpen.value || recordOpen.value
+  || mobileRecordOpen.value || atxOpen.value || videoPopoverOpen.value || hidPopoverOpen.value
+  || audioPopoverOpen.value || msdDialogOpen.value || mobileAtxOpen.value || mobilePasteOpen.value)
+defineExpose({ hasOpenSurface })
 </script>
 
 <template>
   <div
+    :data-label-mode="labelsVisible ? 'labels' : 'icons'"
     :class="[
-      'console-action-bar bg-background',
-      props.layout === 'floating' && 'console-action-bar--floating',
-      isFloatingLayout && floatingCollapsed && 'console-action-bar--collapsed',
+      'console-action-bar',
       props.layout === 'sidebar' && 'console-action-bar--sidebar',
-      (!props.layout || props.layout === 'current') && 'w-full border-b',
+      (!props.layout || props.layout === 'current') && 'w-full',
     ]"
   >
-    <Button
-      v-if="isFloatingLayout && floatingCollapsed"
-      ref="expandButtonRef"
-      variant="ghost"
-      size="sm"
-      class="console-action-bar__expand gap-1.5 rounded-xl text-xs"
-      :aria-label="t('actionbar.expandToolbar')"
-      :aria-expanded="false"
-      @click="setFloatingCollapsed(false)"
-    >
-      <ChevronDown class="size-4" />{{ t('actionbar.expandToolbar') }}
-    </Button>
     <div
-      v-show="!isFloatingLayout || !floatingCollapsed"
       ref="barRef"
       class="console-action-bar__inner flex items-center"
       :class="isSidebarLayout
-        ? 'h-full flex-col px-1 py-2 sm:px-1.5'
-        : 'px-2 py-1 sm:px-4 sm:py-1.5'"
+        ? 'h-full flex-col px-1.5 py-2'
+        : 'h-8 p-0'"
     >
       <!-- Left side buttons -->
       <ButtonGroup
@@ -474,7 +426,7 @@ const hasRightOverflow = computed(() => {
                   @click="msdDialogOpen = true"
                 >
                   <HardDrive class="size-4" />
-                  <span v-if="visibleSet.get('msd') === 'label'">{{ t('actionbar.virtualMedia') }}</span>
+                  <span data-action-label>{{ t('actionbar.virtualMedia') }}</span>
                 </Button>
               </TooltipTrigger>
               <TooltipContent>
@@ -496,7 +448,7 @@ const hasRightOverflow = computed(() => {
                 :title="t('actionbar.power')"
               >
                 <Power class="size-4" />
-                <span v-if="visibleSet.get('atx') === 'label'">{{ t('actionbar.power') }}</span>
+                <span data-action-label>{{ t('actionbar.power') }}</span>
               </Button>
             </PopoverTrigger>
             <PopoverContent
@@ -528,7 +480,7 @@ const hasRightOverflow = computed(() => {
                 :title="t('actionbar.paste')"
               >
                 <ClipboardPaste class="size-4" />
-                <span v-if="visibleSet.get('paste') === 'label'">{{ t('actionbar.paste') }}</span>
+                <span data-action-label>{{ t('actionbar.paste') }}</span>
               </Button>
             </PopoverTrigger>
             <PopoverContent
@@ -554,11 +506,9 @@ const hasRightOverflow = computed(() => {
                 :aria-label="t('recording.title')"
                 :title="t('recording.title')"
               >
-                <i class="relative flex size-4 items-center justify-center not-italic" aria-hidden="true">
-                  <span v-if="isRecording" class="absolute inline-flex size-2.5 animate-ping rounded-full bg-red-500/60" />
-                  <span :class="['relative inline-flex size-2.5 rounded-full', isRecording ? 'bg-red-500' : 'border-[1.5px] border-current']" />
-                </i>
-                <span v-if="visibleSet.get('record') === 'label'">{{ t('recording.short') }}</span>
+                <span v-if="isRecording" class="size-2.5 rounded-full bg-red-500" aria-hidden="true" />
+                <CircleDot v-else class="size-4" aria-hidden="true" />
+                <span data-action-label>{{ t('recording.short') }}</span>
               </Button>
             </PopoverTrigger>
             <PopoverContent
@@ -585,6 +535,7 @@ const hasRightOverflow = computed(() => {
         :orientation="isSidebarLayout ? 'vertical' : 'horizontal'"
       >
         <VideoDisplayControls
+          :is-fullscreen="props.isFullscreen"
           :minimal="minimalDisplayControls"
           :text-only-scale="isSidebarLayout"
           :scale-mode="props.scaleMode"
@@ -599,9 +550,9 @@ const hasRightOverflow = computed(() => {
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger as-child>
-                <Button variant="ghost" size="sm" class="h-8 gap-1.5 text-xs" :aria-label="t('actionbar.stats')" @click="emit('toggleStats')">
+                <Button variant="ghost" size="sm" class="h-8 gap-1.5 text-xs" :aria-label="t('actionbar.stats')" :aria-pressed="!!props.statsOpen" :class="props.statsOpen && 'bg-accent text-accent-foreground'" @click="emit('toggleStats')">
                   <BarChart3 class="size-4" />
-                  <span v-if="visibleSet.get('stats') === 'label'">{{ t('actionbar.stats') }}</span>
+                  <span data-action-label>{{ t('actionbar.stats') }}</span>
                 </Button>
               </TooltipTrigger>
               <TooltipContent>
@@ -622,14 +573,17 @@ const hasRightOverflow = computed(() => {
                   class="h-8 gap-1.5 text-xs"
                   :disabled="!props.ttydRunning"
                   :aria-label="t('actionbar.webTerminal')"
+                  :aria-expanded="!!props.terminalOpen"
+                  :aria-pressed="!!props.terminalOpen"
+                  :class="props.terminalOpen && 'bg-accent text-accent-foreground'"
                   @click="emit('openTerminal')"
                 >
                   <Terminal class="size-4" />
-                  <span v-if="visibleSet.get('terminal') === 'label'">{{ t('actionbar.webTerminal') }}</span>
+                  <span data-action-label>{{ t('actionbar.webTerminal') }}</span>
                 </Button>
               </TooltipTrigger>
               <TooltipContent>
-                <p>{{ t('extensions.ttyd.title') }}</p>
+                <p>{{ t('actionbar.webTerminal') }}</p>
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -647,7 +601,7 @@ const hasRightOverflow = computed(() => {
                 @click="emit('openComputerUse')"
               >
                 <Bot class="size-3.5 sm:size-4" />
-                <span v-if="visibleSet.get('ai') === 'label'">AI</span>
+                <span data-action-label>AI</span>
               </Button>
             </TooltipTrigger>
             <TooltipContent>
@@ -663,7 +617,7 @@ const hasRightOverflow = computed(() => {
               <TooltipTrigger as-child>
                 <Button variant="ghost" size="sm" class="h-8 gap-1.5 text-xs" :aria-label="t('actionbar.settings')" @click="router.push('/settings')">
                   <Settings class="size-4" />
-                  <span v-if="visibleSet.get('settings') === 'label'">{{ t('actionbar.settings') }}</span>
+                  <span data-action-label>{{ t('actionbar.settings') }}</span>
                 </Button>
               </TooltipTrigger>
               <TooltipContent>
@@ -674,9 +628,10 @@ const hasRightOverflow = computed(() => {
         </div>
 
         <!-- Overflow Menu - Only show if there are overflowed items -->
-        <DropdownMenu v-if="hasOverflow || minimalDisplayControls" v-model:open="overflowMenuOpen">
+        <slot name="trailing" />
+        <DropdownMenu v-if="!isSidebarLayout" v-model:open="overflowMenuOpen">
           <DropdownMenuTrigger as-child>
-            <Button variant="ghost" size="sm" class="size-8 p-0" :aria-label="t('actionbar.more')" :title="t('actionbar.more')">
+            <Button variant="ghost" size="sm" class="size-8 p-0" :aria-label="t('common.more')" :title="t('common.more')">
               <MoreHorizontal class="size-3.5 sm:size-4" />
             </Button>
           </DropdownMenuTrigger>
@@ -713,21 +668,24 @@ const hasRightOverflow = computed(() => {
 
             <!-- Recording -->
             <DropdownMenuItem v-if="showRecording && !isVisible('record')" @click="openMobileRecord">
-              <span class="mr-2 inline-flex size-4 items-center justify-center"><span :class="['inline-flex size-2.5 rounded-full', isRecording ? 'bg-red-500' : 'border-[1.5px] border-current']" /></span>
+              <span v-if="isRecording" class="size-2.5 rounded-full bg-red-500" /><CircleDot v-else class="size-4" />
               {{ t('recording.title') }}
             </DropdownMenuItem>
 
             <DropdownMenuSeparator v-if="hasLeftOverflow && hasRightOverflow" />
 
             <!-- Stats -->
-            <DropdownMenuItem v-if="!isFloatingLayout && showStats && !isVisible('stats')" @click="openFromOverflow(() => emit('toggleStats'))">
+            <DropdownMenuItem v-if="showStats && !isVisible('stats')" @click="openFromOverflow(() => emit('toggleStats'))">
               <BarChart3 class="size-4 mr-2" />
               {{ t('actionbar.stats') }}
             </DropdownMenuItem>
 
             <!-- Web Terminal -->
             <DropdownMenuItem
-              v-if="!isFloatingLayout && props.showTerminal !== false && !isVisible('terminal')"
+              v-if="props.showTerminal !== false && !isVisible('terminal')"
+              :aria-expanded="!!props.terminalOpen"
+              :aria-pressed="!!props.terminalOpen"
+              :class="props.terminalOpen && 'bg-accent text-accent-foreground'"
               :disabled="!props.ttydRunning"
               @click="openFromOverflow(() => emit('openTerminal'))"
             >
@@ -735,30 +693,19 @@ const hasRightOverflow = computed(() => {
               {{ t('actionbar.webTerminal') }}
             </DropdownMenuItem>
 
-            <DropdownMenuItem v-if="!isFloatingLayout && props.showComputerUse !== false && !isVisible('ai')" @click="openFromOverflow(() => emit('openComputerUse'))">
+            <DropdownMenuItem v-if="props.showComputerUse !== false && !isVisible('ai')" @click="openFromOverflow(() => emit('openComputerUse'))">
               <Bot class="size-4 mr-2" />{{ t('computerUse.title') }}
             </DropdownMenuItem>
 
             <!-- Settings -->
-            <DropdownMenuItem v-if="!isFloatingLayout && !isVisible('settings')" @click="openFromOverflow(() => router.push('/settings'))">
+            <DropdownMenuItem v-if="!isVisible('settings')" @click="openFromOverflow(() => router.push('/settings'))">
               <Settings class="size-4 mr-2" />
               {{ t('actionbar.settings') }}
             </DropdownMenuItem>
+            <DropdownMenuSeparator v-if="!isSidebarLayout && (hasOverflow || minimalDisplayControls)" />
+            <slot name="more" />
           </DropdownMenuContent>
         </DropdownMenu>
-        <Button
-          v-if="isFloatingLayout"
-          ref="collapseButtonRef"
-          data-fixed-action
-          variant="ghost"
-          size="icon-sm"
-          :aria-label="t('actionbar.collapseToolbar')"
-          :title="t('actionbar.collapseToolbar')"
-          :aria-expanded="true"
-          @click="setFloatingCollapsed(true)"
-        >
-          <ChevronUp class="size-4" />
-        </Button>
       </ButtonGroup>
     </div>
   </div>
@@ -822,6 +769,7 @@ const hasRightOverflow = computed(() => {
        icon-only and with-label forms so we can read their real offsetWidth. -->
   <div ref="measureRef" aria-hidden="true" class="fixed pointer-events-none" style="visibility: hidden; top: -9999px; left: -9999px; white-space: nowrap;">
     <div class="flex items-center gap-0.5 sm:gap-1.5 px-2 sm:px-4 py-1 sm:py-1.5">
+      <Button v-for="(label, id) in { video: t('actionbar.videoConfig'), audio: t('actionbar.audioConfig'), hid: t('actionbar.hidConfig'), fullscreen: t(props.isFullscreen ? 'actionbar.exitFullscreen' : 'actionbar.fullscreen'), keyboard: t('actionbar.keyboard') }" :key="id" :data-measure="id + '-label'" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><CircleDot class="size-4" />{{ label }}</Button>
       <!-- MSD -->
       <Button data-measure="msd-icon" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><HardDrive class="size-4" /></Button>
       <Button data-measure="msd-label" variant="ghost" size="sm" class="h-8 gap-1.5 text-xs"><HardDrive class="size-4" />{{ t('actionbar.virtualMedia') }}</Button>
@@ -849,36 +797,28 @@ const hasRightOverflow = computed(() => {
 </template>
 
 <style scoped>
-.console-action-bar--floating {
-  position: relative;
-  z-index: 40;
-  width: 100%;
-  max-width: 64rem;
-  border: 1px solid var(--border);
-  border-radius: 1rem;
-  background: color-mix(in srgb, var(--background) 96%, transparent);
-  box-shadow: 0 2px 8px rgb(0 0 0 / 8%);
-  backdrop-filter: blur(14px);
-}
-
-.console-action-bar--floating .console-action-bar__inner {
-  border-radius: inherit;
-}
-
+.console-action-bar { background: transparent; }
+.console-action-bar__inner { gap: 2px; }
+.console-action-bar:not(.console-action-bar--sidebar) .console-action-bar__inner :deep(button) { height: 32px; padding-inline: 10px; gap: 6px; }
+.console-action-bar[data-label-mode='icons'] :deep([data-action-label]) { display: none; }
+.console-action-bar:not(.console-action-bar--sidebar)[data-label-mode='icons'] .console-action-bar__inner :deep(button:not([aria-pressed])) { width: 32px; padding-inline: 8px; }
+.console-action-bar:not(.console-action-bar--sidebar) .console-action-bar__inner :deep([data-console-divider]) { width: 1px; min-width: 1px; padding: 0; }
 .console-action-bar--sidebar {
   position: absolute;
   z-index: 40;
   top: 2.5rem;
-  bottom: 1.75rem;
+  bottom: 0;
   left: 0;
   width: 3.5rem;
-  border-right: 1px solid var(--border);
+  box-shadow: inset -1px 0 var(--border);
   background: color-mix(in srgb, var(--background) 94%, transparent);
   backdrop-filter: blur(12px);
 }
 
-.console-action-bar--sidebar :deep([data-slot='button-group']) {
+.console-action-bar--sidebar :deep([data-slot='button-group']),
+.console-action-bar--sidebar :deep([data-slot='button-group'] > :not([data-console-divider])) {
   width: 100%;
+  min-width: 0;
 }
 
 .console-action-bar--sidebar :deep(button) {
@@ -887,86 +827,29 @@ const hasRightOverflow = computed(() => {
   width: 100%;
   min-width: 0;
   gap: 0;
+  justify-content: center;
   overflow: hidden;
   padding-inline: 0.5rem;
   border-radius: 0.5rem;
 }
 
-.console-action-bar--sidebar :deep(button > span) {
-  display: none;
-}
-
-.console-action-bar--sidebar :deep([data-fixed-action][aria-hidden='true']) {
-  width: 1.5rem;
+.console-action-bar--sidebar :deep([data-console-divider]) {
+  width: 24px;
+  min-width: 24px;
   height: 1px;
-  margin: 0.35rem auto;
+  padding: 0;
+  margin: 6px auto;
 }
 
 .console-action-bar--sidebar .console-action-bar__inner {
   overflow-y: auto;
+  overflow-x: hidden;
   gap: 1rem;
-  scrollbar-width: thin;
-}
-
-.console-action-bar--floating .console-action-bar__inner {
-  padding: 4px 12px;
-  gap: 8px;
-}
-
-.console-action-bar--floating :deep([data-slot='button-group']) {
-  gap: 4px;
-}
-
-.console-action-bar--floating .console-action-bar__inner :deep(button) {
-  min-width: 36px;
-  height: 38px;
-  padding-inline: 10px;
-  flex-shrink: 0;
-  border-radius: 10px;
-}
-
-.console-action-bar--floating .console-action-bar__inner :deep(button[aria-expanded='true']) {
-  background: var(--accent);
-}
-
-@media (max-width: 639px) {
-  .console-action-bar--floating .console-action-bar__inner {
-    padding-inline: 4px;
-    gap: 0;
-  }
-  .console-action-bar--floating :deep([data-slot='button-group']) {
-    gap: 0;
-  }
-  .console-action-bar--floating .console-action-bar__inner :deep(button) {
-    width: 36px;
-    padding-inline: 0;
-  }
-}
-
-.console-action-bar--floating.console-action-bar--collapsed {
-  width: auto;
+  /* A reserved scrollbar would shrink and offset the fixed-width icon column. */
+  scrollbar-width: none;
 }
 
 @media (pointer: coarse) {
-  .console-action-bar__expand {
-    min-height: 44px;
-  }
-  .console-action-bar--sidebar :deep(button) {
-    height: 44px;
-  }
-  .console-action-bar--floating .console-action-bar__inner :deep(button) {
-    min-width: 44px;
-    height: 44px;
-  }
-  .console-action-bar--floating .console-action-bar__inner {
-    padding-inline: 4px;
-  }
-}
-
-@media (min-width: 640px) {
-  .console-action-bar--sidebar {
-    top: 3.5rem;
-    width: 4rem;
-  }
+  .console-action-bar--sidebar :deep(button) { height: 44px; }
 }
 </style>

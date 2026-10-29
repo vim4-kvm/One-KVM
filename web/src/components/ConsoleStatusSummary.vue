@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { useConsoleStatus } from '@/composables/useConsoleStatus'
 import { useI18n } from 'vue-i18n'
 import { ChevronDown, AlertCircle, Info } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
@@ -23,14 +23,8 @@ const props = defineProps<{
   showVideoInfo?: boolean
 }>()
 const { t } = useI18n()
-const issues = computed(() => props.items.filter(item =>
-  ['error', 'no_signal', 'busy'].includes(item.status) || (item.required && item.status !== 'connected'),
-))
-const summary = computed(() => issues.value.length
-  ? issues.value.map(item => `${item.title}: ${t(`status.${item.status}`)}`).join(' · ')
-  : t('status.connected'))
-const videoInfo = computed(() => props.items.find(item => item.id === 'video')?.quickInfo)
-const hasError = computed(() => issues.value.some(item => item.status === 'error'))
+const open = defineModel<boolean>('open', { default: false })
+const { issues, summary, videoInfo, hasError } = useConsoleStatus(() => props.items, t)
 
 function dotClass(status: ConsoleStatusItem['status']) {
   return {
@@ -47,12 +41,12 @@ function dotClass(status: ConsoleStatusItem['status']) {
 </script>
 
 <template>
-  <Popover>
+  <Popover v-model:open="open">
     <PopoverTrigger as-child>
       <Button
         variant="ghost"
         size="sm"
-        class="min-w-0 shrink gap-1.5 px-2 text-xs"
+        class="console-status-summary min-w-0 shrink-0 gap-1.5 px-2 text-xs"
         :class="hasError ? 'text-destructive' : issues.length ? 'text-warning' : ''"
         :aria-label="`${t('statusCard.connectionDetails')}: ${summary}`"
         :title="summary"
@@ -60,7 +54,7 @@ function dotClass(status: ConsoleStatusItem['status']) {
         <AlertCircle v-if="hasError" class="size-3.5 shrink-0" />
         <Info v-else-if="issues.length" class="size-3.5 shrink-0" />
         <span v-else class="size-2 shrink-0 rounded-full bg-status-active" />
-        <span class="truncate" role="status">{{ summary }}</span>
+        <span class="console-status-text truncate" role="status">{{ summary }}</span>
         <span v-if="showVideoInfo && !issues.length" class="hidden text-muted-foreground md:inline">{{ videoInfo }}</span>
         <ChevronDown class="size-3 shrink-0" />
       </Button>
