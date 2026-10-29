@@ -30,7 +30,7 @@ const dim = computed(() => {
 
 <template>
   <img
-    src="/favicon.png"
+    src="/favicon.svg"
     alt=""
     :class="cn('shrink-0 object-contain select-none', dim, props.class)"
     decoding="async"

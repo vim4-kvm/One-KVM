@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- A pointer over a remote screen; palette shared with the vim4-manager mark. -->
+  <defs>
+    <path id="pointer" d="M52 42l60 23-25 9-9 25Z" stroke-linejoin="round"/>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="#fff"/>
+  <rect x="12" y="20" width="88" height="66" rx="13" fill="#272b30"/>
+  <use href="#pointer" fill="#fff" stroke="#fff" stroke-width="16"/>
+  <use href="#pointer" fill="#2563eb" stroke="#2563eb" stroke-width="6"/>
+</svg>
