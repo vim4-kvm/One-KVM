@@ -5,6 +5,8 @@ import { ChevronDown, ChevronUp, Maximize2, X } from 'lucide-vue-next'
 import type { WebRTCStats } from '@/composables/useWebRTC'
 import { formatFpsValue } from '@/lib/fps'
 import {
+  browserDelayMs,
+  frameGapLevel,
   fpsLevel,
   formatMbps,
   formatMs,
@@ -12,6 +14,8 @@ import {
   lossLevel,
   nearestCorner,
   rttLevel,
+  sampleSeries,
+  shownFps,
   sparklinePoints,
   type ConnectionSample,
   type HudCorner,
@@ -41,23 +45,34 @@ const SPARK_W = 72
 const SPARK_H = 16
 const recent = computed(() => props.samples.slice(-HISTORY))
 const latest = computed(() => recent.value[recent.value.length - 1])
-const series = (key: keyof ConnectionSample) => recent.value.map(s => s[key])
-const peakFps = computed(() => Math.max(0, ...series('fps')))
+const series = (key: Parameters<typeof sampleSeries>[1]) => sampleSeries(recent.value, key)
+const peakFps = computed(() => Math.max(0, ...recent.value.map(shownFps)))
+const spark = (values: number[]) => sparklinePoints(values, SPARK_W, SPARK_H)
 
 interface Row { id: string; label: string; value: string; points: string; level: StatsLevel; title?: string }
 const rows = computed<Row[]>(() => {
   const s = latest.value
-  const points = (key: keyof ConnectionSample) => sparklinePoints(series(key), SPARK_W, SPARK_H)
+  const w = props.webrtcStats
+  const measured = s?.presentedFps !== undefined
+  const fpsTitle = measured
+    ? `${t('stats.decodedFps')} ${Math.round(s?.fps ?? 0)} fps · ${t('stats.droppedFrames')} ${w?.framesDropped ?? 0}`
+    : `${t('stats.droppedFrames')} ${w?.framesDropped ?? 0}`
+  const delayTitle = [
+    s?.receiveToPresentMs ? t('stats.receiveToPresentHint') : t('stats.processingHint'),
+    `${t('stats.jitterBuffer')} ${formatMs(s?.jitterBufferMs ?? 0)} ms`,
+    `${t('stats.decode')} ${formatMs(s?.decodeMs ?? 0)} ms`,
+  ].join(' · ')
   return [
-    { id: 'fps', label: t('stats.frameRate'), value: `${formatFpsValue(Math.round(s?.fps ?? 0))} fps`, points: points('fps'), level: fpsLevel(s?.fps ?? 0, peakFps.value), title: `${t('stats.droppedFrames')} ${props.webrtcStats?.framesDropped ?? 0}` },
-    { id: 'bitrate', label: t('stats.bitrate'), value: `${formatMbps(s?.bitrateMbps ?? 0)} Mbps`, points: points('bitrateMbps'), level: 'ok' },
-    { id: 'rtt', label: t('stats.latency'), value: `${formatMs(s?.rttMs ?? 0)} ms`, points: points('rttMs'), level: rttLevel(s?.rttMs ?? 0), title: `${t('stats.rttHint')} · ${t('stats.jitter')} ${formatMs(s?.jitterMs ?? 0)} ms` },
-    { id: 'processing', label: t('stats.processing'), value: `${formatMs(s?.processingMs ?? 0)} ms`, points: points('processingMs'), level: 'ok', title: `${t('stats.jitterBuffer')} ${formatMs(s?.jitterBufferMs ?? 0)} ms · ${t('stats.decode')} ${formatMs(s?.decodeMs ?? 0)} ms` },
-    { id: 'loss', label: t('stats.packetLoss'), value: `${formatPct(s?.lossPct ?? 0)} %`, points: points('lossPct'), level: lossLevel(s?.lossPct ?? 0), title: `${t('stats.packetsLost')} ${props.webrtcStats?.packetsLost ?? 0}` },
+    { id: 'fps', label: t('stats.frameRate'), value: `${formatFpsValue(Math.round(shownFps(s)))} fps`, points: spark(recent.value.map(shownFps)), level: fpsLevel(shownFps(s), peakFps.value), title: fpsTitle },
+    ...(measured ? [{ id: 'gap', label: t('stats.frameGap'), value: `${formatMs(s?.maxFrameGapMs ?? 0)} ms`, points: spark(recent.value.filter(x => x.maxFrameGapMs !== undefined).map(x => x.maxFrameGapMs!)), level: frameGapLevel(s?.maxFrameGapMs ?? 0, peakFps.value), title: t('stats.frameGapHint', { n: s?.stutters ?? 0 }) }] : []),
+    { id: 'bitrate', label: t('stats.bitrate'), value: `${formatMbps(s?.bitrateMbps ?? 0)} Mbps`, points: spark(series('bitrateMbps')), level: 'ok' },
+    { id: 'rtt', label: t('stats.latency'), value: `${formatMs(s?.rttMs ?? 0)} ms`, points: spark(series('rttMs')), level: rttLevel(s?.rttMs ?? 0), title: `${t(s?.rttSource === 'channel' ? 'stats.rttChannelHint' : 'stats.rttHint')} · ${t('stats.jitter')} ${formatMs(s?.jitterMs ?? 0)} ms` },
+    { id: 'delay', label: t(s?.receiveToPresentMs ? 'stats.receiveToPresent' : 'stats.processing'), value: `${formatMs(browserDelayMs(s))} ms`, points: spark(recent.value.map(browserDelayMs)), level: 'ok', title: delayTitle },
+    { id: 'loss', label: t('stats.packetLoss'), value: `${formatPct(s?.lossPct ?? 0)} %`, points: spark(series('lossPct')), level: lossLevel(s?.lossPct ?? 0), title: `${t('stats.packetsLost')} ${w?.packetsLost ?? 0}` },
   ]
 })
 const worstLevel = computed<StatsLevel>(() => rows.value.some(r => r.level === 'bad') ? 'bad' : rows.value.some(r => r.level === 'warning') ? 'warning' : 'ok')
-const summaryLine = computed(() => rows.value.filter(r => r.id !== 'processing').map(r => r.value.replace(' ', '')).join(' · '))
+const summaryLine = computed(() => rows.value.filter(r => r.id !== 'delay' && r.id !== 'gap').map(r => r.value.replace(' ', '')).join(' · '))
 const connectionLine = computed(() => {
   const s = props.webrtcStats
   if (!s) return '-'

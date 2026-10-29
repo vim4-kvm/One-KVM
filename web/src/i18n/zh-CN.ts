@@ -1614,6 +1614,13 @@ export default {
     },
   },
   stats: {
+    fpsChartHint: '实线为实际显示的帧率，虚线为解码帧率',
+    rttChannelHint: '数据通道往返，与视频走同一网络路径，每 0.5 秒测一次',
+    decodedFps: '解码',
+    frameGap: '最长帧间隔',
+    frameGapHint: '最近 1 秒内相邻两帧显示的最长间隔；超过 50 ms 的 {n} 次',
+    receiveToPresent: '接收→显示',
+    receiveToPresentHint: '浏览器从收到帧的最后一个数据包到画面显示的耗时',
     rttHint: '浏览器 ICE 连通性检查的往返时间，约每 2.5 秒更新一次',
     processing: '接收处理',
     processingHint: '浏览器从收到首个数据包到解码完成的每帧耗时，含抖动缓冲与解码',

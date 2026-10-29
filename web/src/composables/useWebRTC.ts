@@ -9,6 +9,8 @@ import {
 import { isDebugLogEnabled, videoDebugLog } from '@/lib/debugLog'
 import { startVideoDiagnostics } from '@/lib/videoDiagnostics'
 import { createConnectionSampler, readStatsReport, type ConnectionSample } from '@/lib/connectionStats'
+import { createPingTracker } from '@/lib/dataChannelPing'
+import { createFrameCadence } from '@/lib/frameCadence'
 
 export type { HidKeyboardEvent, HidMouseEvent }
 
@@ -106,6 +108,11 @@ const STATS_DETAIL_INTERVAL_MS = 500
 /** Two minutes at the detailed rate. */
 const STATS_HISTORY = 240
 const statsHistory = shallowRef<ConnectionSample[]>([])
+// Both only run while a stats view is open: one tiny ping per tick, one callback per presented frame.
+const channelPing = createPingTracker()
+const frameCadence = createFrameCadence()
+let cadenceVideo: HTMLVideoElement | null = null
+let cadenceCallback = 0
 let stopVideoDiagnostics: (() => void) | null = null
 let isConnecting = false
 let connectInFlight: Promise<boolean> | null = null
@@ -268,7 +275,9 @@ function setupDataChannel(channel: RTCDataChannel) {
     })
   }
 
-  channel.onmessage = () => {
+  channel.binaryType = 'arraybuffer'
+  channel.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) channelPing.receive(event.data, performance.now())
   }
 }
 
@@ -320,10 +329,45 @@ function scheduleStats() {
   statsInterval = window.setInterval(collectStats, statsDetailed ? STATS_DETAIL_INTERVAL_MS : STATS_INTERVAL_MS)
 }
 
+function onPresentedFrame(_now: number, meta: VideoFrameCallbackMetadata) {
+  frameCadence.add(meta)
+  if (cadenceVideo) cadenceCallback = cadenceVideo.requestVideoFrameCallback(onPresentedFrame)
+}
+
+/** Finds the element playing our track; it can be swapped when the console re-renders. */
+function trackFrameCadence() {
+  const track = videoTrack.value
+  if (cadenceVideo?.isConnected && cadenceVideo.srcObject instanceof MediaStream
+    && track && cadenceVideo.srcObject.getVideoTracks().includes(track)) return
+  stopFrameCadence()
+  if (!track) return
+  const video = [...document.querySelectorAll('video')].find(element =>
+    element.srcObject instanceof MediaStream && element.srcObject.getVideoTracks().includes(track))
+  if (!video || !('requestVideoFrameCallback' in video)) return
+  cadenceVideo = video
+  cadenceCallback = video.requestVideoFrameCallback(onPresentedFrame)
+}
+
+function stopFrameCadence() {
+  cadenceVideo?.cancelVideoFrameCallback(cadenceCallback)
+  cadenceVideo = null
+  frameCadence.reset()
+}
+
+function sendChannelPing() {
+  if (!dataChannel || dataChannel.readyState !== 'open') return
+  const ping = channelPing.next(performance.now())
+  if (ping) dataChannel.send(ping)
+}
+
 async function collectStats() {
   if (!peerConnection || statsInFlight) return
   statsInFlight = true
   try {
+    if (statsDetailed) {
+      sendChannelPing()
+      trackFrameCadence()
+    }
     const report = await peerConnection.getStats()
     const reading = readStatsReport(report.values())
     const candidates: Record<string, { type: IceCandidateType; protocol: string }> = {}
@@ -367,6 +411,13 @@ async function collectStats() {
     if (remote) next.remoteCandidateType = remote.type
     next.isRelay = next.localCandidateType === 'relay' || next.remoteCandidateType === 'relay'
     stats.value = next
+    if (sample && statsDetailed) {
+      const now = performance.now()
+      const channelRtt = channelPing.average(now)
+      if (channelRtt !== null) Object.assign(sample, { rttMs: channelRtt, rttSource: 'channel' })
+      const cadence = frameCadence.summarize(now)
+      if (cadence) Object.assign(sample, cadence)
+    }
     if (sample) statsHistory.value = [...statsHistory.value, sample].slice(-STATS_HISTORY)
   } catch {
   } finally {
@@ -385,6 +436,8 @@ function startStatsCollection() {
 }
 
 function stopStatsCollection() {
+  stopFrameCadence()
+  channelPing.reset()
   stopVideoDiagnostics?.()
   stopVideoDiagnostics = null
   if (statsInterval) {
@@ -397,6 +450,10 @@ function stopStatsCollection() {
 function setStatsDetailed(detailed: boolean) {
   if (statsDetailed === detailed) return
   statsDetailed = detailed
+  if (!detailed) {
+    stopFrameCadence()
+    channelPing.reset()
+  }
   if (statsInterval) scheduleStats()
 }
 

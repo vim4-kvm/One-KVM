@@ -69,6 +69,7 @@ test('a counter reset from a new peer connection starts a fresh baseline instead
   const next = sample(snap({ at: 3000, bytesReceived: 135_000, packetsReceived: 110, framesDecoded: 61 }))
   assert.equal(next.bitrateMbps, 1)
   assert.equal(next.fps, 60)
+  assert.equal(next.rttSource, 'ice')
   assert.equal(sample(snap({ at: 3000 })), null, 'a repeated report timestamp is ignored')
 })
 
@@ -93,6 +94,17 @@ test('formatting keeps precision where small values matter', () => {
   assert.deepEqual([0, 0.4, 1, 1.46, 9.99, 12.4].map(stats.formatMs), ['0', '<1', '1.0', '1.5', '10.0', '12'])
   assert.deepEqual([0, 0.123, 4, 12.34].map(stats.formatMbps), ['0', '0.12', '4.00', '12.3'])
   assert.deepEqual([0, 0.05, 1.234].map(stats.formatPct), ['0', '<0.1', '1.2'])
+})
+
+test('display helpers prefer measured presentation and fall back to decode figures', () => {
+  const base = { fps: 58, processingMs: 4.5 }
+  assert.equal(stats.shownFps(base), 58)
+  assert.equal(stats.shownFps({ ...base, presentedFps: 55 }), 55)
+  assert.equal(stats.browserDelayMs(base), 4.5)
+  assert.equal(stats.browserDelayMs({ ...base, receiveToPresentMs: 9 }), 9)
+  assert.equal(stats.shownFps(undefined), 0)
+  assert.deepEqual(stats.sampleSeries([{ maxFrameGapMs: 20 }, {}], 'maxFrameGapMs'), [20, 0])
+  assert.deepEqual([[40, 60], [60, 60], [201, 60], [500, 5]].map(([g, p]) => stats.frameGapLevel(g, p)), ['ok', 'warning', 'bad', 'ok'])
 })
 
 test('thresholds escalate at the documented boundaries', () => {

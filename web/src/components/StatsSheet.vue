@@ -11,7 +11,7 @@ import { Item, ItemContent, ItemDescription, ItemTitle } from '@/components/ui/i
 import { Card } from '@/components/ui/card'
 import type { WebRTCStats } from '@/composables/useWebRTC'
 import { formatFpsValue } from '@/lib/fps'
-import { formatMbps, formatMs, formatPct, type ConnectionSample } from '@/lib/connectionStats'
+import { browserDelayMs, formatMbps, formatMs, formatPct, shownFps, type ConnectionSample } from '@/lib/connectionStats'
 
 const { t } = useI18n()
 
@@ -26,16 +26,41 @@ const emit = defineEmits<{
   (e: 'update:open', value: boolean): void
 }>()
 
-type ChartId = 'bitrate' | 'fps' | 'rtt' | 'processing' | 'loss'
-interface ChartDef { id: ChartId; title: string; unit: string; value: (s: ConnectionSample) => number; format: (v: number) => string; hint?: string }
+type ChartId = 'fps' | 'gap' | 'bitrate' | 'rtt' | 'delay' | 'loss'
+interface ChartDef {
+  id: ChartId
+  title: string
+  unit: string
+  /** null leaves a gap, e.g. before frame timing started. */
+  value: (s: ConnectionSample) => number | null
+  format: (v: number) => string
+  hint?: string
+  /** Dashed reference line, e.g. decoded frames behind presented ones. */
+  compare?: { label: string; value: (s: ConnectionSample) => number }
+}
 
-const charts = computed<ChartDef[]>(() => [
-  { id: 'bitrate', title: t('stats.bitrate'), unit: 'Mbps', value: s => s.bitrateMbps, format: formatMbps },
-  { id: 'fps', title: t('stats.frameRate'), unit: 'fps', value: s => s.fps, format: v => formatFpsValue(Math.round(v)) },
-  { id: 'rtt', title: t('stats.latency'), unit: 'ms', value: s => s.rttMs, format: formatMs, hint: t('stats.rttHint') },
-  { id: 'processing', title: t('stats.processing'), unit: 'ms', value: s => s.processingMs, format: formatMs, hint: t('stats.processingHint') },
-  { id: 'loss', title: t('stats.packetLoss'), unit: '%', value: s => s.lossPct, format: formatPct },
-])
+const latest = computed(() => props.samples[props.samples.length - 1])
+
+const charts = computed<ChartDef[]>(() => {
+  const s = latest.value
+  const measured = s?.presentedFps !== undefined
+  return [
+    {
+      id: 'fps', title: t('stats.frameRate'), unit: 'fps', value: shownFps, format: v => formatFpsValue(Math.round(v)),
+      hint: measured ? t('stats.fpsChartHint') : undefined,
+      compare: measured ? { label: t('stats.decodedFps'), value: x => x.fps } : undefined,
+    },
+    ...(measured ? [{ id: 'gap' as const, title: t('stats.frameGap'), unit: 'ms', value: (x: ConnectionSample) => x.maxFrameGapMs ?? null, format: formatMs, hint: t('stats.frameGapHint', { n: s?.stutters ?? 0 }) }] : []),
+    { id: 'bitrate', title: t('stats.bitrate'), unit: 'Mbps', value: x => x.bitrateMbps, format: formatMbps },
+    { id: 'rtt', title: t('stats.latency'), unit: 'ms', value: x => x.rttMs, format: formatMs, hint: t(s?.rttSource === 'channel' ? 'stats.rttChannelHint' : 'stats.rttHint') },
+    {
+      id: 'delay', title: t(s?.receiveToPresentMs ? 'stats.receiveToPresent' : 'stats.processing'), unit: 'ms', value: browserDelayMs, format: formatMs,
+      hint: t(s?.receiveToPresentMs ? 'stats.receiveToPresentHint' : 'stats.processingHint'),
+    },
+    { id: 'loss', title: t('stats.packetLoss'), unit: '%', value: x => x.lossPct, format: formatPct },
+  ]
+})
+const chartKey = computed(() => charts.value.map(c => `${c.id}${c.compare ? '+' : ''}`).join())
 
 const chartEls: Partial<Record<ChartId, HTMLDivElement>> = {}
 const plots: Partial<Record<ChartId, uPlot>> = {}
@@ -87,13 +112,18 @@ function chartOptions(container: HTMLElement, def: ChartDef): uPlot.Options {
       { show: true, stroke: chartColors.axis, grid: { show: false }, ticks: { show: false }, gap: 4, size: 20, values: (_, splits) => splits.map(formatClock), font: '10px system-ui' },
       { show: true, side: 1, stroke: chartColors.axis, size: 52, gap: 6, grid: { stroke: chartColors.grid, width: 1 }, values: (_, splits) => splits.map(v => def.format(v)), font: '10px system-ui' },
     ],
-    series: [{}, { stroke: chartColors.line, width: 1.5, fill: chartColors.fill }],
+    series: [
+      {},
+      { stroke: chartColors.line, width: 1.5, fill: chartColors.fill },
+      ...(def.compare ? [{ stroke: chartColors.axis, width: 1, dash: [4, 3] }] : []),
+    ],
     plugins: [tooltipPlugin(def)],
   }
 }
 
 function chartData(def: ChartDef): uPlot.AlignedData {
-  return [props.samples.map(s => s.at / 1000), props.samples.map(def.value)]
+  const data: uPlot.AlignedData = [props.samples.map(s => s.at / 1000), props.samples.map(def.value)]
+  return def.compare ? [...data, props.samples.map(def.compare.value)] : data
 }
 
 function initCharts() {
@@ -113,12 +143,17 @@ function destroyCharts() {
   }
 }
 
+// The set of charts changes once frame timing starts; rebuild so refs and series line up.
+watch(chartKey, () => {
+  if (!props.open) return
+  destroyCharts()
+  initCharts()
+})
+
 watch(() => props.samples, () => {
   if (!props.open) return
   for (const def of charts.value) plots[def.id]?.setData(chartData(def))
 })
-
-const latest = computed(() => props.samples[props.samples.length - 1])
 
 function formatCandidateType(type: string): string {
   const typeMap: Record<string, string> = {
@@ -197,7 +232,7 @@ onUnmounted(() => {
           <div v-for="def in charts" :key="def.id" class="space-y-1.5" :data-stats-chart="def.id">
             <div class="flex items-baseline justify-between gap-2">
               <h4 class="text-sm font-medium" :title="def.hint">{{ def.title }}</h4>
-              <span class="text-xs tabular-nums text-muted-foreground">{{ latest ? def.format(def.value(latest)) : '-' }} {{ def.unit }}</span>
+              <span class="text-xs tabular-nums text-muted-foreground">{{ latest && def.value(latest) !== null ? def.format(def.value(latest)!) : '-' }} {{ def.unit }}</span>
             </div>
             <Card class="relative gap-0 p-2 shadow-none">
               <div :ref="setChartEl(def.id)" class="w-full" />

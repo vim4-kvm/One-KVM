@@ -36,6 +36,13 @@ export interface ConnectionSample {
   decodeMs: number
   /** First packet received to frame decoded, per frame. */
   processingMs: number
+  /** 'channel' is a data-channel ping on the video's path; 'ice' is the browser's consent checks. */
+  rttSource: 'ice' | 'channel'
+  /** Present only while a stats view runs the presented-frame callback. */
+  presentedFps?: number
+  maxFrameGapMs?: number
+  stutters?: number
+  receiveToPresentMs?: number
 }
 
 export interface StatsRoute {
@@ -145,6 +152,7 @@ export function createConnectionSampler(windowMs = STATS_WINDOW_MS) {
       jitterBufferMs: emitted > 0 ? ((snap.jitterBufferDelay - base.jitterBufferDelay) / emitted) * 1000 : 0,
       decodeMs: perFrame(snap.totalDecodeTime - base.totalDecodeTime),
       processingMs: perFrame(snap.totalProcessingDelay - base.totalProcessingDelay),
+      rttSource: 'ice',
     }
   }
 }
@@ -164,6 +172,29 @@ export function formatMbps(mbps: number): string {
 export function formatPct(pct: number): string {
   if (!Number.isFinite(pct) || pct <= 0) return '0'
   return pct < 0.1 ? '<0.1' : pct.toFixed(1)
+}
+
+type NumericSampleKey = { [K in keyof ConnectionSample]-?: ConnectionSample[K] extends number | undefined ? K : never }[keyof ConnectionSample]
+
+/** Numeric series for charts; fields that need a running stats view read as 0 before it starts. */
+export function sampleSeries(samples: ConnectionSample[], key: NumericSampleKey): number[] {
+  return samples.map(s => s[key] ?? 0)
+}
+
+/** What the viewer sees: presented frames when measured, otherwise decoded frames. */
+export function shownFps(s: ConnectionSample | undefined): number {
+  return s?.presentedFps ?? s?.fps ?? 0
+}
+
+/** Browser-side delay: receive to presentation when measured, otherwise first packet to decoded. */
+export function browserDelayMs(s: ConnectionSample | undefined): number {
+  return s?.receiveToPresentMs || s?.processingMs || 0
+}
+
+/** Gaps only matter on a stream that is normally fluid; a static desktop may legitimately idle. */
+export function frameGapLevel(maxGapMs: number, recentPeakFps: number): StatsLevel {
+  if (recentPeakFps < 20) return 'ok'
+  return maxGapMs > 200 ? 'bad' : maxGapMs > 50 ? 'warning' : 'ok'
 }
 
 export function lossLevel(pct: number): StatsLevel {

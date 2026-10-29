@@ -33,6 +33,9 @@
 //!
 //! Consumer control event (type 0x03):
 //! - Bytes 1-2: Usage code (u16 LE)
+//!
+//! Ping (type 0x10): opaque 12-byte payload. The board answers on the same channel with the
+//! payload unchanged and type 0x11, so the browser can time a round trip on the video's path.
 
 use tracing::warn;
 
@@ -45,6 +48,9 @@ use super::{
 pub const MSG_KEYBOARD: u8 = 0x01;
 pub const MSG_MOUSE: u8 = 0x02;
 pub const MSG_CONSUMER: u8 = 0x03;
+pub const MSG_PING: u8 = 0x10;
+pub const MSG_PONG: u8 = 0x11;
+const PING_LEN: usize = 13;
 
 pub const KB_EVENT_DOWN: u8 = 0x00;
 pub const KB_EVENT_UP: u8 = 0x01;
@@ -60,6 +66,16 @@ pub enum HidChannelEvent {
     Keyboard(KeyboardEvent),
     Mouse(MouseEvent),
     Consumer(ConsumerEvent),
+}
+
+/// Echo for a ping message, or None for anything else (including malformed pings).
+pub fn ping_reply(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() != PING_LEN || data[0] != MSG_PING {
+        return None;
+    }
+    let mut reply = data.to_vec();
+    reply[0] = MSG_PONG;
+    Some(reply)
 }
 
 pub fn parse_hid_message(data: &[u8]) -> Option<HidChannelEvent> {
@@ -199,6 +215,17 @@ pub fn encode_keyboard_event(event: &KeyboardEvent) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ping_is_echoed_as_pong_and_never_parsed_as_hid() {
+        let mut ping = vec![MSG_PING];
+        ping.extend_from_slice(&[7, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        let reply = ping_reply(&ping).expect("pong");
+        assert_eq!(reply[0], MSG_PONG);
+        assert_eq!(&reply[1..], &ping[1..]);
+        assert!(ping_reply(&ping[..12]).is_none());
+        assert!(ping_reply(&[MSG_KEYBOARD, 0, 4, 0]).is_none());
+    }
 
     #[test]
     fn test_parse_keyboard_down() {

@@ -1615,6 +1615,13 @@ export default {
     },
   },
   stats: {
+    fpsChartHint: 'Solid: frames actually displayed. Dashed: frames decoded',
+    rttChannelHint: 'Data channel round trip on the same network path as the video, measured every 0.5 s',
+    decodedFps: 'Decoded',
+    frameGap: 'Longest frame gap',
+    frameGapHint: 'Longest interval between presented frames in the last second; {n} above 50 ms',
+    receiveToPresent: 'Receive → display',
+    receiveToPresentHint: 'Time from the last packet of a frame arriving to the frame being displayed',
     rttHint: 'Round trip of the browser ICE connectivity checks, refreshed about every 2.5 s',
     processing: 'Receive + decode',
     processingHint: 'Per-frame time from the first packet arriving to the frame being decoded, including the jitter buffer',

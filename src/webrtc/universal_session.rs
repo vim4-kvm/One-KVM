@@ -1,5 +1,6 @@
 //! One browser session: negotiated [`RTCPeerConnection`], outbound video/audio, HID DataChannel.
 
+use bytes::Bytes;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,7 +35,7 @@ use super::signaling::{ConnectionState, IceCandidate, SdpAnswer, SdpOffer};
 use super::video_track::{UniversalVideoTrack, UniversalVideoTrackConfig, VideoCodec};
 use crate::audio::OpusFrame;
 use crate::error::{AppError, Result};
-use crate::hid::datachannel::{parse_hid_message, HidChannelEvent};
+use crate::hid::datachannel::{parse_hid_message, ping_reply, HidChannelEvent};
 use crate::hid::HidController;
 use crate::video::codec::{h264_bitstream, h265_bitstream};
 use crate::video::pipeline::EncodedVideoFrameReceiver;
@@ -514,7 +515,17 @@ impl UniversalSession {
                     info!("Data channel with HID support: {}", dc.label());
                     *data_channel.write().await = Some(dc.clone());
 
+                    // The handler lives inside the channel; a strong reference would keep it alive.
+                    let pong_channel = Arc::downgrade(&dc);
                     dc.on_message(Box::new(move |msg: DataChannelMessage| {
+                        if let Some(reply) = ping_reply(&msg.data) {
+                            if let Some(dc) = pong_channel.upgrade() {
+                                tokio::spawn(async move {
+                                    let _ = dc.send(&Bytes::from(reply)).await;
+                                });
+                            }
+                            return Box::pin(async {});
+                        }
                         let hid = hid.clone();
 
                         // webrtc-rs won't poll this future; spawn HID work for latency.
