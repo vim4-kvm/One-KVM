@@ -280,6 +280,7 @@ watch(statsHudCorner, value => localStorage.setItem('statsHudCorner', value))
 watch(statsHudCollapsed, value => localStorage.setItem('statsHudCollapsed', String(value)))
 const showConnectionStats = computed(() => videoMode.value !== 'mjpeg')
 const statsHudVisible = computed(() => statsHudOpen.value && !statsSheetOpen.value)
+watch(() => statsHudVisible.value || statsSheetOpen.value, open => webrtc.setStatsDetailed(open), { immediate: true })
 const virtualKeyboardConsumerEnabled = computed(() => {
   const hid = configStore.hid
   if (!hid) return true
@@ -3673,6 +3674,7 @@ onUnmounted(() => {
           v-model:corner="statsHudCorner"
           v-model:collapsed="statsHudCollapsed"
           :webrtc-stats="webrtc.stats.value"
+          :samples="webrtc.statsHistory.value"
           :top-inset="immersive ? 56 : 8"
           @details="statsSheetOpen = true"
           @close="statsHudOpen = false"
@@ -3691,6 +3693,7 @@ onUnmounted(() => {
           v-if="showConnectionStats"
           v-model:open="statsSheetOpen"
           :webrtc-stats="webrtc.stats.value"
+          :samples="webrtc.statsHistory.value"
         />
         <ComputerUseSheet
           v-if="showComputerUse"

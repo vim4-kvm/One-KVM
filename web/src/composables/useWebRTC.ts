@@ -1,4 +1,4 @@
-import { ref, onUnmounted, computed, type Ref } from 'vue'
+import { ref, shallowRef, onUnmounted, computed, type Ref } from 'vue'
 import { webrtcApi, type IceCandidate } from '@/api'
 import {
   type HidKeyboardEvent,
@@ -8,6 +8,7 @@ import {
 } from '@/types/hid'
 import { isDebugLogEnabled, videoDebugLog } from '@/lib/debugLog'
 import { startVideoDiagnostics } from '@/lib/videoDiagnostics'
+import { createConnectionSampler, readStatsReport, type ConnectionSample } from '@/lib/connectionStats'
 
 export type { HidKeyboardEvent, HidMouseEvent }
 
@@ -34,6 +35,10 @@ export interface WebRTCStats {
   packetsLost: number
   framesDecoded: number
   framesDropped: number
+  freezeCount: number
+  nackCount: number
+  pliCount: number
+  keyFramesDecoded: number
   frameWidth: number
   frameHeight: number
   framesPerSecond: number
@@ -93,6 +98,14 @@ let dataChannel: RTCDataChannel | null = null
 let sessionId: string | null = null
 const sessionIdRef = ref<string | null>(null)
 let statsInterval: number | null = null
+let statsInFlight = false
+let statsDetailed = false
+let statsSampler = createConnectionSampler()
+const STATS_INTERVAL_MS = 1000
+const STATS_DETAIL_INTERVAL_MS = 500
+/** Two minutes at the detailed rate. */
+const STATS_HISTORY = 240
+const statsHistory = shallowRef<ConnectionSample[]>([])
 let stopVideoDiagnostics: (() => void) | null = null
 let isConnecting = false
 let connectInFlight: Promise<boolean> | null = null
@@ -106,12 +119,16 @@ let allowMdnsHostCandidates = false
 const state = ref<WebRTCState>('disconnected')
 const videoTrack = ref<MediaStreamTrack | null>(null)
 const audioTrack = ref<MediaStreamTrack | null>(null)
-const stats = ref<WebRTCStats>({
+const emptyStats = (): WebRTCStats => ({
   bytesReceived: 0,
   packetsReceived: 0,
   packetsLost: 0,
   framesDecoded: 0,
   framesDropped: 0,
+  freezeCount: 0,
+  nackCount: 0,
+  pliCount: 0,
+  keyFramesDecoded: 0,
   frameWidth: 0,
   frameHeight: 0,
   framesPerSecond: 0,
@@ -122,6 +139,7 @@ const stats = ref<WebRTCStats>({
   transportProtocol: '',
   isRelay: false,
 })
+const stats = ref<WebRTCStats>(emptyStats())
 const error = ref<string | null>(null)
 const dataChannelReady = ref(false)
 const connectStage = ref<WebRTCConnectStage>('idle')
@@ -297,76 +315,73 @@ async function addRemoteIceCandidate(candidate: IceCandidate): Promise<boolean> 
   }
 }
 
+function scheduleStats() {
+  if (statsInterval) clearInterval(statsInterval)
+  statsInterval = window.setInterval(collectStats, statsDetailed ? STATS_DETAIL_INTERVAL_MS : STATS_INTERVAL_MS)
+}
+
+async function collectStats() {
+  if (!peerConnection || statsInFlight) return
+  statsInFlight = true
+  try {
+    const report = await peerConnection.getStats()
+    const reading = readStatsReport(report.values())
+    const candidates: Record<string, { type: IceCandidateType; protocol: string }> = {}
+    report.forEach((stat) => {
+      if (stat.type === 'local-candidate' || stat.type === 'remote-candidate') {
+        candidates[stat.id] = {
+          type: (stat.candidateType as IceCandidateType) || 'unknown',
+          protocol: stat.protocol || '',
+        }
+      }
+    })
+    const local = reading.route ? candidates[reading.route.localCandidateId] : undefined
+    const remote = reading.route ? candidates[reading.route.remoteCandidateId] : undefined
+    const snap = reading.snapshot
+    const sample = snap ? statsSampler(snap) : null
+    const next: WebRTCStats = {
+      ...stats.value,
+      frameWidth: reading.frameWidth,
+      frameHeight: reading.frameHeight,
+      framesPerSecond: reading.framesPerSecond,
+    }
+    if (snap) {
+      Object.assign(next, {
+        bytesReceived: snap.bytesReceived,
+        packetsReceived: snap.packetsReceived,
+        packetsLost: snap.packetsLost,
+        framesDecoded: snap.framesDecoded,
+        framesDropped: snap.framesDropped,
+        freezeCount: snap.freezeCount,
+        nackCount: snap.nackCount,
+        pliCount: snap.pliCount,
+        keyFramesDecoded: snap.keyFramesDecoded,
+        jitter: snap.jitter,
+        roundTripTime: snap.currentRoundTripTime,
+      })
+    }
+    if (local) {
+      next.localCandidateType = local.type
+      next.transportProtocol = local.protocol
+    }
+    if (remote) next.remoteCandidateType = remote.type
+    next.isRelay = next.localCandidateType === 'relay' || next.remoteCandidateType === 'relay'
+    stats.value = next
+    if (sample) statsHistory.value = [...statsHistory.value, sample].slice(-STATS_HISTORY)
+  } catch {
+  } finally {
+    statsInFlight = false
+  }
+}
+
 function startStatsCollection() {
   if (statsInterval) return
   if (peerConnection && isDebugLogEnabled()) {
     stopVideoDiagnostics = startVideoDiagnostics(peerConnection)
   }
-
-  statsInterval = window.setInterval(async () => {
-    if (!peerConnection) return
-
-    try {
-      const report = await peerConnection.getStats()
-
-      const candidates: Record<string, { type: IceCandidateType; protocol: string }> = {}
-      let selectedPairLocalId = ''
-      let selectedPairRemoteId = ''
-      let foundActivePair = false
-
-      report.forEach((stat) => {
-        if (stat.type === 'local-candidate' || stat.type === 'remote-candidate') {
-          candidates[stat.id] = {
-            type: (stat.candidateType as IceCandidateType) || 'unknown',
-            protocol: stat.protocol || '',
-          }
-        }
-
-        if (stat.type === 'candidate-pair') {
-          const isActive = stat.nominated === true ||
-                          (stat.state === 'succeeded' && stat.selected === true) ||
-                          (stat.state === 'in-progress' && !foundActivePair)
-
-          const hasData = (stat.bytesReceived > 0 || stat.bytesSent > 0)
-
-          if ((isActive || (stat.state === 'succeeded' && hasData)) && !foundActivePair) {
-            stats.value.roundTripTime = stat.currentRoundTripTime || 0
-            selectedPairLocalId = stat.localCandidateId || ''
-            selectedPairRemoteId = stat.remoteCandidateId || ''
-            if (stat.nominated === true || stat.selected === true) {
-              foundActivePair = true
-            }
-          }
-        }
-
-        if (stat.type === 'inbound-rtp' && stat.kind === 'video') {
-          stats.value.bytesReceived = stat.bytesReceived || 0
-          stats.value.packetsReceived = stat.packetsReceived || 0
-          stats.value.packetsLost = stat.packetsLost || 0
-          stats.value.framesDecoded = stat.framesDecoded || 0
-          stats.value.framesDropped = stat.framesDropped || 0
-          stats.value.frameWidth = stat.frameWidth || 0
-          stats.value.frameHeight = stat.frameHeight || 0
-          stats.value.framesPerSecond = stat.framesPerSecond || 0
-          stats.value.jitter = stat.jitter || 0
-        }
-      })
-
-      const localCandidate = selectedPairLocalId ? candidates[selectedPairLocalId] : undefined
-      const remoteCandidate = selectedPairRemoteId ? candidates[selectedPairRemoteId] : undefined
-
-      if (localCandidate) {
-        stats.value.localCandidateType = localCandidate.type
-        stats.value.transportProtocol = localCandidate.protocol
-      }
-      if (remoteCandidate) {
-        stats.value.remoteCandidateType = remoteCandidate.type
-      }
-
-      stats.value.isRelay = stats.value.localCandidateType === 'relay' || stats.value.remoteCandidateType === 'relay'
-    } catch {
-    }
-  }, 1000)
+  statsSampler = createConnectionSampler()
+  scheduleStats()
+  void collectStats()
 }
 
 function stopStatsCollection() {
@@ -376,6 +391,13 @@ function stopStatsCollection() {
     clearInterval(statsInterval)
     statsInterval = null
   }
+}
+
+/** Open stats views sample at 2 Hz; otherwise 1 Hz is enough for the header frame rate. */
+function setStatsDetailed(detailed: boolean) {
+  if (statsDetailed === detailed) return
+  statsDetailed = detailed
+  if (statsInterval) scheduleStats()
 }
 
 async function flushPendingIceCandidates() {
@@ -606,22 +628,7 @@ async function disconnect() {
   setConnectStage('disconnected', { previousSessionId: oldSessionId })
   error.value = null
 
-  stats.value = {
-    bytesReceived: 0,
-    packetsReceived: 0,
-    packetsLost: 0,
-    framesDecoded: 0,
-    framesDropped: 0,
-    frameWidth: 0,
-    frameHeight: 0,
-    framesPerSecond: 0,
-    jitter: 0,
-    roundTripTime: 0,
-    localCandidateType: 'unknown',
-    remoteCandidateType: 'unknown',
-    transportProtocol: '',
-    isRelay: false,
-  }
+  stats.value = emptyStats()
 }
 
 function sendKeyboard(event: HidKeyboardEvent): boolean {
@@ -700,6 +707,8 @@ export function useWebRTC() {
     videoTrack,
     audioTrack,
     stats,
+    statsHistory,
+    setStatsDetailed,
     error,
     dataChannelReady,
     connectStage,

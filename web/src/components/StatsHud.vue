@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ChevronDown, ChevronUp, Maximize2, X } from 'lucide-vue-next'
 import type { WebRTCStats } from '@/composables/useWebRTC'
 import { formatFpsValue } from '@/lib/fps'
 import {
-  createConnectionSampler,
   fpsLevel,
+  formatMbps,
+  formatMs,
+  formatPct,
   lossLevel,
   nearestCorner,
   rttLevel,
@@ -18,6 +20,8 @@ import {
 
 const props = defineProps<{
   webrtcStats?: WebRTCStats
+  /** Shared rolling samples from useWebRTC, oldest first. */
+  samples: ConnectionSample[]
   corner: HudCorner
   collapsed: boolean
   /** Keeps the card below floating toolbars that share the top edge. */
@@ -31,20 +35,13 @@ const emit = defineEmits<{
 }>()
 const { t } = useI18n()
 
+/** About 30 s at the 2 Hz refresh used while the card is open. */
 const HISTORY = 60
 const SPARK_W = 72
 const SPARK_H = 16
-const samples = ref<ConnectionSample[]>([])
-const sample = createConnectionSampler()
-let timer: ReturnType<typeof setInterval> | undefined
-
-function collect() {
-  if (!props.webrtcStats) return
-  samples.value = [...samples.value, sample(props.webrtcStats, Date.now())].slice(-HISTORY)
-}
-
-const latest = computed(() => samples.value[samples.value.length - 1])
-const series = (key: keyof ConnectionSample) => samples.value.map(s => s[key])
+const recent = computed(() => props.samples.slice(-HISTORY))
+const latest = computed(() => recent.value[recent.value.length - 1])
+const series = (key: keyof ConnectionSample) => recent.value.map(s => s[key])
 const peakFps = computed(() => Math.max(0, ...series('fps')))
 
 interface Row { id: string; label: string; value: string; points: string; level: StatsLevel; title?: string }
@@ -52,14 +49,15 @@ const rows = computed<Row[]>(() => {
   const s = latest.value
   const points = (key: keyof ConnectionSample) => sparklinePoints(series(key), SPARK_W, SPARK_H)
   return [
-    { id: 'fps', label: t('stats.frameRate'), value: `${formatFpsValue(Math.round(s?.fps ?? 0))} fps`, points: points('fps'), level: fpsLevel(s?.fps ?? 0, peakFps.value) },
-    { id: 'bitrate', label: t('stats.bitrate'), value: `${(s?.bitrateMbps ?? 0).toFixed(1)} Mbps`, points: points('bitrateMbps'), level: 'ok' },
-    { id: 'rtt', label: t('stats.latency'), value: `${Math.round(s?.rttMs ?? 0)} ms`, points: points('rttMs'), level: rttLevel(s?.rttMs ?? 0), title: `${t('stats.jitter')} ${(s?.jitterMs ?? 0).toFixed(1)} ms` },
-    { id: 'loss', label: t('stats.packetLoss'), value: `${(s?.lossPct ?? 0).toFixed(1)} %`, points: points('lossPct'), level: lossLevel(s?.lossPct ?? 0), title: `${t('stats.packetsLost')} ${props.webrtcStats?.packetsLost ?? 0}` },
+    { id: 'fps', label: t('stats.frameRate'), value: `${formatFpsValue(Math.round(s?.fps ?? 0))} fps`, points: points('fps'), level: fpsLevel(s?.fps ?? 0, peakFps.value), title: `${t('stats.droppedFrames')} ${props.webrtcStats?.framesDropped ?? 0}` },
+    { id: 'bitrate', label: t('stats.bitrate'), value: `${formatMbps(s?.bitrateMbps ?? 0)} Mbps`, points: points('bitrateMbps'), level: 'ok' },
+    { id: 'rtt', label: t('stats.latency'), value: `${formatMs(s?.rttMs ?? 0)} ms`, points: points('rttMs'), level: rttLevel(s?.rttMs ?? 0), title: `${t('stats.rttHint')} · ${t('stats.jitter')} ${formatMs(s?.jitterMs ?? 0)} ms` },
+    { id: 'processing', label: t('stats.processing'), value: `${formatMs(s?.processingMs ?? 0)} ms`, points: points('processingMs'), level: 'ok', title: `${t('stats.jitterBuffer')} ${formatMs(s?.jitterBufferMs ?? 0)} ms · ${t('stats.decode')} ${formatMs(s?.decodeMs ?? 0)} ms` },
+    { id: 'loss', label: t('stats.packetLoss'), value: `${formatPct(s?.lossPct ?? 0)} %`, points: points('lossPct'), level: lossLevel(s?.lossPct ?? 0), title: `${t('stats.packetsLost')} ${props.webrtcStats?.packetsLost ?? 0}` },
   ]
 })
 const worstLevel = computed<StatsLevel>(() => rows.value.some(r => r.level === 'bad') ? 'bad' : rows.value.some(r => r.level === 'warning') ? 'warning' : 'ok')
-const summaryLine = computed(() => rows.value.map(r => r.value.replace(' ', '')).join(' · '))
+const summaryLine = computed(() => rows.value.filter(r => r.id !== 'processing').map(r => r.value.replace(' ', '')).join(' · '))
 const connectionLine = computed(() => {
   const s = props.webrtcStats
   if (!s) return '-'
@@ -111,12 +109,7 @@ const cardStyle = computed(() => ({
 
 watch(() => props.corner, () => { setTimeout(() => { settling.value = false }, 160) })
 
-onMounted(() => {
-  collect()
-  timer = setInterval(collect, 1000)
-})
 onBeforeUnmount(() => {
-  clearInterval(timer)
   dragCleanup?.()
 })
 </script>

@@ -1,19 +1,54 @@
-export interface RawConnectionStats {
+/** Cumulative counters from one getStats() report, stamped with the report's own clock (ms). */
+export interface StatsSnapshot {
+  at: number
   bytesReceived: number
   packetsReceived: number
   packetsLost: number
-  framesPerSecond: number
+  framesDecoded: number
+  framesDropped: number
+  freezeCount: number
+  nackCount: number
+  pliCount: number
+  keyFramesDecoded: number
+  /** Seconds; the browser already smooths RTP interarrival jitter. */
   jitter: number
-  roundTripTime: number
+  jitterBufferDelay: number
+  jitterBufferEmittedCount: number
+  totalProcessingDelay: number
+  totalDecodeTime: number
+  /** ICE consent checks on the selected pair; Chrome sends one every ~2.5 s. */
+  totalRoundTripTime: number
+  responsesReceived: number
+  currentRoundTripTime: number
 }
 
 export interface ConnectionSample {
+  at: number
   fps: number
   bitrateMbps: number
   rttMs: number
   jitterMs: number
-  /** Loss over the last sampling interval, in percent of expected packets. */
+  /** Loss over the window, in percent of expected packets. */
   lossPct: number
+  lostPackets: number
+  droppedFrames: number
+  jitterBufferMs: number
+  decodeMs: number
+  /** First packet received to frame decoded, per frame. */
+  processingMs: number
+}
+
+export interface StatsRoute {
+  localCandidateId: string
+  remoteCandidateId: string
+}
+
+export interface StatsReading {
+  snapshot: StatsSnapshot | null
+  frameWidth: number
+  frameHeight: number
+  framesPerSecond: number
+  route: StatsRoute | null
 }
 
 export type StatsLevel = 'ok' | 'warning' | 'bad'
@@ -21,25 +56,114 @@ export type HudCorner = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right
 
 export const HUD_CORNERS: HudCorner[] = ['top-left', 'top-right', 'bottom-left', 'bottom-right']
 
-/** Turns cumulative WebRTC counters into per-interval rates. */
-export function createConnectionSampler() {
-  let previous: { at: number; bytes: number; received: number; lost: number } | null = null
-  return (raw: RawConnectionStats, at: number): ConnectionSample => {
-    const prev = previous
-    previous = { at, bytes: raw.bytesReceived, received: raw.packetsReceived, lost: raw.packetsLost }
-    // Counters restart with a new peer connection; treat a decrease as a fresh baseline.
-    const valid = prev && at > prev.at && raw.bytesReceived >= prev.bytes && raw.packetsReceived >= prev.received
-    const seconds = valid ? (at - prev.at) / 1000 : 0
-    const lost = valid ? Math.max(0, raw.packetsLost - prev.lost) : 0
-    const received = valid ? raw.packetsReceived - prev.received : 0
+type Stat = Record<string, any>
+
+const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
+
+/** Pulls the inbound video counters and the selected candidate pair out of one report. */
+export function readStatsReport(stats: Iterable<Stat>): StatsReading {
+  const all = [...stats]
+  const video = all.find(s => s.type === 'inbound-rtp' && s.kind === 'video')
+  const selectedId = all.find(s => s.type === 'transport' && s.selectedCandidatePairId)?.selectedCandidatePairId
+  const pairs = all.filter(s => s.type === 'candidate-pair')
+  const pair = pairs.find(s => s.id === selectedId)
+    ?? pairs.find(s => s.nominated && s.state === 'succeeded')
+    ?? pairs.find(s => s.state === 'succeeded' && (s.bytesReceived > 0 || s.bytesSent > 0))
+  return {
+    snapshot: video ? {
+      at: num(video.timestamp),
+      bytesReceived: num(video.bytesReceived),
+      packetsReceived: num(video.packetsReceived),
+      packetsLost: num(video.packetsLost),
+      framesDecoded: num(video.framesDecoded),
+      framesDropped: num(video.framesDropped),
+      freezeCount: num(video.freezeCount),
+      nackCount: num(video.nackCount),
+      pliCount: num(video.pliCount),
+      keyFramesDecoded: num(video.keyFramesDecoded),
+      jitter: num(video.jitter),
+      jitterBufferDelay: num(video.jitterBufferDelay),
+      jitterBufferEmittedCount: num(video.jitterBufferEmittedCount),
+      totalProcessingDelay: num(video.totalProcessingDelay),
+      totalDecodeTime: num(video.totalDecodeTime),
+      totalRoundTripTime: num(pair?.totalRoundTripTime),
+      responsesReceived: num(pair?.responsesReceived),
+      currentRoundTripTime: num(pair?.currentRoundTripTime),
+    } : null,
+    frameWidth: num(video?.frameWidth),
+    frameHeight: num(video?.frameHeight),
+    framesPerSecond: num(video?.framesPerSecond),
+    route: pair ? { localCandidateId: pair.localCandidateId ?? '', remoteCandidateId: pair.remoteCandidateId ?? '' } : null,
+  }
+}
+
+/** Rates are taken over a trailing window so a 2 Hz refresh does not show frame-count quantisation. */
+export const STATS_WINDOW_MS = 1000
+
+/**
+ * Turns cumulative snapshots into rates over the trailing window. Returns null until a baseline
+ * exists; a counter that goes backwards means a new peer connection and restarts the baseline.
+ */
+export function createConnectionSampler(windowMs = STATS_WINDOW_MS) {
+  let history: StatsSnapshot[] = []
+  let rttMs = 0
+  return (snap: StatsSnapshot): ConnectionSample | null => {
+    const last = history[history.length - 1]
+    if (last && snap.at <= last.at) return null
+    if (last && (snap.bytesReceived < last.bytesReceived || snap.packetsReceived < last.packetsReceived
+      || snap.framesDecoded < last.framesDecoded || snap.responsesReceived < last.responsesReceived)) {
+      history = []
+      rttMs = 0
+    }
+    history.push(snap)
+    // Keep the newest snapshot that is still roughly a window old; timers drift by a few ms.
+    while (history.length > 2 && snap.at - history[1]!.at >= windowMs * 0.9) history.shift()
+    const base = history[0]!
+    if (base === snap) {
+      rttMs = snap.currentRoundTripTime * 1000
+      return null
+    }
+    const seconds = (snap.at - base.at) / 1000
+    const frames = snap.framesDecoded - base.framesDecoded
+    const received = snap.packetsReceived - base.packetsReceived
+    const lost = Math.max(0, snap.packetsLost - base.packetsLost)
+    const emitted = snap.jitterBufferEmittedCount - base.jitterBufferEmittedCount
+    const responses = snap.responsesReceived - base.responsesReceived
+    // Consent checks are sparse, so hold the last measured round trip between them.
+    if (responses > 0) rttMs = ((snap.totalRoundTripTime - base.totalRoundTripTime) / responses) * 1000
+    else if (!rttMs) rttMs = snap.currentRoundTripTime * 1000
+    const perFrame = (total: number) => (frames > 0 ? (total / frames) * 1000 : 0)
     return {
-      fps: raw.framesPerSecond || 0,
-      bitrateMbps: valid ? ((raw.bytesReceived - prev.bytes) * 8) / (seconds * 1e6) : 0,
-      rttMs: (raw.roundTripTime || 0) * 1000,
-      jitterMs: (raw.jitter || 0) * 1000,
+      at: snap.at,
+      fps: frames / seconds,
+      bitrateMbps: ((snap.bytesReceived - base.bytesReceived) * 8) / (seconds * 1e6),
+      rttMs,
+      jitterMs: snap.jitter * 1000,
       lossPct: lost + received > 0 ? (lost / (lost + received)) * 100 : 0,
+      lostPackets: lost,
+      droppedFrames: Math.max(0, snap.framesDropped - base.framesDropped),
+      jitterBufferMs: emitted > 0 ? ((snap.jitterBufferDelay - base.jitterBufferDelay) / emitted) * 1000 : 0,
+      decodeMs: perFrame(snap.totalDecodeTime - base.totalDecodeTime),
+      processingMs: perFrame(snap.totalProcessingDelay - base.totalProcessingDelay),
     }
   }
+}
+
+/** Sub-10 ms values keep a decimal so a LAN round trip does not read as 0 or 1 ms. */
+export function formatMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0'
+  if (ms < 1) return '<1'
+  return ms < 10 ? ms.toFixed(1) : String(Math.round(ms))
+}
+
+export function formatMbps(mbps: number): string {
+  if (!Number.isFinite(mbps) || mbps <= 0) return '0'
+  return mbps < 10 ? mbps.toFixed(2) : mbps.toFixed(1)
+}
+
+export function formatPct(pct: number): string {
+  if (!Number.isFinite(pct) || pct <= 0) return '0'
+  return pct < 0.1 ? '<0.1' : pct.toFixed(1)
 }
 
 export function lossLevel(pct: number): StatsLevel {
