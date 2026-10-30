@@ -3,6 +3,7 @@ use crate::config::{AppConfig, HidBackend, StreamMode};
 use crate::video::format::{PixelFormat, Resolution};
 
 pub mod video_backend;
+pub mod wave5_caps;
 pub use video_backend::VideoBackend;
 
 pub const VIDEO_DEVICE: &str = "/dev/video_cap";

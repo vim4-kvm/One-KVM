@@ -131,12 +131,10 @@ impl VideoConfigUpdate {
             .validate()?;
             if output
                 .hevc_quality
-                .is_some_and(|q| q != crate::platform::vim4::HevcQuality::Bitrate)
-                && crate::platform::vim4::VideoBackend::current()
-                    != crate::platform::vim4::VideoBackend::Vendor
+                .is_some_and(|q| !crate::platform::vim4::wave5_caps::current().supports(q))
             {
                 return Err(AppError::BadRequest(
-                    "HEVC quality modes require the vendor encoder backend".into(),
+                    "HEVC quality mode is unavailable on this encoder".into(),
                 ));
             }
             if output.hdr == Some(true) && !crate::platform::vim4::hdr_remote_available() {

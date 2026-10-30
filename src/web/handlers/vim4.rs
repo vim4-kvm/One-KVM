@@ -15,6 +15,7 @@ pub struct BoardVideoStatus {
     peak: u32,
     hdr_remote_available: bool,
     hevc_quality_available: bool,
+    hevc_lossless_available: bool,
 }
 
 pub async fn status() -> Result<Json<BoardVideoStatus>> {
@@ -61,8 +62,8 @@ pub async fn status() -> Result<Json<BoardVideoStatus>> {
         white: nits("HDR_SDR_WHITE", 203),
         peak: nits("HDR_SDR_PEAK", 1000),
         hdr_remote_available: crate::platform::vim4::hdr_remote_available(),
-        hevc_quality_available: crate::platform::vim4::VideoBackend::current()
-            == crate::platform::vim4::VideoBackend::Vendor,
+        hevc_quality_available: crate::platform::vim4::wave5_caps::current().fixed_qp,
+        hevc_lossless_available: crate::platform::vim4::wave5_caps::current().lossless,
     }))
 }
 

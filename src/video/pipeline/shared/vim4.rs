@@ -55,9 +55,6 @@ fn description(
         .output
         .h26x_frame_rate(source, source_fps, VideoBackend::current());
     if VideoBackend::current() == VideoBackend::Wave5 {
-        if config.output.hevc_quality != crate::platform::vim4::HevcQuality::Bitrate {
-            warn!("Saved HEVC quality mode requires vendor backend; Wave5 uses bitrate control");
-        }
         return wave5::description(config, source, fps);
     }
     if native_hdr {

@@ -73,7 +73,7 @@ export default {
   },
   vim4Video: {
     hevcMode: 'H.265 quality mode', hevcBitrate: 'Target bitrate', hevcFixedQp: 'Fixed QP', hevcLossless: 'Lossless',
-    hevcHint: 'H.265 on kernel 5.15 only. Lossless preserves encoder input YUV samples. Lower QP improves quality. Fixed QP and lossless ignore the target bitrate; complex scenes may require much more bandwidth and reduce frame rate.',
+    hevcHint: 'Available H.265 modes depend on the encoder controls. Lossless preserves encoder input YUV samples. Lower QP improves quality. Fixed QP and lossless ignore the target bitrate; complex scenes may require much more bandwidth and reduce frame rate.',
     title: 'VIM4 video settings', applied: 'Settings applied',
     outputSize: 'Maximum output resolution', outputFps: 'Maximum output frame rate', source: 'Follow input',
     jpegQuality: 'MJPEG quality (1–100)', bitrate: 'Custom bitrate (1000–60000 kbps; higher rates require more bandwidth)',

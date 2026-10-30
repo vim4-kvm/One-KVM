@@ -64,7 +64,11 @@ pub fn output_resolution(output: OutputSettings, source: Resolution) -> Resoluti
 /// HEVC's legacy visible-size alignment is stricter than AVC's crop units.
 pub fn wave5_requires_h264(output: OutputSettings, source: Resolution) -> bool {
     let visible = output_resolution(output, source);
-    visible.width % 8 != 0 || visible.height % 8 != 0
+    requires_h264(visible, super::wave5_caps::current().visible_hevc)
+}
+
+fn requires_h264(visible: Resolution, visible_hevc: bool) -> bool {
+    (visible.width % 8 != 0 || visible.height % 8 != 0) && !visible_hevc
 }
 
 pub fn shared_data() -> bool {
@@ -188,6 +192,13 @@ mod tests {
 
     #[test]
     fn hevc_fallback_uses_visible_output_including_scaling() {
+        fn wave5_requires_h264(output: OutputSettings, source: Resolution) -> bool {
+            requires_h264(output_resolution(output, source), false)
+        }
+        for source in [Resolution::new(1366, 768), Resolution::new(1440, 900)] {
+            assert!(requires_h264(source, false));
+            assert!(!requires_h264(source, true));
+        }
         for source in [
             Resolution::new(1366, 768),
             Resolution::new(1440, 900),

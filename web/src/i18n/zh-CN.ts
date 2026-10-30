@@ -73,7 +73,7 @@ export default {
   },
   vim4Video: {
     hevcMode: 'H.265 画质模式', hevcBitrate: '目标码率', hevcFixedQp: '固定 QP', hevcLossless: '无损',
-    hevcHint: '仅用于 5.15 内核的 H.265，无损保留编码输入的 YUV 像素。QP 越小画质越高；固定 QP 和无损不受目标码率限制，复杂画面可能显著增加带宽并降低帧率。',
+    hevcHint: 'H.265 可用模式取决于编码器控制能力，无损保留编码输入的 YUV 像素。QP 越小画质越高；固定 QP 和无损不受目标码率限制，复杂画面可能显著增加带宽并降低帧率。',
     title: 'VIM4 视频设置', applied: '设置已应用',
     outputSize: '输出分辨率上限', outputFps: '输出帧率上限', source: '跟随输入',
     jpegQuality: 'MJPEG 质量（1–100）', bitrate: '自定义码率（1000–60000 kbps，高码率需要更多网络带宽）',

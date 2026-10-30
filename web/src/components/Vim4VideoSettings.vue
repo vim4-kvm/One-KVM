@@ -11,7 +11,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 
 interface OutputSettings { height: number; fps: number; hevc_quality?: { type: string; qp?: number } }
-interface BoardStatus { edid: string; hevc_quality_available: boolean }
+interface BoardStatus { edid: string; hevc_quality_available: boolean; hevc_lossless_available: boolean }
 const props = defineProps<{ outputOnly?: boolean }>()
 const { t } = useI18n()
 const store = useConfigStore()
@@ -110,12 +110,12 @@ onMounted(load)
         </template>
         <p class="text-muted-foreground">{{ t('vim4Video.outputHint') }}</p>
         <Label>{{ t('vim4Video.hevcMode') }}</Label>
-        <Select v-model="hevcMode" :disabled="!board?.hevc_quality_available">
+        <Select v-model="hevcMode" :disabled="!ready || busy">
           <SelectTrigger class="w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="bitrate">{{ t('vim4Video.hevcBitrate') }}</SelectItem>
-            <SelectItem value="fixed_qp">{{ t('vim4Video.hevcFixedQp') }}</SelectItem>
-            <SelectItem value="lossless">{{ t('vim4Video.hevcLossless') }}</SelectItem>
+            <SelectItem value="fixed_qp" :disabled="!board?.hevc_quality_available">{{ t('vim4Video.hevcFixedQp') }}</SelectItem>
+            <SelectItem value="lossless" :disabled="!board?.hevc_lossless_available">{{ t('vim4Video.hevcLossless') }}</SelectItem>
           </SelectContent>
         </Select>
         <Input v-if="hevcMode === 'fixed_qp'" v-model="hevcQp" aria-label="HEVC QP" type="number" min="0" max="51" required />
