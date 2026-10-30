@@ -109,7 +109,11 @@ The root helper joins PID 1's mount namespace before opening media; otherwise
 systemd's private StateDirectory mount can disappear while the kernel still
 owns the backing file, changing its reported path after an application restart.
 This edge helper requires the board's Python 3.12 `os.setns` support.
-USB serial remains unavailable in the matched kernel. Actual host acceptance
+USB serial is detected from the running kernel's ACM instance/driver/module files
+without creating functions or loading modules. The old b1300eb runtime lacks ACM;
+new builds need CONFIG_USB_CONFIGFS_ACM and matching usb_f_acm modules. The helper
+uses the same acm.usb0 path as 5.15; ACM consumes two of the five IN endpoints.
+Actual host acceptance
 and remaining audio/host-platform limits are recorded in the main workspace's
 `docs/bringup/2026-10-21-edge-usb-functions.md`.
 Both codecs use GOP 0 and the standard V4L2 cyclic intra refresh period of 45
@@ -119,7 +123,7 @@ remain enabled. Startup checks that the driver exposes the required refresh
 control before starting the encoder; an older module is an error.
 Existing experimental databases keep their saved backend; enable `otg` with the
 `full_no_consumer` profile explicitly when migrating a video-only installation.
-USB serial remains unavailable in the matched 7.x kernel. Runtime EDID uses the
+Runtime EDID uses the
 receiver's guarded V4L2 interface; the shared HDR curve uses the native driver
 attribute. Other input formats still require qualification. Enabling a USB
 function is not proof of host data/audio acceptance.

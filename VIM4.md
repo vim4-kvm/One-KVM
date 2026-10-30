@@ -110,6 +110,11 @@ USB 网卡不改变已有以太网配置；地址、DHCP 与 NAT 由 NetworkMana
 `/run/vim4-onekvm-usb` 保存原始状态，systemd `ExecStopPost` 恢复配置并删除本应用
 创建的网络连接，因此切换到其他 KVM 不继承 One-KVM 的键鼠禁用设置。
 USB 串口启用时创建并链接 `acm.usb0`，禁用与服务停止时移除；板侧为 `/dev/ttyGS0`。
+7.x 在保存和应用前只读检查现有 ACM 实例、已加载的 `usb_f_acm` 或当前内核
+`/lib/modules/$(uname -r)` 下的 ACM 模块（含压缩模块），不为探测创建函数或加载模块。
+旧锁 b1300eb 运行时没有 ACM 时明确拒绝；新内核需启用 `CONFIG_USB_CONFIGFS_ACM`
+并安装同次构建的完整模块。模块存在不保证加载成功，助手创建失败会返回具体错误，
+此时尚未解绑 USB。5.15 继续沿用原有路径。ACM 消耗两个 IN 端点，组合总预算仍为五个。
 保存会重新枚举 USB，用户应先在被控机安全弹出挂载磁盘。网页关闭不等于停止服务。
 
 ## 视频设置

@@ -173,7 +173,13 @@ def replace_usb(target):
 
 def ensure_functions(profile):
     if profile.get('serial', False):
-        (GADGET / 'functions/acm.usb0').mkdir(exist_ok=True)
+        try:
+            (GADGET / 'functions/acm.usb0').mkdir(exist_ok=True)
+        except OSError as error:
+            if not EDGE:
+                raise
+            raise ValueError('Cannot create USB ACM serial function: check CONFIG_USB_CONFIGFS_ACM '
+                             'and matching usb_f_acm modules: ' + str(error)) from error
     consumer = GADGET / 'functions/hid.consumer'
     if profile['hid']['consumer'] and not consumer.exists():
         consumer.mkdir()

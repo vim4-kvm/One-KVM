@@ -2,6 +2,7 @@
 use crate::config::{AppConfig, HidBackend, StreamMode};
 use crate::video::format::{PixelFormat, Resolution};
 
+mod usb_serial;
 pub mod video_backend;
 pub mod wave5_caps;
 pub use video_backend::VideoBackend;
@@ -150,7 +151,7 @@ pub fn validate_usb_config(previous: &AppConfig, config: &AppConfig) -> crate::e
         &config.otg_network,
         &config.uac,
         &config.otg_serial,
-        VideoBackend::current(),
+        VideoBackend::current() == VideoBackend::Vendor || usb_serial::available(),
     )?;
     if VideoBackend::current() == VideoBackend::Wave5 {
         let path = std::path::Path::new(GADGET).join("functions/mass_storage.disk0/lun.0/file");
@@ -202,7 +203,7 @@ fn validate_usb_profile(
     network: &crate::config::OtgNetworkConfig,
     uac: &crate::config::UacConfig,
     serial: &crate::config::OtgSerialConfig,
-    backend: VideoBackend,
+    serial_available: bool,
 ) -> crate::error::Result<(crate::config::OtgHidFunctions, u8)> {
     use crate::error::AppError;
     if !network.bridge_interface.is_empty() {
@@ -226,9 +227,9 @@ fn validate_usb_profile(
     if endpoints > 5 {
         return Err(AppError::BadRequest("VIM4 supports at most 5 USB IN endpoints; disable some HID, network, microphone, serial or virtual media functions".into()));
     }
-    if backend == VideoBackend::Wave5 && serial.enabled {
+    if serial.enabled && !serial_available {
         return Err(AppError::BadRequest(
-            "USB serial is unavailable in the matched 7.x kernel".into(),
+            "USB serial requires the running kernel's CONFIG_USB_CONFIGFS_ACM and usb_f_acm module; install a matching ACM-enabled kernel and modules".into(),
         ));
     }
     Ok((functions, endpoints))
@@ -242,8 +243,14 @@ pub async fn configure_usb(
     serial: &crate::config::OtgSerialConfig,
 ) -> crate::error::Result<()> {
     use crate::error::AppError;
-    let (functions, endpoints) =
-        validate_usb_profile(hid, msd, network, uac, serial, VideoBackend::current())?;
+    let (functions, endpoints) = validate_usb_profile(
+        hid,
+        msd,
+        network,
+        uac,
+        serial,
+        VideoBackend::current() == VideoBackend::Vendor || usb_serial::available(),
+    )?;
     if VideoBackend::current() == VideoBackend::Wave5 {
         // Keep video usable if USB preparation failed and HID is disabled.
         // Otherwise use the same restricted configfs helper as production;
@@ -684,7 +691,7 @@ mod tests {
     #[test]
     fn usb_profiles_reserve_media_capacity_and_reject_endpoint_overcommit() {
         use crate::config::*;
-        for backend in [VideoBackend::Vendor, VideoBackend::Wave5] {
+        for serial_available in [false, true] {
             for mask in 0u16..256 {
                 let enabled = |bit: u32| mask & (1u16 << bit) != 0u16;
                 let mut config = AppConfig::default();
@@ -710,12 +717,12 @@ mod tests {
                     &config.otg_network,
                     &config.uac,
                     &config.otg_serial,
-                    backend,
+                    serial_available,
                 );
                 assert_eq!(
                     result.is_ok(),
-                    endpoints <= 5 && (backend == VideoBackend::Vendor || !enabled(7)),
-                    "{backend:?} {mask:#x}"
+                    endpoints <= 5 && (serial_available || !enabled(7)),
+                    "serial_available={serial_available} {mask:#x}"
                 );
             }
         }

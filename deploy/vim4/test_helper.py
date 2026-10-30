@@ -363,6 +363,34 @@ class UsbProfileTest(unittest.TestCase):
         self.assertFalse((self.config / 'acm.usb0').exists())
         self.assertFalse((self.gadget / 'functions/acm.usb0').exists())
 
+    def test_edge_serial_uses_shared_acm_path_and_cleans_up(self):
+        self.profile['hid']['consumer'] = False
+        self.profile['serial'] = True
+        with patch.object(helper, 'EDGE', True):
+            helper.configure_profile(self.profile)
+            self.assertEqual((self.config / 'acm.usb0').resolve(),
+                             self.gadget / 'functions/acm.usb0')
+            self.profile['serial'] = False
+            helper.configure_profile(self.profile)
+        self.assertFalse((self.config / 'acm.usb0').exists())
+        self.assertFalse((self.gadget / 'functions/acm.usb0').exists())
+
+    def test_edge_acm_unavailable_preserves_active_usb(self):
+        self.profile['hid']['consumer'] = False
+        self.profile['serial'] = True
+        mkdir = Path.mkdir
+
+        def unavailable(path, *args, **kwargs):
+            if path.name == 'acm.usb0':
+                raise FileNotFoundError('function driver unavailable')
+            return mkdir(path, *args, **kwargs)
+
+        with patch.object(helper, 'EDGE', True), patch.object(Path, 'mkdir', unavailable):
+            with self.assertRaisesRegex(ValueError, 'CONFIG_USB_CONFIGFS_ACM'):
+                helper.configure_profile(self.profile)
+        self.assertEqual(helper.snapshot_usb(), self.baseline)
+        self.assertEqual((self.gadget / 'UDC').read_text(), 'controller')
+
     def test_reenable_after_disabling_every_usb_function(self):
         controllers = self.root / 'udc'
         (controllers / 'controller').mkdir(parents=True)
