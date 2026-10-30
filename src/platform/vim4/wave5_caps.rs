@@ -85,16 +85,22 @@ fn probe() -> Option<Capabilities> {
         ctrl.id = id;
         unsafe { query_control(fd, &mut ctrl) }.is_ok() && writable_range(&ctrl, min, max)
     });
-    caps.visible_hevc = probe_visible_hevc(
-        |get, fmt| {
-            if get {
-                unsafe { get_format(fd, fmt) }.is_ok()
-            } else {
-                unsafe { set_format(fd, fmt) }.is_ok()
-            }
-        },
-        |selection| unsafe { set_selection(fd, selection) }.is_ok(),
-    );
+    // Driver support alone is insufficient: stock GStreamer treats storage
+    // alignment as visible caps and rejects the frame before S_SELECTION.
+    let crop_caps = gstreamer::init().is_ok()
+        && gstreamer::ElementFactory::find("v4l2h265enc")
+            .is_some_and(|factory| factory.metadata("vim4-wave5-visible-crop-api") == Some("1"));
+    caps.visible_hevc = crop_caps
+        && probe_visible_hevc(
+            |get, fmt| {
+                if get {
+                    unsafe { get_format(fd, fmt) }.is_ok()
+                } else {
+                    unsafe { set_format(fd, fmt) }.is_ok()
+                }
+            },
+            |selection| unsafe { set_selection(fd, selection) }.is_ok(),
+        );
     Some(caps)
 }
 

@@ -8,6 +8,31 @@ affected capability. The vendor backend retains its original paths and controls.
 
 ## Visible rectangles
 
+The private V4L2 plugin must also contain the visible-caps fix from the workspace
+`packaging/kernel-edge/build-gstreamer.py`. Stock GStreamer 1.24.2 converts RAW
+storage steps (32x16) and HEVC coded steps (8x8) into visible caps, rejecting
+1600x900 before S_FMT/S_SELECTION. The patched plugin proves the same private-fd
+crop contract below before exposing even NV12/NV12M/HEVC visible caps. Its existing
+set-format/padding path retains the negotiated storage stride/height and sets
+the visible OUTPUT crop. The Linux V4L2 ioctl core normalizes the multi-planar
+selection type to VIDEO_OUTPUT before calling the driver.
+
+One-KVM also checks the factory metadata `vim4-wave5-visible-crop-api=1`; an old
+or missing private plugin retains AVC fallback even with the newer kernel.
+Rebuild and install the private plugin together with the application; changing
+only the app or kernel cannot enable this path. The shared `vim4wave5enc` and
+direct `v4l2h265enc` fixtures use the same patched V4L2 caps negotiation.
+
+For the short board retest, use `videotestsrc num-buffers=5` followed by fixed
+NV12 caps and `v4l2h265enc ! h265parse ! filesink` for each fixture size. This
+allocates valid GStreamer row strides, including 1368 bytes for visible width
+1366. A tightly packed `width*height*3/2` appsrc byte array at that width needs
+explicit VideoMeta strides/UV offset; without it, the old fixture script has
+an additional short-buffer/layout defect after caps negotiation is repaired.
+Check SPS conformance cropping, ffprobe dimensions/frame count and full ffmpeg
+decode for each output. Separately repeat 720/native-to-900 HEVC transitions
+three times through the authenticated video API and assert advancing frames.
+
 Both b1300eb808f43 and 213f271505411 advertise an HEVC coded-size step of eight.
 That enumeration alone cannot distinguish conformance-window support. The newer
 kernel also changes RAW enumeration to storage alignment, but that is not used
