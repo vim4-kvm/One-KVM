@@ -1,6 +1,6 @@
 //! Wave5 imports two plane views of one capture allocation, retaining its lease.
 use super::*;
-use crate::platform::vim4::video_backend::{output_resolution, wave5_device};
+use crate::platform::vim4::video_backend::{output_resolution, wave5_device, wave5_encoder_device};
 use gstreamer_allocators::{DmaBufAllocator, DmaBufAllocatorExtManual, DmaBufMemory};
 use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -201,7 +201,7 @@ pub(super) fn configure(
     // Per-device V4L2 factories expose a read-only device property. Verify the
     // selected node rather than trying to redirect the factory to another VPU.
     let selected = std::path::PathBuf::from(encoder.property::<String>("device"));
-    let expected = wave5_device("C&M Wave5 VPU encoder")?;
+    let expected = wave5_encoder_device()?;
     if selected != expected {
         return Err(AppError::VideoError(format!(
             "V4L2 factory selected {}, expected {}",

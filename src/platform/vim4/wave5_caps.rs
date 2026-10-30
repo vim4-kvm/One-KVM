@@ -1,5 +1,5 @@
 //! Probe a private, bufferless encoder context. No REQBUFS or STREAMON is issued.
-use super::{video_backend::wave5_device, HevcQuality, VideoBackend};
+use super::{video_backend::wave5_encoder_device, HevcQuality, VideoBackend};
 use std::{fs::OpenOptions, os::fd::AsRawFd};
 use v4l2r::bindings::*;
 use v4l2r::bindings::{
@@ -73,7 +73,7 @@ fn quality_capabilities(mut accepts: impl FnMut(u32, i32, i32) -> bool) -> Capab
 }
 
 fn probe() -> Option<Capabilities> {
-    let device = wave5_device("C&M Wave5 VPU encoder").ok()?;
+    let device = wave5_encoder_device().ok()?;
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -124,11 +124,17 @@ fn probe_visible_hevc(
         if !format(false, &mut fmt) {
             return None;
         }
+        if unsafe { fmt.fmt.pix_mp.pixelformat } != HEVC {
+            return None;
+        }
         fmt.type_ = OUTPUT;
         fmt.fmt.pix_mp.width = 1376;
         fmt.fmt.pix_mp.height = 912;
         fmt.fmt.pix_mp.pixelformat = NV12M;
         if !format(false, &mut fmt) {
+            return None;
+        }
+        if unsafe { fmt.fmt.pix_mp.pixelformat } != NV12M {
             return None;
         }
         let mut selection: v4l2_selection = unsafe { std::mem::zeroed() };

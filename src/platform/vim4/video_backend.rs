@@ -10,6 +10,60 @@ use v4l2r::bindings::{
 };
 
 v4l2r::nix::ioctl_readwrite!(query_input, b'V', 26, v4l2_input);
+v4l2r::nix::ioctl_read!(
+    query_encoder_caps,
+    b'V',
+    0,
+    v4l2r::bindings::v4l2_capability
+);
+v4l2r::nix::ioctl_readwrite!(enum_encoder_format, b'V', 2, v4l2r::bindings::v4l2_fmtdesc);
+
+/// Discover the encoder by its standard queue capabilities, independently of
+/// QUERYCAP strings or the unrelated sysfs video_device name.
+pub fn wave5_encoder_device() -> Result<PathBuf> {
+    use v4l2r::bindings::*;
+    let mut devices = Vec::new();
+    for entry in std::fs::read_dir("/sys/class/video4linux")? {
+        let path = Path::new("/dev").join(entry?.file_name());
+        let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        else {
+            continue;
+        };
+        let mut cap: v4l2_capability = unsafe { std::mem::zeroed() };
+        if unsafe { query_encoder_caps(file.as_raw_fd(), &mut cap) }.is_err() {
+            continue;
+        }
+        let caps = if cap.capabilities & V4L2_CAP_DEVICE_CAPS != 0 {
+            cap.device_caps
+        } else {
+            cap.capabilities
+        };
+        if caps & (V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_STREAMING)
+            != V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_STREAMING
+        {
+            continue;
+        }
+        let mut fmt: v4l2_fmtdesc = unsafe { std::mem::zeroed() };
+        fmt.type_ = v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        while unsafe { enum_encoder_format(file.as_raw_fd(), &mut fmt) }.is_ok() {
+            if fmt.pixelformat == u32::from_le_bytes(*b"HEVC") {
+                devices.push(path);
+                break;
+            }
+            fmt.index += 1;
+        }
+    }
+    if devices.len() != 1 {
+        return Err(AppError::VideoError(format!(
+            "Expected one HEVC M2M encoder, found {}",
+            devices.len()
+        )));
+    }
+    Ok(devices.remove(0))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VideoBackend {

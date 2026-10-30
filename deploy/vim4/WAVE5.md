@@ -16,7 +16,8 @@ USB audio, accounts, images and other settings are preserved. The independent ed
 service keeps its existing isolated data, helper and port 8082.
 
 Wave5 uses standard V4L2 capture and encoding. Nodes are resolved by their sysfs
-names (`t7-vdin-test` and `C&M Wave5 VPU encoder`), never by assumed video numbers.
+capture name (`t7-vdin-test`) and standard M2M/HEVC encoder capabilities,
+never by assumed video numbers or QUERYCAP encoder names.
 The application still exposes its logical `/dev/video_cap` device to existing UI
 and stream selection code; no device symlink or vendor ioctl wrapper is needed.
 

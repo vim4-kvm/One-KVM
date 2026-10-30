@@ -17,6 +17,14 @@ set-format/padding path retains the negotiated storage stride/height and sets
 the visible OUTPUT crop. The Linux V4L2 ioctl core normalizes the multi-planar
 selection type to VIDEO_OUTPUT before calling the driver.
 
+Encoder discovery and the private probe use M2M/STREAMING capabilities and
+enumerated HEVC CAPTURE formats, never device/driver names. Both audited kernels
+return QUERYCAP driver/card `wave5-enc`, distinct from the sysfs video_device
+name. The probe also checks that S_FMT retains HEVC and NV12M, and that OUTPUT
+crop plus CAPTURE G_FMT preserve the visible rectangle and padded dimensions.
+Identical names do not make the old kernel capable; arbitrary names do not
+exclude a device that implements this contract.
+
 One-KVM also checks the factory metadata `vim4-wave5-visible-crop-api=1`; an old
 or missing private plugin retains AVC fallback even with the newer kernel.
 Rebuild and install the private plugin together with the application; changing
