@@ -7,6 +7,7 @@ use gstreamer as gst;
 
 mod stats;
 mod wave5;
+mod broker;
 
 #[cfg(test)]
 mod queue_tests;

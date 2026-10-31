@@ -63,8 +63,16 @@ pub(super) fn description(
     } else {
         ""
     };
+    let capture = if super::broker::enabled() {
+        if output.width != source.width || output.height != source.height {
+            return Err(AppError::VideoError("Broker capture currently requires native size".into()));
+        }
+        "appsrc name=source is-live=true format=time block=true max-buffers=1"
+    } else {
+        "v4l2src name=source io-mode=dmabuf"
+    };
     Ok(format!(
-        "v4l2src name=source io-mode=dmabuf ! video/x-raw,format=NV12,width={},height={} ! \
+        "{capture} ! video/x-raw,format=NV12,width={},height={} ! \
          {}queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! \
          videorate drop-only=true ! video/x-raw,framerate={fps}/1 ! \
          appsink name=plane_bridge emit-signals=false sync=false async=false max-buffers=1 \
@@ -191,10 +199,19 @@ pub(super) fn configure(
     let capture = pipeline
         .by_name("source")
         .ok_or_else(|| missing("source"))?;
-    capture.set_property(
-        "device",
-        wave5_device("t7-vdin-test")?.to_string_lossy().as_ref(),
-    );
+    if super::broker::enabled() {
+        let caps = gstreamer_video::VideoInfo::builder(gstreamer_video::VideoFormat::Nv12,
+            source.width, source.height).build()
+            .map_err(|e| AppError::VideoError(e.to_string()))?.to_caps()
+            .map_err(|e| AppError::VideoError(e.to_string()))?;
+        capture.set_property("caps", caps);
+        super::broker::attach(pipeline, source.width, source.height)?;
+    } else {
+        capture.set_property(
+            "device",
+            wave5_device("t7-vdin-test")?.to_string_lossy().as_ref(),
+        );
+    }
     let encoder = pipeline
         .by_name("encoder")
         .ok_or_else(|| missing("encoder"))?;
