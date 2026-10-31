@@ -280,6 +280,11 @@ fn attach_plane_bridge(pipeline: &gst::Pipeline, source: Resolution) -> Result<A
             if let Some(query) = info.query_mut() {
                 if let gst::QueryViewMut::Allocation(allocation) = query.view_mut() {
                     allocation.add_allocation_meta::<gstreamer_video::VideoMeta>(None);
+                    // Bound all retained raw leases: queue(3), appsrc(2),
+                    // bridge(1), snapshot(2), encoder lookahead/commands(4).
+                    // v4l2src adds two capture working slots. An explicit
+                    // budget also disables its uncertain-pool copy threshold.
+                    allocation.add_allocation_pool(None::<&gst::BufferPool>, 0, 12, 12);
                     return gst::PadProbeReturn::Handled;
                 }
             }
@@ -409,77 +414,94 @@ mod tests {
     }
 
     #[test]
-    fn bridge_releases_capture_after_pipeline_stops() {
+    fn bridge_reopen_keeps_dma_and_releases_previous_capture() {
         use std::ffi::c_void;
         use std::sync::mpsc;
         use std::time::Duration;
         gst::init().unwrap();
-        let pipeline = gst::parse::launch(
+        // Mapped PQ and SDR both negotiate SDR NV12; every source-change
+        // rebuild must reproduce the allocation and lease contract.
+        for _input_mode in ["pq", "sdr", "pq"] {
+            let pipeline = gst::parse::launch(
             "appsrc name=source is-live=true format=time ! appsink name=plane_bridge sync=false async=false \
              appsrc name=encoder_source is-live=true format=time ! appsink name=frames sync=false async=false",
         ).unwrap().downcast::<gst::Pipeline>().unwrap();
-        let input = pipeline
-            .by_name("source")
-            .unwrap()
-            .downcast::<AppSrc>()
-            .unwrap();
-        let output = pipeline
-            .by_name("frames")
-            .unwrap()
-            .downcast::<AppSink>()
-            .unwrap();
-        attach_plane_bridge(&pipeline, Resolution::new(64, 32)).unwrap();
-        let (released, received) = mpsc::channel::<()>();
-        unsafe extern "C" fn finalized(data: *mut c_void, _object: *mut gst::ffi::GstMiniObject) {
-            let sender = unsafe { Box::from_raw(data.cast::<mpsc::Sender<()>>()) };
-            let _ = sender.send(());
-        }
-        let parent = buffer(64, 32, 64 * 32 * 3 / 2);
-        unsafe {
-            gst::ffi::gst_mini_object_weak_ref(
-                parent.as_ptr() as *mut gst::ffi::GstMiniObject,
-                Some(finalized),
-                Box::into_raw(Box::new(released)).cast(),
+            let input = pipeline
+                .by_name("source")
+                .unwrap()
+                .downcast::<AppSrc>()
+                .unwrap();
+            let output = pipeline
+                .by_name("frames")
+                .unwrap()
+                .downcast::<AppSink>()
+                .unwrap();
+            attach_plane_bridge(&pipeline, Resolution::new(64, 32)).unwrap();
+            let (released, received) = mpsc::channel::<()>();
+            unsafe extern "C" fn finalized(
+                data: *mut c_void,
+                _object: *mut gst::ffi::GstMiniObject,
+            ) {
+                let sender = unsafe { Box::from_raw(data.cast::<mpsc::Sender<()>>()) };
+                let _ = sender.send(());
+            }
+            let parent = buffer(64, 32, 64 * 32 * 3 / 2);
+            unsafe {
+                gst::ffi::gst_mini_object_weak_ref(
+                    parent.as_ptr() as *mut gst::ffi::GstMiniObject,
+                    Some(finalized),
+                    Box::into_raw(Box::new(released)).cast(),
+                );
+            }
+            pipeline.set_state(gst::State::Playing).unwrap();
+            let mut allocation = gst::query::Allocation::new(None, false);
+            assert!(input.static_pad("src").unwrap().peer_query(&mut allocation));
+            assert!(allocation
+                .find_allocation_meta::<gstreamer_video::VideoMeta>()
+                .is_some());
+            let pools: Vec<_> = allocation.allocation_pools().collect();
+            assert_eq!(pools.len(), 1);
+            let (_, _, min, max) = &pools[0];
+            assert_eq!((*min, *max), (12, 12));
+            input.push_buffer(parent).unwrap();
+            let sample = output
+                .try_pull_sample(gst::ClockTime::from_seconds(2))
+                .unwrap();
+            assert!(sample
+                .buffer()
+                .unwrap()
+                .peek_memory(0)
+                .downcast_memory_ref::<DmaBufMemory>()
+                .is_some());
+            assert!(sample
+                .buffer()
+                .unwrap()
+                .meta::<gst::ParentBufferMeta>()
+                .is_some());
+            drop(sample);
+            let bridge = pipeline.by_name("plane_bridge").unwrap();
+            let cached = bridge
+                .property::<Option<gst::Sample>>("last-sample")
+                .is_some()
+                || output
+                    .property::<Option<gst::Sample>>("last-sample")
+                    .is_some();
+            pipeline.send_event(gst::event::FlushStart::new());
+            pipeline.set_state(gst::State::Null).unwrap();
+            drop(bridge);
+            drop(input);
+            drop(output);
+            drop(pipeline);
+            let result = received.recv_timeout(Duration::from_secs(2));
+            assert!(
+                !cached,
+                "Consumed DMA samples must not populate last-sample caches"
+            );
+            assert!(
+                result.is_ok(),
+                "Capture lease was retained after pipeline teardown"
             );
         }
-        pipeline.set_state(gst::State::Playing).unwrap();
-        let mut allocation = gst::query::Allocation::new(None, false);
-        assert!(input.static_pad("src").unwrap().peer_query(&mut allocation));
-        assert!(allocation
-            .find_allocation_meta::<gstreamer_video::VideoMeta>()
-            .is_some());
-        input.push_buffer(parent).unwrap();
-        let sample = output
-            .try_pull_sample(gst::ClockTime::from_seconds(2))
-            .unwrap();
-        assert!(sample
-            .buffer()
-            .unwrap()
-            .meta::<gst::ParentBufferMeta>()
-            .is_some());
-        drop(sample);
-        let bridge = pipeline.by_name("plane_bridge").unwrap();
-        let cached = bridge
-            .property::<Option<gst::Sample>>("last-sample")
-            .is_some()
-            || output
-                .property::<Option<gst::Sample>>("last-sample")
-                .is_some();
-        pipeline.send_event(gst::event::FlushStart::new());
-        pipeline.set_state(gst::State::Null).unwrap();
-        drop(bridge);
-        drop(input);
-        drop(output);
-        drop(pipeline);
-        let result = received.recv_timeout(Duration::from_secs(2));
-        assert!(
-            !cached,
-            "Consumed DMA samples must not populate last-sample caches"
-        );
-        assert!(
-            result.is_ok(),
-            "Capture lease was retained after pipeline teardown"
-        );
     }
 
     #[test]
