@@ -737,9 +737,7 @@ impl WebRtcStreamer {
             }
             #[cfg(feature = "vim4")]
             VideoEncoderType::H265
-                if pipeline.config().await.output.hdr
-                    && crate::platform::vim4::VideoBackend::current()
-                        == crate::platform::vim4::VideoBackend::Vendor =>
+                if pipeline.config().await.output.hdr =>
             {
                 Some("level-id=180;profile-id=2;tier-flag=0;tx-mode=SRST".into())
             }
@@ -1628,6 +1626,21 @@ impl Default for WebRtcStreamer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "vim4")]
+    #[tokio::test]
+    async fn native_hevc_sdp_matches_hdr_output_without_starting_capture() {
+        // Run this test with VIM4_VIDEO_BACKEND=wave5 as well as the default.
+        let streamer = WebRtcStreamer::new();
+        for hdr in [false, true, false] {
+            let mut config = SharedVideoPipelineConfig::default();
+            config.output.hdr = hdr;
+            let pipeline = SharedVideoPipeline::new(config).unwrap();
+            let fmtp = streamer.negotiate_video_fmtp(&pipeline, VideoEncoderType::H265).await;
+            assert_eq!(fmtp.as_deref(), hdr.then_some("level-id=180;profile-id=2;tier-flag=0;tx-mode=SRST"));
+            assert!(!pipeline.is_running());
+        }
+    }
 
     #[cfg(feature = "vim4")]
     #[tokio::test]
