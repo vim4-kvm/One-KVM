@@ -55,9 +55,12 @@ pub(super) fn description(
 ) -> Result<String> {
     let output = output_resolution(config.output, source);
     if hdr {
+        // HDMI reports its measured fractional rate (e.g. 59.999 Hz).
+        // Permit timestamp-only repeats when the selected output is 60 Hz;
+        // drop-only negotiation rejects an output slightly above the source.
         return Ok(format!(
             "vim4amlysrc name=source width={} height={} ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! \
-             videorate drop-only=true ! video/x-raw,format=P010_10LE,framerate={fps}/1 ! \
+             videorate ! video/x-raw,format=P010_10LE,framerate={fps}/1 ! \
              appsink name=plane_bridge emit-signals=false sync=false async=false max-buffers=1 \
              appsrc name=encoder_source is-live=true format=time block=true max-buffers=2 \
              caps=\"video/x-raw,format=P010_10LE,width={},height={},framerate={fps}/1,colorimetry=bt2100-pq,interlace-mode=progressive,pixel-aspect-ratio=1/1\" ! \
@@ -379,6 +382,34 @@ fn attach_plane_bridge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_rate_negotiates_fractional_hdmi_at_integer_output() {
+        gst::init().unwrap();
+        let text = description(
+            &SharedVideoPipelineConfig::default(),
+            Resolution { width: 64, height: 32 },
+            60,
+            true,
+        ).unwrap();
+        // Exercise the actual capture-side rate section with a software source;
+        // GPU capture and the DMA bridge are covered by the board smoke test.
+        let section = text.split_once(" ! queue").unwrap().1
+            .split_once(" ! appsink name=plane_bridge").unwrap().0;
+        for rate in ["59999/1000", "60000/1001", "60/1"] {
+            let pipeline = gst::parse::launch(&format!(
+                "videotestsrc num-buffers=10 ! video/x-raw,format=P010_10LE,width=64,height=32,framerate={rate} ! queue{section} ! fakesink sync=false"
+            )).unwrap().downcast::<gst::Pipeline>().unwrap();
+            pipeline.set_state(gst::State::Playing).unwrap();
+            let message = pipeline.bus().unwrap().timed_pop_filtered(
+                gst::ClockTime::from_seconds(3),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            );
+            pipeline.set_state(gst::State::Null).unwrap();
+            assert!(matches!(message.as_ref().map(|m| m.view()), Some(gst::MessageView::Eos(_))),
+                "Native rate negotiation failed for {rate}: {message:?}");
+        }
+    }
 
     // A file-backed DMA allocator exercises ownership/layout without hardware;
     // actual exported DMA-buf import is covered by the board test.
