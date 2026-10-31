@@ -2,6 +2,7 @@
 use crate::config::{AppConfig, HidBackend, StreamMode};
 use crate::video::format::{PixelFormat, Resolution};
 
+pub mod hdr10;
 mod usb_serial;
 pub mod video_backend;
 pub mod wave5_caps;
@@ -33,6 +34,21 @@ fn parse_global_hdr_default(text: &str) -> Option<bool> {
 }
 
 pub fn hdr_remote_available() -> bool {
+    if VideoBackend::current() == VideoBackend::Wave5 {
+        return wave5_caps::current().p010_main10
+            && wave5_caps::capture_has_amly()
+            && gstreamer::init().is_ok()
+            && gstreamer::ElementFactory::find("vim4amlysrc").is_some()
+            && gstreamer::ElementFactory::find("v4l2h265enc").is_some_and(|factory| {
+                let caps = "video/x-raw,format=P010_10LE"
+                    .parse::<gstreamer::Caps>()
+                    .unwrap();
+                factory.static_pad_templates().iter().any(|pad| {
+                    pad.direction() == gstreamer::PadDirection::Sink
+                        && pad.caps().can_intersect(&caps)
+                })
+            });
+    }
     VideoBackend::current() == VideoBackend::Vendor
         && std::path::Path::new("/usr/lib/vim4-kvm/gstreamer-1.0/libgstvim4hevc10.so").exists()
         && std::fs::read_to_string("/sys/module/vfm_cap/parameters/hdr_metadata_version")
@@ -42,6 +58,9 @@ pub fn hdr_remote_available() -> bool {
 }
 
 pub fn pq_input() -> bool {
+    if VideoBackend::current() == VideoBackend::Wave5 {
+        return hdr10::current().is_some();
+    }
     std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/info")
         .is_ok_and(|info| parse_pq_input(&info))
 }

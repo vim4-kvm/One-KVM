@@ -51,8 +51,21 @@ pub(super) fn description(
     config: &SharedVideoPipelineConfig,
     source: Resolution,
     fps: u32,
+    hdr: bool,
 ) -> Result<String> {
     let output = output_resolution(config.output, source);
+    if hdr {
+        return Ok(format!(
+            "vim4amlysrc name=source width={} height={} ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! \
+             videorate drop-only=true ! video/x-raw,format=P010_10LE,framerate={fps}/1 ! \
+             appsink name=plane_bridge emit-signals=false sync=false async=false max-buffers=1 \
+             appsrc name=encoder_source is-live=true format=time block=true max-buffers=2 \
+             caps=\"video/x-raw,format=P010_10LE,width={},height={},framerate={fps}/1,colorimetry=bt2100-pq,interlace-mode=progressive,pixel-aspect-ratio=1/1\" ! \
+             v4l2h265enc name=encoder output-io-mode=dmabuf-import ! \
+             h265parse config-interval=-1 ! video/x-h265,profile=main-10,stream-format=byte-stream,alignment=au ! \
+             appsink name=frames sync=false max-buffers=2",
+             output.width, output.height, output.width, output.height));
+    }
     let codec = match config.output_codec {
         VideoEncoderType::H264 => "h264",
         VideoEncoderType::H265 => "h265",
@@ -186,6 +199,7 @@ pub(super) fn configure(
     pipeline: &gst::Pipeline,
     config: &SharedVideoPipelineConfig,
     source: Resolution,
+    hdr: bool,
 ) -> Result<Arc<Progress>> {
     let missing = |name| AppError::VideoError(format!("Missing Wave5 element {name}"));
     let capture = pipeline
@@ -224,6 +238,9 @@ pub(super) fn configure(
         .build();
     if config.output_codec == VideoEncoderType::H265 {
         controls.set("hevc_level", 8i32);
+        if hdr {
+            controls.set("hevc_profile", 2i32);
+        }
         let quality = config.output.hevc_quality;
         if crate::platform::vim4::wave5_caps::current().supports(quality) {
             for (name, value) in crate::platform::vim4::wave5_caps::quality_controls(quality) {
@@ -237,13 +254,47 @@ pub(super) fn configure(
         }
     }
     encoder.set_property("extra-controls", controls);
+    let last_metadata = std::sync::Mutex::new(None);
     encoder
         .static_pad("src")
         .ok_or_else(|| missing("encoder src pad"))?
-        .add_probe(gst::PadProbeType::BUFFER, |_, info| {
+        .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
             if let Some(buffer) = info.buffer_mut() {
                 match cached_bitstream(buffer) {
-                    Ok(cached) => *buffer = cached,
+                    Ok(mut cached) => {
+                        if hdr {
+                            let Some(metadata) = crate::platform::vim4::hdr10::current() else {
+                                return gst::PadProbeReturn::Drop;
+                            };
+                            let mut previous = last_metadata.lock().unwrap();
+                            let Ok(mapped) = cached.map_readable() else {
+                                return gst::PadProbeReturn::Drop;
+                            };
+                            let changed = previous.as_ref() != Some(&metadata);
+                            let Ok(bytes) = crate::video::codec::h265_bitstream::with_hdr10(
+                                mapped.as_slice(),
+                                &metadata,
+                                changed,
+                            ) else {
+                                return gst::PadProbeReturn::Drop;
+                            };
+                            drop(mapped);
+                            let mut replacement = gst::Buffer::from_mut_slice(bytes);
+                            if cached
+                                .copy_into(
+                                    replacement.get_mut().unwrap(),
+                                    gst::BufferCopyFlags::TIMESTAMPS | gst::BufferCopyFlags::FLAGS,
+                                    ..,
+                                )
+                                .is_err()
+                            {
+                                return gst::PadProbeReturn::Drop;
+                            }
+                            *previous = Some(metadata);
+                            cached = replacement;
+                        }
+                        *buffer = cached;
+                    }
                     Err(error) => {
                         tracing::error!("Cannot cache Wave5 bitstream: {error}");
                         return gst::PadProbeReturn::Drop;
@@ -252,10 +303,14 @@ pub(super) fn configure(
             }
             gst::PadProbeReturn::Ok
         });
-    attach_plane_bridge(pipeline, output_resolution(config.output, source))
+    attach_plane_bridge(pipeline, output_resolution(config.output, source), hdr)
 }
 
-fn attach_plane_bridge(pipeline: &gst::Pipeline, source: Resolution) -> Result<Arc<Progress>> {
+fn attach_plane_bridge(
+    pipeline: &gst::Pipeline,
+    source: Resolution,
+    hdr: bool,
+) -> Result<Arc<Progress>> {
     let missing = |name| AppError::VideoError(format!("Missing Wave5 element {name}"));
     let input = pipeline
         .by_name("encoder_source")
@@ -298,7 +353,12 @@ fn attach_plane_bridge(pipeline: &gst::Pipeline, source: Resolution) -> Result<A
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                 counters.received.fetch_add(1, Ordering::Relaxed);
                 let buffer = sample.buffer_owned().ok_or(gst::FlowError::Error)?;
-                let view = plane_view(&buffer, source.width, source.height).map_err(|error| {
+                let view = if hdr {
+                    Ok(buffer)
+                } else {
+                    plane_view(&buffer, source.width, source.height)
+                }
+                .map_err(|error| {
                     tracing::error!("{error}");
                     gst::FlowError::Error
                 })?;
@@ -428,7 +488,7 @@ mod tests {
             .unwrap()
             .downcast::<AppSink>()
             .unwrap();
-        attach_plane_bridge(&pipeline, Resolution::new(64, 32)).unwrap();
+        attach_plane_bridge(&pipeline, Resolution::new(64, 32), false).unwrap();
         let (released, received) = mpsc::channel::<()>();
         unsafe extern "C" fn finalized(data: *mut c_void, _object: *mut gst::ffi::GstMiniObject) {
             let sender = unsafe { Box::from_raw(data.cast::<mpsc::Sender<()>>()) };

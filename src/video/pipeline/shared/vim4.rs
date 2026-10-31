@@ -55,7 +55,7 @@ fn description(
         .output
         .h26x_frame_rate(source, source_fps, VideoBackend::current());
     if VideoBackend::current() == VideoBackend::Wave5 {
-        return wave5::description(config, source, fps);
+        return wave5::description(config, source, fps, native_hdr);
     }
     if native_hdr {
         return hdr_description(config, source, source_fps, fps);
@@ -118,8 +118,7 @@ fn description(
 }
 
 fn native_hdr(config: &SharedVideoPipelineConfig) -> bool {
-    VideoBackend::current() == VideoBackend::Vendor
-        && config.output.hdr
+    config.output.hdr
         && config.output_codec == VideoEncoderType::H265
         && crate::platform::vim4::pq_input()
 }
@@ -381,7 +380,7 @@ impl SharedVideoPipeline {
             .bus()
             .ok_or_else(|| AppError::VideoError("Missing bus".into()))?;
         let progress = if VideoBackend::current() == VideoBackend::Wave5 {
-            Some(wave5::configure(&capture.0, config, source.0)?)
+            Some(wave5::configure(&capture.0, config, source.0, capture_hdr)?)
         } else {
             None
         };
@@ -407,10 +406,18 @@ impl SharedVideoPipeline {
             .set_state(gst::State::Playing)
             .map_err(|e| error(&e))?;
         let mut last_frame = Instant::now();
-        let _snapshot = self
-            .snapshot_tap
-            .attach(&capture.0)
-            .map_err(|e| error(&e))?;
+        let _snapshot = if capture_hdr && VideoBackend::current() == VideoBackend::Wave5 {
+            // The native capture has PQ samples. A separate GPU SDR snapshot
+            // branch is required before these can be handed to the JPEG tap.
+            warn!("Native Wave5 HDR snapshot branch is unavailable");
+            None
+        } else {
+            Some(
+                self.snapshot_tap
+                    .attach(&capture.0)
+                    .map_err(|e| error(&e))?,
+            )
+        };
         let mut check = Instant::now();
         let mut source_changes = crate::platform::vim4::SignalChange::default();
         let mut frames = 0;

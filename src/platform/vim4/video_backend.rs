@@ -183,13 +183,8 @@ pub fn wave5_input_status() -> VideoInputStatus {
         if input.status & (V4L2_IN_ST_NO_SIGNAL | V4L2_IN_ST_NO_SYNC) != 0 {
             return Ok(VideoInputStatus::no_signal());
         }
-        let format: v4l2r::Format = v4l2r::ioctl::g_fmt(&file, v4l2r::QueueType::VideoCapture)
-            .map_err(|e| AppError::VideoError(e.to_string()))?;
-        if PixelFormat::from_v4l2r(format.pixelformat) != Some(PixelFormat::Nv12) {
-            return Err(AppError::VideoError(
-                "Wave5 capture must be configured for NV12".into(),
-            ));
-        }
+        // The active allocation can be mapped NV12 or native AMLY. Geometry
+        // comes from RX timings; each pipeline validates its own storage format.
         let timings: v4l2_dv_timings = v4l2r::ioctl::query_dv_timings(&file)
             .map_err(|e| AppError::VideoError(e.to_string()))?;
         // G_FMT describes the old buffer layout until the pipeline releases its

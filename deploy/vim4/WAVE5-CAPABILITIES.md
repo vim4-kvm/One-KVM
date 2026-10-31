@@ -1,5 +1,26 @@
 # Wave5 HEVC capabilities
 
+## Native HDR candidate
+
+The `hdr10-remote` branch additionally probes private capture AMLY (not P010),
+the standard read-only HDR10 metadata controls, HEVC Main10/P010 negotiation,
+returned capacity/colorimetry and the private GStreamer factories. No kernel
+version enables this capability. `vim4amlysrc` converts exported packed ten-bit
+capture through Vulkan into one contiguous P010 fd with 32-pixel/16-row storage
+alignment and explicit VideoMeta. The encoder requests BT.2020/PQ/BT.2020nc,
+limited range; native HDR uses the existing global/UU preference semantics.
+
+The encoder pad reads fresh HDMI metadata and inserts complete prefix HDR10 SEI
+at IRAPs and metadata changes. Existing mastering/CLL messages are replaced while
+other SEI messages survive. Missing metadata drops native AUs. This does not
+depend on an unconfirmed firmware SEI ABI. `test-hdr10-bitstream.py` independently
+decodes the production Rust writer's payloads; it never opens video hardware.
+
+This is a hardware-unvalidated candidate. Native Wave5 currently has no parallel
+SDR snapshot branch; mapped NV12 snapshots retain their previous path. Do not
+claim dual-path parity or four-application support from this branch. Fresh 5.15
+GPU performance and live ten-bit/HEVC/browser/UU recovery gates remain required.
+
 The application probes standard V4L2 on a private encoder fd before streaming.
 It never allocates buffers, queues frames or starts firmware for this probe.
 The result is cached for the process lifetime; restart after loading/changing
