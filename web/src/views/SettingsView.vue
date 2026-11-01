@@ -306,7 +306,7 @@ async function loadSectionData(section: SettingsSectionId) {
       ])
       return
     case 'hid':
-      await Promise.all([loadConfig(), loadHidDeviceOptions(), isVim4.value && systemStore.fetchMsdState()])
+      await Promise.all([loadConfig(), loadHidDeviceOptions()])
       return
     case 'atx':
       await Promise.all([
@@ -1060,8 +1060,9 @@ function usbSpeedLabel(speed?: string): string {
 }
 
 const effectiveOtgFunctions = computed(() => ({ ...config.value.hid_otg_functions }))
+const vim4MediaMounted = ref(false)
 const vim4UsbEndpoints = computed(() => Object.values(config.value.hid_otg_functions).filter(Boolean).length
-  + (config.value.otg_network_enabled ? 2 : 0) + Number(config.value.uac_enabled) + Number((systemStore.msd?.mountedCount ?? 0) > 0) + (config.value.usb_serial_enabled ? 2 : 0))
+  + (config.value.otg_network_enabled ? 2 : 0) + Number(config.value.uac_enabled) + Number(vim4MediaMounted.value) + (config.value.usb_serial_enabled ? 2 : 0))
 const vim4UsbOverLimit = computed(() => isVim4.value && vim4UsbEndpoints.value > 5)
 
 const isKeyboardLedToggleDisabled = computed(() =>
@@ -1595,6 +1596,7 @@ async function loadConfig() {
       otgConfigApi.get(),
     ])
 
+    vim4MediaMounted.value = otg.media_mounted ?? false
     config.value = {
       video_device: video.device || '',
       video_format: video.format || '',

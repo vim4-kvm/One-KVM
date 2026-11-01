@@ -162,8 +162,12 @@ pub fn hid_paths(hid: &crate::config::HidConfig) -> crate::otg::HidDevicePaths {
     }
 }
 
-fn media_mounted() -> crate::error::Result<bool> {
+pub fn media_mounted() -> crate::error::Result<bool> {
     let path = std::path::Path::new(GADGET).join("functions/mass_storage.disk0/lun.0/file");
+    read_media_mounted(&path)
+}
+
+fn read_media_mounted(path: &std::path::Path) -> crate::error::Result<bool> {
     match std::fs::read_to_string(path) {
         Ok(value) => Ok(!value.trim().is_empty()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -712,6 +716,48 @@ mod tests {
         resolve_hardware_config(&mut config, VideoBackend::Wave5);
         assert_eq!(config.audio.device, "hw:USB,0");
     }
+    #[test]
+    fn disabled_msd_still_counts_manager_mounted_media() {
+        use crate::config::*;
+        let directory = tempfile::tempdir().unwrap();
+        let lun_file = directory.path().join("file");
+        std::fs::write(&lun_file, "/var/lib/shared/manager.img\n").unwrap();
+        let mut config = AppConfig::default();
+        config.msd.enabled = false;
+        config.hid.backend = HidBackend::Otg;
+        config.hid.otg_profile = OtgHidProfile::Custom;
+        config.hid.otg_functions = OtgHidFunctions {
+            keyboard: true,
+            mouse_absolute: true,
+            mouse_relative: true,
+            consumer: true,
+        };
+        config.otg_network.enabled = false;
+        config.otg_serial.enabled = false;
+        config.uac.enabled = true;
+        let mounted = read_media_mounted(&lun_file).unwrap();
+        assert!(mounted);
+        assert!(validate_usb_profile(
+            &config.hid,
+            mounted,
+            &config.otg_network,
+            &config.uac,
+            &config.otg_serial,
+            false,
+        )
+        .is_err());
+        std::fs::write(&lun_file, "\n").unwrap();
+        assert!(validate_usb_profile(
+            &config.hid,
+            read_media_mounted(&lun_file).unwrap(),
+            &config.otg_network,
+            &config.uac,
+            &config.otg_serial,
+            false,
+        )
+        .is_ok());
+    }
+
     #[test]
     fn usb_profiles_count_mounted_media_and_reject_endpoint_overcommit() {
         use crate::config::*;

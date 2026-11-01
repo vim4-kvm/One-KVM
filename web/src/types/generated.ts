@@ -771,6 +771,8 @@ export interface OtgNetworkStatus {
 }
 
 export interface OtgConfigResponse {
+	/** Shared board LUN state, supplied on VIM4 independently of MSD enablement. */
+	media_mounted?: boolean;
 	hid: HidConfig;
 	msd: MsdConfig;
 	network: OtgNetworkConfig;
