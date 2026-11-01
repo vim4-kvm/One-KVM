@@ -83,6 +83,7 @@ fn sanitize_config_for_api(config: &mut AppConfig) {
 
 pub async fn get_all_config(State(state): State<Arc<AppState>>) -> Json<AppConfig> {
     let mut config = (*state.config.get()).clone();
+    config.audio.device = crate::audio::canonical_device_name(&config.audio.device);
     sanitize_config_for_api(&mut config);
     Json(config)
 }

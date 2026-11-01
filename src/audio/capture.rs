@@ -101,6 +101,11 @@ impl AudioCapturer {
         self.state_rx.clone()
     }
 
+    #[cfg(test)]
+    pub(super) fn set_test_state(&self, state: CaptureState) {
+        self.state.send_replace(state);
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<AudioFrame> {
         self.frame_tx.subscribe()
     }

@@ -70,7 +70,8 @@ impl AudioController {
     }
 
     pub async fn list_devices(&self) -> Result<Vec<AudioDeviceInfo>> {
-        let current_device = if self.is_streaming().await {
+        let has_streamer = self.streamer.read().await.is_some();
+        let current_device = if has_streamer {
             Some(self.config.read().await.device.clone())
         } else {
             None
@@ -85,15 +86,15 @@ impl AudioController {
         let devices = self.list_devices().await?;
         let found = devices
             .iter()
-            .any(|d| d.name == device || d.description.contains(device));
+            .find(|d| d.matches_name(device) || d.description.contains(device));
 
-        if !found {
+        let Some(found) = found else {
             return Err(AppError::NotFound(format!("audio device {device}")));
-        }
+        };
 
         {
             let mut config = self.config.write().await;
-            config.device = device.to_string();
+            config.device = found.name.clone();
         }
 
         info!("Audio device selected: {}", device);
@@ -146,6 +147,7 @@ impl AudioController {
         let mut select_error = None;
         let (device_name, quality) = {
             let mut cfg = self.config.write().await;
+            cfg.device = super::canonical_device_name(&cfg.device);
             if cfg.device.trim().is_empty() {
                 match find_best_audio_device() {
                     Ok(best) => cfg.device = best.name,
@@ -181,8 +183,12 @@ impl AudioController {
         if let Err(e) = streamer.start().await {
             let error_msg = format!("Failed to start audio: {}", e);
 
-            self.monitor.report_error(&error_msg, "start_failed").await;
-            self.recovery.start(device_name.clone(), error_msg.clone());
+            if matches!(e, AppError::AudioSourceChanged) {
+                self.recovery.source_changed(device_name.clone());
+            } else {
+                self.monitor.report_error(&error_msg, "start_failed").await;
+                self.recovery.start(device_name.clone(), error_msg.clone());
+            }
 
             self.mark_device_info_dirty().await;
 
