@@ -298,6 +298,22 @@ class UsbProfileTest(unittest.TestCase):
             helper.configure_profile(self.profile)
         self.assertEqual((self.gadget / 'UDC').read_text(), 'controller')
 
+    def test_mount_at_capacity_preserves_active_profile(self):
+        self.profile['uac'] = True
+        helper.configure_profile(self.profile)
+        before = helper.snapshot_usb()
+        image = self.root / 'test.img'
+        image.touch()
+        with (
+            patch.object(helper, 'open_image', return_value=os.open(image, os.O_RDONLY)),
+            patch.object(Path, 'write_text', side_effect=AssertionError('unexpected gadget write')),
+            self.assertRaisesRegex(ValueError, 'MSD_USB_ENDPOINTS_FULL'),
+        ):
+            helper._configure_media('onekvm/test.img', False, True, '')
+        self.assertEqual((self.gadget / 'UDC').read_text(), 'controller')
+        self.assertEqual(helper.snapshot_usb(), before)
+        self.assertFalse((self.lun / 'file').read_text().strip())
+
     def test_edge_profile_changes_refuse_mounted_media_without_unbinding(self):
         (self.lun / 'file').write_text('/test/active.img')
         with patch.object(helper, 'EDGE', True):

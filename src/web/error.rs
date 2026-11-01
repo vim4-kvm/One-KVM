@@ -71,6 +71,7 @@ pub(crate) fn msd_status_code(code: crate::error::MsdErrorCode) -> StatusCode {
         | MsdMediaAlreadyMounted
         | MsdMediaInUse
         | MsdExternalMedia
+        | MsdUsbEndpointsFull
         | MsdDriveConnected
         | MsdMediumRemovalPrevented => StatusCode::CONFLICT,
         MsdInvalidRequest
@@ -155,6 +156,7 @@ mod tests {
             (MsdMediaAlreadyMounted, StatusCode::CONFLICT),
             (MsdMediaInUse, StatusCode::CONFLICT),
             (MsdExternalMedia, StatusCode::CONFLICT),
+            (MsdUsbEndpointsFull, StatusCode::CONFLICT),
             (MsdImageTooLarge, StatusCode::BAD_REQUEST),
             (MsdInvalidUrl, StatusCode::BAD_REQUEST),
             (MsdRemoteDownloadFailed, StatusCode::INTERNAL_SERVER_ERROR),
@@ -175,7 +177,8 @@ mod tests {
             let error = AppError::from(code);
             assert_eq!(error_code(&error), Some(code.as_str()));
             assert_eq!(public_message(&error), code.message());
-            assert!(!code.message().contains('/'));
+            // The endpoint budget is a public ratio, not a filesystem path.
+            assert!(!code.message().replace("5 / 5", "5 of 5").contains('/'));
             assert_eq!(msd_status_code(code), expected_status);
         }
     }

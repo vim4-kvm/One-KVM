@@ -107,7 +107,7 @@ images 目录镜像和 Ventoy 盘也属于外部介质。外部弹出后清除�
 相对鼠标锁定会隐藏系统指针，此时原生样式以本地箭头显示跟踪位置；不代表被控机光标的实际形状。
 
 VIM4 CRG 限制同时使用最多 5 个 IN 端点：每个 HID、麦克风、已挂载磁盘各一个，
-网卡和 USB ACM 串口各两个（串口为中断 IN + bulk IN）。设置页和 API 在启用虚拟盘时预留一个；助手在实际挂载时再次校验。
+网卡和 USB ACM 串口各两个（串口为中断 IN + bulk IN）。虚拟盘仅在挂载时占用端点；端点已满时助手会在更改 USB 配置前拒绝挂载。
 只读的存储目录是 `/var/lib/one-kvm/msd`，不能用网页配置绕过助手的路径限制。
 USB 网卡不改变已有以太网配置；地址、DHCP 与 NAT 由 NetworkManager shared 连接
 管理。RNDIS 的 Windows 驱动兼容性仍需在 Windows 主机验收。
