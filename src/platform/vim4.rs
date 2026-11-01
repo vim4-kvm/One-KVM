@@ -162,27 +162,29 @@ pub fn hid_paths(hid: &crate::config::HidConfig) -> crate::otg::HidDevicePaths {
     }
 }
 
+fn media_mounted() -> crate::error::Result<bool> {
+    let path = std::path::Path::new(GADGET).join("functions/mass_storage.disk0/lun.0/file");
+    match std::fs::read_to_string(path) {
+        Ok(value) => Ok(!value.trim().is_empty()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(crate::error::AppError::Config(format!(
+            "Cannot check USB media: {error}"
+        ))),
+    }
+}
+
 /// Validate endpoint capacity before closing active HID handles.
 pub fn validate_usb_config(previous: &AppConfig, config: &AppConfig) -> crate::error::Result<()> {
+    let mounted = media_mounted()?;
     validate_usb_profile(
         &config.hid,
-        &config.msd,
+        mounted,
         &config.otg_network,
         &config.uac,
         &config.otg_serial,
         VideoBackend::current() == VideoBackend::Vendor || usb_serial::available(),
     )?;
     if VideoBackend::current() == VideoBackend::Wave5 {
-        let path = std::path::Path::new(GADGET).join("functions/mass_storage.disk0/lun.0/file");
-        let mounted = match std::fs::read_to_string(path) {
-            Ok(value) => !value.trim().is_empty(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => {
-                return Err(crate::error::AppError::Config(format!(
-                    "Cannot check USB media: {error}"
-                )))
-            }
-        };
         validate_mounted_usb_change(previous, config, mounted)?;
     }
     Ok(())
@@ -218,7 +220,7 @@ fn validate_mounted_usb_change(
 
 fn validate_usb_profile(
     hid: &crate::config::HidConfig,
-    msd: &crate::config::MsdConfig,
+    mounted: bool,
     network: &crate::config::OtgNetworkConfig,
     uac: &crate::config::UacConfig,
     serial: &crate::config::OtgSerialConfig,
@@ -242,7 +244,7 @@ fn validate_usb_profile(
         + u8::from(network.enabled) * 2
         + u8::from(uac.enabled)
         + u8::from(serial.enabled) * 2
-        + u8::from(msd.enabled);
+        + u8::from(mounted);
     if endpoints > 5 {
         return Err(AppError::BadRequest("VIM4 supports at most 5 USB IN endpoints; disable some HID, network, microphone, serial or virtual media functions".into()));
     }
@@ -264,7 +266,7 @@ pub async fn configure_usb(
     use crate::error::AppError;
     let (functions, endpoints) = validate_usb_profile(
         hid,
-        msd,
+        media_mounted()?,
         network,
         uac,
         serial,
@@ -621,6 +623,9 @@ pub async fn configure_media_result(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     if !output.status.success() {
+        if String::from_utf8_lossy(&output.stderr).contains("MSD_USB_ENDPOINTS_FULL") {
+            return Err(crate::error::MsdErrorCode::MsdUsbEndpointsFull.into());
+        }
         if String::from_utf8_lossy(&output.stderr).contains("MSD_EXTERNAL_MEDIA") {
             return Err(crate::error::MsdErrorCode::MsdExternalMedia.into());
         }
@@ -708,7 +713,7 @@ mod tests {
         assert_eq!(config.audio.device, "hw:USB,0");
     }
     #[test]
-    fn usb_profiles_reserve_media_capacity_and_reject_endpoint_overcommit() {
+    fn usb_profiles_count_mounted_media_and_reject_endpoint_overcommit() {
         use crate::config::*;
         for serial_available in [false, true] {
             for mask in 0u16..256 {
@@ -722,7 +727,8 @@ mod tests {
                     mouse_relative: enabled(2),
                     consumer: enabled(3),
                 };
-                config.msd.enabled = enabled(4);
+                config.msd.enabled = true;
+                let mounted = enabled(4);
                 config.otg_network.enabled = enabled(5);
                 config.uac.enabled = enabled(6);
                 config.otg_serial.enabled = enabled(7);
@@ -732,7 +738,7 @@ mod tests {
                     + u32::from(enabled(7)) * 2;
                 let result = validate_usb_profile(
                     &config.hid,
-                    &config.msd,
+                    mounted,
                     &config.otg_network,
                     &config.uac,
                     &config.otg_serial,

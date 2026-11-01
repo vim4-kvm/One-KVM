@@ -306,7 +306,7 @@ async function loadSectionData(section: SettingsSectionId) {
       ])
       return
     case 'hid':
-      await Promise.all([loadConfig(), loadHidDeviceOptions()])
+      await Promise.all([loadConfig(), loadHidDeviceOptions(), isVim4.value && systemStore.fetchMsdState()])
       return
     case 'atx':
       await Promise.all([
@@ -1060,10 +1060,8 @@ function usbSpeedLabel(speed?: string): string {
 }
 
 const effectiveOtgFunctions = computed(() => ({ ...config.value.hid_otg_functions }))
-// Reserve the disk's endpoint when media is enabled, so a valid saved
-// profile can subsequently mount a disk without exceeding the board limit.
 const vim4UsbEndpoints = computed(() => Object.values(config.value.hid_otg_functions).filter(Boolean).length
-  + (config.value.otg_network_enabled ? 2 : 0) + Number(config.value.uac_enabled) + Number(config.value.msd_enabled) + (config.value.usb_serial_enabled ? 2 : 0))
+  + (config.value.otg_network_enabled ? 2 : 0) + Number(config.value.uac_enabled) + Number((systemStore.msd?.mountedCount ?? 0) > 0) + (config.value.usb_serial_enabled ? 2 : 0))
 const vim4UsbOverLimit = computed(() => isVim4.value && vim4UsbEndpoints.value > 5)
 
 const isKeyboardLedToggleDisabled = computed(() =>
@@ -5453,7 +5451,11 @@ watch(isWindows, () => {
           <!-- Save Button (sticky) -->
           <div v-if="activeSection === 'video' || (activeSection === 'hid' && ['otg', 'ch9329'].includes(configStore.hid?.backend ?? ''))" class="sticky bottom-0 pt-3 sm:pt-4 pb-3 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80 border-t -mx-3 px-3 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
             <div class="flex items-center justify-between gap-2 sm:gap-3">
-              <p v-if="activeSection === 'hid' && !isHidFunctionSelectionValid" class="flex min-w-0 items-center gap-1.5 text-xs text-warning">
+              <p v-if="activeSection === 'hid' && vim4UsbOverLimit" class="flex min-w-0 items-center gap-1.5 text-xs text-warning">
+                <AlertTriangle class="size-3.5 shrink-0" />
+                <span>{{ t('vim4Usb.overLimit', { count: vim4UsbEndpoints }) }}</span>
+              </p>
+              <p v-else-if="activeSection === 'hid' && !isHidFunctionSelectionValid" class="flex min-w-0 items-center gap-1.5 text-xs text-warning">
                 <AlertTriangle class="size-3.5 shrink-0" />
                 <span class="truncate">{{ t('settings.otgFunctionMinWarning') }}</span>
               </p>

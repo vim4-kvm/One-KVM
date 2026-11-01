@@ -91,6 +91,8 @@ def profile_links(profile, mounted):
     # CRG fails CONFIG_EP with six IN endpoints. Network and ACM use two; each
     # HID, mass-storage and microphone function consumes one.
     endpoints = len(links) + bool(profile['network']) + bool(profile.get('serial', False))
+    if endpoints > 5 and mounted:
+        raise ValueError('MSD_USB_ENDPOINTS_FULL: USB endpoint limit reached (5 / 5)')
     if endpoints > 5:
         raise ValueError('VIM4 USB IN endpoint limit exceeded (maximum 5); disable a HID function, USB network, serial or microphone')
     return links
