@@ -259,6 +259,14 @@ pub(crate) fn encode(
     let error = SnapshotError::unavailable;
     let caps = sample.caps().ok_or_else(|| error("Missing raw caps"))?;
     let info = gstreamer_video::VideoInfo::from_caps(caps).map_err(SnapshotError::unavailable)?;
+    // Native snapshots borrow one frame of the current P010 pool. Tone mapping
+    // runs only for this request, on the selected Vulkan device, before the
+    // bounded screenshot conversion. Never reopen VDIN or relabel PQ as SDR.
+    let tonemap = if info.format() == gstreamer_video::VideoFormat::P01010le {
+        "vim4pq2sdr ! video/x-raw,format=NV12,colorimetry=bt709 ! "
+    } else {
+        ""
+    };
     let (sw, sh) = output_size((info.width(), info.height()), output_height);
     let g = geometry(target, (sw, sh))?;
     let padded = sample
@@ -284,7 +292,7 @@ pub(crate) fn encode(
                 g.x, g.y, sw-g.x-g.w, sh-g.y-g.h, g.width, g.height)
         },
     };
-    let pipeline = gst::parse::launch(&format!("appsrc name=input format=time ! {transform}appsink name=output sync=false async=false enable-last-sample=false max-buffers=1 drop=true"))
+    let pipeline = gst::parse::launch(&format!("appsrc name=input format=time ! {tonemap}{transform}appsink name=output sync=false async=false enable-last-sample=false max-buffers=1 drop=true"))
         .map_err(SnapshotError::unavailable)?.downcast::<gst::Pipeline>().map_err(|_| error("Invalid conversion pipeline"))?;
     let conversion = Conversion(pipeline);
     let input = conversion

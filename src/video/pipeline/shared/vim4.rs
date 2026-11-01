@@ -406,18 +406,7 @@ impl SharedVideoPipeline {
             .set_state(gst::State::Playing)
             .map_err(|e| error(&e))?;
         let mut last_frame = Instant::now();
-        let _snapshot = if capture_hdr && VideoBackend::current() == VideoBackend::Wave5 {
-            // The native capture has PQ samples. A separate GPU SDR snapshot
-            // branch is required before these can be handed to the JPEG tap.
-            warn!("Native Wave5 HDR snapshot branch is unavailable");
-            None
-        } else {
-            Some(
-                self.snapshot_tap
-                    .attach(&capture.0)
-                    .map_err(|e| error(&e))?,
-            )
-        };
+        let _snapshot = self.snapshot_tap.attach(&capture.0).map_err(|e| error(&e))?;
         let mut check = Instant::now();
         let mut source_changes = crate::platform::vim4::SignalChange::default();
         let mut frames = 0;

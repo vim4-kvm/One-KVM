@@ -59,7 +59,7 @@ pub(super) fn description(
         // Permit timestamp-only repeats when the selected output is 60 Hz;
         // drop-only negotiation rejects an output slightly above the source.
         return Ok(format!(
-            "vim4amlysrc name=source width={} height={} ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! \
+            "vim4amlysrc name=source width={} height={} ! {}queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! \
              videorate ! video/x-raw,format=P010_10LE,framerate={fps}/1 ! \
              appsink name=plane_bridge emit-signals=false sync=false async=false max-buffers=1 \
              appsrc name=encoder_source is-live=true format=time block=true max-buffers=2 \
@@ -67,7 +67,7 @@ pub(super) fn description(
              v4l2h265enc name=encoder output-io-mode=dmabuf-import ! \
              h265parse config-interval=-1 ! video/x-h265,profile=main-10,stream-format=byte-stream,alignment=au ! \
              appsink name=frames sync=false max-buffers=2",
-             output.width, output.height, output.width, output.height));
+             output.width, output.height, crate::video::snapshot::vim4::BRANCH, output.width, output.height));
     }
     let codec = match config.output_codec {
         VideoEncoderType::H264 => "h264",
@@ -399,11 +399,11 @@ mod tests {
         ).unwrap();
         // Exercise the actual capture-side rate section with a software source;
         // GPU capture and the DMA bridge are covered by the board smoke test.
-        let section = text.split_once(" ! queue").unwrap().1
+        let section = text.split_once("videorate").unwrap().1
             .split_once(" ! appsink name=plane_bridge").unwrap().0;
         for rate in ["59999/1000", "60000/1001", "60/1"] {
             let pipeline = gst::parse::launch(&format!(
-                "videotestsrc num-buffers=10 ! video/x-raw,format=P010_10LE,width=64,height=32,framerate={rate} ! queue{section} ! fakesink sync=false"
+                "videotestsrc num-buffers=10 ! video/x-raw,format=P010_10LE,width=64,height=32,framerate={rate} ! videorate{section} ! fakesink sync=false"
             )).unwrap().downcast::<gst::Pipeline>().unwrap();
             pipeline.set_state(gst::State::Playing).unwrap();
             let message = pipeline.bus().unwrap().timed_pop_filtered(
