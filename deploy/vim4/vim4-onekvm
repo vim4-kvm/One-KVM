@@ -309,9 +309,11 @@ def remove_unused_serial():
 
 
 def restore_profile():
-    baseline = profile_file('baseline.json')
+    """Restore pending USB state; no journal or deferred media is success."""
+    baseline = PROFILE_DIR / 'baseline.json'
     if not baseline.exists():
         return
+    baseline = profile_file('baseline.json')
     if EDGE and (LUN / 'file').read_text().strip():
         # A service stop must not disconnect a writable disk still owned by
         # the host. Keep the journal for cleanup after host SCSI eject.
@@ -320,14 +322,12 @@ def restore_profile():
     target = json.loads(baseline.read_text())
     # Media is owned by its independent API; stopping the application must
     # not discard a mounted image or re-add NCM alongside it.
-    mounted = bool((LUN / 'file').read_text().strip())
-    if mounted or 'mass_storage.disk0' in target['links']:
-        target['links'] = [name for name in target['links'] if name not in FUNCTIONS]
-        if mounted:
-            target['links'].append('mass_storage.disk0')
-        elif not EDGE:
-            target['links'].append('ncm.usb0')
-        target['links'].sort()
+    target['links'] = [name for name in target['links'] if name not in FUNCTIONS]
+    if (LUN / 'file').read_text().strip():
+        target['links'].append('mass_storage.disk0')
+    elif not EDGE:
+        target['links'].append('ncm.usb0')
+    target['links'].sort()
     replace_usb(target)
     remove_unused_serial()
     profile_file('profile.json').unlink(missing_ok=True)

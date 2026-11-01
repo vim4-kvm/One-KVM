@@ -294,6 +294,8 @@ class UsbProfileTest(unittest.TestCase):
 
     def test_merged_reports_share_one_endpoint_and_restore_on_stop(self):
         self.enterContext(patch.object(helper, 'EDGE', True))
+        (self.config / 'ncm.usb0').unlink()
+        self.baseline = helper.snapshot_usb()
         self.profile.update(merge_consumer=True, uac=True)
         helper.configure_profile(self.profile)
         self.assertFalse((self.gadget / 'functions/hid.consumer').exists())
@@ -366,7 +368,6 @@ class UsbProfileTest(unittest.TestCase):
         self.assertEqual((self.gadget / 'UDC').read_text(), 'controller')
 
     def test_edge_restore_preserves_hid_without_implicitly_enabling_network(self):
-        (self.config / 'ncm.usb0').unlink()
         with patch.object(helper, 'EDGE', True):
             self.profile['hid']['consumer'] = False
             helper.configure_profile(self.profile)
@@ -385,6 +386,67 @@ class UsbProfileTest(unittest.TestCase):
             self.assertEqual((self.gadget / 'UDC').read_text(), 'controller')
             self.assertTrue((helper.PROFILE_DIR / 'baseline.json').exists())
             self.network.assert_not_called()
+
+    def test_restore_without_journal_is_success_without_touching_usb(self):
+        for state_directory_exists in (False, True):
+            if state_directory_exists:
+                helper.PROFILE_DIR.mkdir()
+            with patch.object(vim4media, 'media_locks', return_value=nullcontext()), \
+                    patch.object(helper, 'replace_usb') as replace, \
+                    patch.object(helper, 'profile_file', side_effect=AssertionError('state write')):
+                self.assertIsNone(helper.main(['usb-restore']))
+            replace.assert_not_called()
+            self.network.assert_not_called()
+            self.assertEqual(helper.PROFILE_DIR.exists(), state_directory_exists)
+            self.assertEqual(helper.snapshot_usb(), self.baseline)
+
+    def test_deferred_restore_completes_after_eject_and_repeated_call_is_noop(self):
+        (self.config / 'ncm.usb0').unlink()
+        original = helper.snapshot_usb()
+        self.profile['merge_consumer'] = True
+        with patch.object(helper, 'EDGE', True), \
+                patch.object(vim4media, 'media_locks', side_effect=lambda **kwargs: nullcontext()):
+            helper.configure_profile(self.profile)
+            merged = helper.snapshot_usb()
+            self.assertNotEqual(merged['mouse_abs'], original['mouse_abs'])
+            self.assertEqual(merged['mouse_abs']['report_length'], '7')
+            (self.lun / 'file').write_text('/host/writable.img')
+            self.assertIsNone(helper.main(['usb-restore']))
+            self.assertEqual(helper.snapshot_usb(), merged)
+            self.assertTrue((helper.PROFILE_DIR / 'baseline.json').exists())
+            self.assertTrue((helper.PROFILE_DIR / 'profile.json').exists())
+
+            (self.lun / 'file').write_text('')  # Host SCSI eject clears the LUN.
+            self.assertIsNone(helper.main(['usb-restore']))
+            self.assertEqual(helper.snapshot_usb(), original)
+            self.assertFalse((helper.PROFILE_DIR / 'baseline.json').exists())
+            self.assertFalse((helper.PROFILE_DIR / 'profile.json').exists())
+
+            self.network.reset_mock()
+            with patch.object(helper, 'replace_usb') as replace, \
+                    patch.object(helper, 'profile_file', side_effect=AssertionError('state write')):
+                self.assertIsNone(helper.main(['usb-restore']))
+            replace.assert_not_called()
+            self.network.assert_not_called()
+            self.assertEqual(helper.snapshot_usb(), original)
+
+    def test_restore_propagates_real_errors_and_keeps_journal(self):
+        helper.configure_profile(self.profile)
+        self.network.side_effect = ValueError('NetworkManager unavailable')
+        with patch.object(vim4media, 'media_locks', return_value=nullcontext()):
+            with self.assertRaisesRegex(ValueError, 'NetworkManager unavailable'):
+                helper.main(['usb-restore'])
+        self.assertTrue((helper.PROFILE_DIR / 'baseline.json').exists())
+
+    def test_vendor_restore_keeps_original_network_and_optional_link_policy(self):
+        (self.config / 'ncm.usb0').unlink()
+        for name in ('uac2.usb0', 'acm.usb0'):
+            (self.gadget / 'functions' / name).mkdir(exist_ok=True)
+            (self.config / name).symlink_to(self.gadget / 'functions' / name)
+        with patch.object(helper, 'EDGE', False):
+            helper.configure_profile(self.profile)
+            helper.restore_profile()
+        self.assertEqual(helper.snapshot_usb(), self.baseline)
 
     def test_clearing_custom_serial_restores_board_identity(self):
         self.profile['descriptor']['strings/0x409/serialnumber'] = 'custom-serial'
