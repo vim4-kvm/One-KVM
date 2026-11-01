@@ -268,6 +268,11 @@ class UsbProfileTest(unittest.TestCase):
             (self.gadget / 'functions' / name).mkdir()
             if name != 'uac2.usb0':
                 (self.config / name).symlink_to(self.gadget / 'functions' / name)
+        self.mouse = self.gadget / 'functions/hid.mouse_abs'
+        (self.mouse / 'report_desc').write_bytes(bytes.fromhex(
+            '05010902a1010901a1000509190129051500250195057501810295017503810105010930'
+            '16000026ff7f751095018102093116000026ff7f75109501810209381581257f750895018106c0c0'))
+        (self.mouse / 'report_length').write_text('6')
         self.baseline = helper.snapshot_usb()
         self.profile = {'hid': {'keyboard': True, 'mouse_absolute': True, 'mouse_relative': True, 'consumer': True},
                         'descriptor': descriptors, 'network': '', 'uac': False, 'serial': False,
@@ -284,6 +289,60 @@ class UsbProfileTest(unittest.TestCase):
         self.assertFalse((self.config / 'hid.keyboard').exists())
         self.assertTrue((self.gadget / 'functions/hid.keyboard').is_dir())
         self.assertTrue((self.config / 'uac2.usb0').is_symlink())
+        helper.restore_profile()
+        self.assertEqual(helper.snapshot_usb(), self.baseline)
+
+    def test_merged_reports_share_one_endpoint_and_restore_on_stop(self):
+        self.enterContext(patch.object(helper, 'EDGE', True))
+        self.profile.update(merge_consumer=True, uac=True)
+        helper.configure_profile(self.profile)
+        self.assertFalse((self.gadget / 'functions/hid.consumer').exists())
+        links = helper.profile_links(self.profile, mounted=True)
+        self.assertEqual(set(links), {'hid.keyboard', 'hid.mouse_abs', 'hid.mouse_rel',
+                                      'uac2.usb0', 'mass_storage.disk0'})
+        self.assertFalse((self.config / 'hid.consumer').is_symlink())
+        descriptor = (self.mouse / 'report_desc').read_bytes()
+        # Walk HID short items and accumulate input bits under each report ID.
+        inputs = {}
+        report_id = size = count = offset = 0
+        while offset < len(descriptor):
+            prefix = descriptor[offset]
+            width = (0, 1, 2, 4)[prefix & 3]
+            value = int.from_bytes(descriptor[offset + 1:offset + 1 + width], 'little')
+            offset += 1 + width
+            tag = prefix & 0xfc
+            if tag == 0x84:
+                report_id = value
+            elif tag == 0x74:
+                size = value
+            elif tag == 0x94:
+                count = value
+            elif tag == 0x80:
+                inputs[report_id] = inputs.get(report_id, 0) + size * count
+        self.assertEqual(inputs, {1: 48, 2: 16})
+        self.assertEqual((self.mouse / 'report_length').read_text(), '7')
+        with patch.object(vim4media, 'media_locks', return_value=nullcontext()):
+            helper.main(['usb-restore'])
+        self.assertEqual(helper.snapshot_usb(), self.baseline)
+
+    def test_disabling_absolute_mouse_restores_separate_consumer(self):
+        self.profile['merge_consumer'] = True
+        helper.configure_profile(self.profile)
+        self.profile['hid']['mouse_absolute'] = False
+        helper.configure_profile(self.profile)
+        self.assertTrue((self.config / 'hid.consumer').is_symlink())
+        self.assertFalse((self.config / 'hid.mouse_abs').is_symlink())
+        self.assertEqual(helper.snapshot_usb()['mouse_abs'], self.baseline['mouse_abs'])
+
+    def test_old_binary_and_old_journal_keep_unnumbered_mouse_reports(self):
+        old_baseline = {key: value for key, value in self.baseline.items() if key != 'mouse_abs'}
+        helper.save_json(helper.profile_file('baseline.json'), old_baseline)
+        self.profile['merge_consumer'] = True
+        helper.configure_profile(self.profile)
+        del self.profile['merge_consumer']  # Legacy 5.15 caller's JSON.
+        helper.configure_profile(self.profile)
+        self.assertTrue((self.config / 'hid.consumer').is_symlink())
+        self.assertEqual(helper.snapshot_usb()['mouse_abs'], self.baseline['mouse_abs'])
         helper.restore_profile()
         self.assertEqual(helper.snapshot_usb(), self.baseline)
 
@@ -307,6 +366,7 @@ class UsbProfileTest(unittest.TestCase):
         self.assertEqual((self.gadget / 'UDC').read_text(), 'controller')
 
     def test_edge_restore_preserves_hid_without_implicitly_enabling_network(self):
+        (self.config / 'ncm.usb0').unlink()
         with patch.object(helper, 'EDGE', True):
             self.profile['hid']['consumer'] = False
             helper.configure_profile(self.profile)
@@ -438,6 +498,7 @@ class UsbProfileTest(unittest.TestCase):
         self.assertEqual(helper.snapshot_usb(), self.baseline)
 
     def test_network_failure_restores_usb_before_returning_error(self):
+        self.profile['merge_consumer'] = True
         self.network.side_effect = [ValueError('NetworkManager unavailable'), None]
         with self.assertRaisesRegex(ValueError, 'NetworkManager'):
             helper.configure_profile(self.profile)

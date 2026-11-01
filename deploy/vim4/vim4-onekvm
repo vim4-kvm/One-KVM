@@ -26,6 +26,7 @@ HID_FUNCTIONS = {'keyboard': 'hid.keyboard', 'mouse_absolute': 'hid.mouse_abs',
                  'mouse_relative': 'hid.mouse_rel', 'consumer': 'hid.consumer'}
 DESCRIPTORS = ('idVendor', 'idProduct', 'strings/0x409/manufacturer',
                'strings/0x409/product', 'strings/0x409/serialnumber')
+CONSUMER_DESC = bytes.fromhex('050c0901a101150026ff0319002aff03751095018100c0')
 
 
 def select_environment(executable):
@@ -78,8 +79,14 @@ def save_json(path, value):
     temporary.replace(path)
 
 
+def merged_consumer(profile):
+    return profile.get('merge_consumer', False) and profile['hid']['mouse_absolute'] and profile['hid']['consumer']
+
+
 def profile_links(profile, mounted):
     links = [name for key, name in HID_FUNCTIONS.items() if profile['hid'][key]]
+    if merged_consumer(profile):
+        links.remove('hid.consumer')
     if profile['network']:
         links.append(profile['network'] + '.usb0')
     if profile['uac']:
@@ -97,8 +104,10 @@ def profile_links(profile, mounted):
 
 
 def validate_profile(profile):
-    if not isinstance(profile, dict) or set(profile) - {'serial'} != {'hid', 'descriptor', 'network', 'uac', 'inquiry'}:
+    if not isinstance(profile, dict) or set(profile) - {'serial', 'merge_consumer'} != {'hid', 'descriptor', 'network', 'uac', 'inquiry'}:
         raise ValueError('Invalid USB profile')
+    if type(profile.get('merge_consumer', False)) is not bool:
+        raise ValueError('USB merge_consumer flag must be boolean')
     if not isinstance(profile['hid'], dict) or set(profile['hid']) != set(HID_FUNCTIONS):
         raise ValueError('Invalid HID functions')
     if any(type(value) is not bool for value in profile['hid'].values()) or type(profile['uac']) is not bool:
@@ -126,7 +135,10 @@ def validate_profile(profile):
 
 
 def snapshot_usb():
+    mouse = GADGET / 'functions/hid.mouse_abs'
     return {'descriptor': {key: (GADGET / key).read_text().strip() for key in DESCRIPTORS},
+            'mouse_abs': {'report_desc': (mouse / 'report_desc').read_bytes().hex(),
+                          'report_length': (mouse / 'report_length').read_text().strip()},
             'inquiry': (LUN / 'inquiry_string').read_text().strip(),
             'links': sorted(p.name for p in (GADGET / 'configs/c.1').iterdir() if p.is_symlink())}
 
@@ -151,6 +163,10 @@ def replace_usb(target):
                 path.unlink()
         for key, value in state['descriptor'].items():
             (GADGET / key).write_text(value)
+        if 'mouse_abs' in state:
+            mouse = GADGET / 'functions/hid.mouse_abs'
+            (mouse / 'report_desc').write_bytes(bytes.fromhex(state['mouse_abs']['report_desc']))
+            (mouse / 'report_length').write_text(state['mouse_abs']['report_length'])
         (LUN / 'inquiry_string').write_text(state['inquiry'] or '\n')
         for name in state['links']:
             (config / name).symlink_to(GADGET / 'functions' / name)
@@ -181,12 +197,12 @@ def ensure_functions(profile):
             raise ValueError('Cannot create USB ACM serial function: check CONFIG_USB_CONFIGFS_ACM '
                              'and matching usb_f_acm modules: ' + str(error)) from error
     consumer = GADGET / 'functions/hid.consumer'
-    if profile['hid']['consumer'] and not consumer.exists():
+    if profile['hid']['consumer'] and not merged_consumer(profile) and not consumer.exists():
         consumer.mkdir()
         for key, value in {'protocol': '0', 'subclass': '0', 'report_length': '2', 'no_out_endpoint': '1'}.items():
             (consumer / key).write_text(value)
         # One unsigned 16-bit Consumer usage, matching OtgBackend's report.
-        (consumer / 'report_desc').write_bytes(bytes.fromhex('050c0901a101150026ff0319002aff03751095018100c0'))
+        (consumer / 'report_desc').write_bytes(CONSUMER_DESC)
     mode = profile['network']
     if mode:
         function = GADGET / ('functions/' + mode + '.usb0')
@@ -244,14 +260,25 @@ def configure_network(mode):
 def configure_profile(profile):
     validate_profile(profile)
     baseline = profile_file('baseline.json')
+    old = snapshot_usb()
+    original = json.loads(baseline.read_text()) if baseline.exists() else old
+    # Older helpers journaled links and identity but never changed the mouse.
+    if 'mouse_abs' not in original:
+        original['mouse_abs'] = old['mouse_abs']
+        save_json(baseline, original)
     if profile['descriptor']['strings/0x409/serialnumber'] is None:
-        original = json.loads(baseline.read_text()) if baseline.exists() else snapshot_usb()
         profile = {**profile, 'descriptor': {**profile['descriptor'],
                    'strings/0x409/serialnumber': original['descriptor']['strings/0x409/serialnumber']}}
     links = sorted(profile_links(profile, bool((LUN / 'file').read_text().strip())))
     target = {'descriptor': profile['descriptor'], 'links': links,
               'inquiry': profile['inquiry']['cdrom' if (LUN / 'cdrom').read_text().strip() == '1' else 'flash']}
-    old = snapshot_usb()
+    target['mouse_abs'] = original['mouse_abs']
+    if merged_consumer(profile):
+        # Report ID is a global HID item. Number each original collection
+        # without changing its usages, coordinate range or field layout.
+        pointer = bytes.fromhex(original['mouse_abs']['report_desc'])
+        descriptor = b'\x85\x01' + pointer + b'\x85\x02' + CONSUMER_DESC
+        target['mouse_abs'] = {'report_desc': descriptor.hex(), 'report_length': '7'}
     previous = saved_profile()
     if old == target and previous == profile:
         return
@@ -293,12 +320,14 @@ def restore_profile():
     target = json.loads(baseline.read_text())
     # Media is owned by its independent API; stopping the application must
     # not discard a mounted image or re-add NCM alongside it.
-    target['links'] = [name for name in target['links'] if name not in FUNCTIONS]
-    if (LUN / 'file').read_text().strip():
-        target['links'].append('mass_storage.disk0')
-    elif not EDGE:
-        target['links'].append('ncm.usb0')
-    target['links'].sort()
+    mounted = bool((LUN / 'file').read_text().strip())
+    if mounted or 'mass_storage.disk0' in target['links']:
+        target['links'] = [name for name in target['links'] if name not in FUNCTIONS]
+        if mounted:
+            target['links'].append('mass_storage.disk0')
+        elif not EDGE:
+            target['links'].append('ncm.usb0')
+        target['links'].sort()
     replace_usb(target)
     remove_unused_serial()
     profile_file('profile.json').unlink(missing_ok=True)

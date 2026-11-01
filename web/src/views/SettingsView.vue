@@ -1063,6 +1063,7 @@ const effectiveOtgFunctions = computed(() => ({ ...config.value.hid_otg_function
 // Reserve the disk's endpoint when media is enabled, so a valid saved
 // profile can subsequently mount a disk without exceeding the board limit.
 const vim4UsbEndpoints = computed(() => Object.values(config.value.hid_otg_functions).filter(Boolean).length
+  - Number(config.value.hid_otg_functions.consumer && config.value.hid_otg_functions.mouse_absolute)
   + (config.value.otg_network_enabled ? 2 : 0) + Number(config.value.uac_enabled) + Number(config.value.msd_enabled) + (config.value.usb_serial_enabled ? 2 : 0))
 const vim4UsbOverLimit = computed(() => isVim4.value && vim4UsbEndpoints.value > 5)
 
