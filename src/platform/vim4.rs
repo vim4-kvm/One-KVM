@@ -156,7 +156,8 @@ pub fn hid_paths(hid: &crate::config::HidConfig) -> crate::otg::HidDevicePaths {
         keyboard: functions.keyboard.then(|| "/dev/hidg0".into()),
         mouse_absolute: functions.mouse_absolute.then(|| "/dev/hidg1".into()),
         mouse_relative: functions.mouse_relative.then(|| "/dev/hidg2".into()),
-        consumer: functions.consumer.then(|| "/dev/hidg3".into()),
+        consumer: (functions.consumer && !functions.mouse_absolute).then(|| "/dev/hidg3".into()),
+        consumer_on_absolute: functions.consumer && functions.mouse_absolute,
         udc: hid.resolved_otg_udc(),
         keyboard_leds_enabled: hid.effective_otg_keyboard_leds(),
     }
@@ -244,7 +245,7 @@ fn validate_usb_profile(
     let endpoints = u8::from(functions.keyboard)
         + u8::from(functions.mouse_absolute)
         + u8::from(functions.mouse_relative)
-        + u8::from(functions.consumer)
+        + u8::from(functions.consumer && !functions.mouse_absolute)
         + u8::from(network.enabled) * 2
         + u8::from(uac.enabled)
         + u8::from(serial.enabled) * 2
@@ -286,6 +287,7 @@ pub async fn configure_usb(
     }
     let profile = serde_json::json!({
         "hid": functions,
+        "merge_consumer": true,
         "descriptor": {
             "idVendor": format!("0x{:04x}", hid.otg_descriptor.vendor_id),
             "idProduct": format!("0x{:04x}", hid.otg_descriptor.product_id),
@@ -732,9 +734,10 @@ mod tests {
             mouse_relative: true,
             consumer: true,
         };
-        config.otg_network.enabled = false;
+        // Merged consumer keys add nothing: 3 HID + network 2 + disk 1 = 6.
+        config.otg_network.enabled = true;
         config.otg_serial.enabled = false;
-        config.uac.enabled = true;
+        config.uac.enabled = false;
         let mounted = read_media_mounted(&lun_file).unwrap();
         assert!(mounted);
         assert!(validate_usb_profile(
@@ -779,6 +782,7 @@ mod tests {
                 config.uac.enabled = enabled(6);
                 config.otg_serial.enabled = enabled(7);
                 let endpoints = (mask & 0x1fu16).count_ones()
+                    - u32::from(enabled(1) && enabled(3))
                     + u32::from(enabled(5)) * 2
                     + u32::from(enabled(6))
                     + u32::from(enabled(7)) * 2;

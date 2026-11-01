@@ -69,7 +69,7 @@ export default {
   vim4Usb: {
     endpoints: 'USB endpoints: {count} / 5 (virtual media uses one when mounted)',
     overLimit: 'USB endpoint limit exceeded ({count} / 5). Disable some functions before saving.',
-    hint: 'Saving re-enumerates USB devices. Safely eject virtual media on the target first. Each HID and microphone uses one IN endpoint, and virtual media uses one only while mounted; networking and serial each use two. VIM4 supports up to five. Stopping One-KVM restores the previous USB configuration. Keyboard LEDs controls feedback. One virtual drive is supported, using application-managed storage.',
+    hint: 'Saving re-enumerates USB devices. Safely eject virtual media on the target first. Media keys share the absolute mouse interface when both are enabled and otherwise use one IN endpoint. Each HID interface and the microphone use one IN endpoint, and virtual media uses one only while mounted; networking and serial each use two. VIM4 supports up to five. Stopping One-KVM restores the previous USB configuration. Keyboard LEDs controls feedback. One virtual drive is supported, using application-managed storage.',
     network: 'USB networking uses a dedicated NetworkManager shared connection with DHCP/NAT; Ethernet bridging is unavailable. The USB microphone uses 48 kHz stereo; browser capture requires HTTPS or a secure context.',
   },
   vim4Video: {
