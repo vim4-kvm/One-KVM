@@ -74,8 +74,10 @@ pub(super) fn description(
         VideoEncoderType::H265 => "h265",
         _ => return Err(AppError::VideoError("Wave5 requires H.264 or H.265".into())),
     };
-    let hevc = if codec == "h265" {
+    let codec_caps = if codec == "h265" {
         "video/x-h265,profile=main,level=(string)5.1 ! "
+    } else if fps > 60 {
+        "video/x-h264,level=(string)5.1 ! "
     } else {
         ""
     };
@@ -86,7 +88,7 @@ pub(super) fn description(
          appsink name=plane_bridge emit-signals=false sync=false async=false max-buffers=1 \
          appsrc name=encoder_source is-live=true format=time block=true max-buffers=2 \
          caps=\"video/x-raw,format=NV12,width={},height={},framerate={fps}/1,colorimetry=bt709,interlace-mode=progressive,pixel-aspect-ratio=1/1\" ! \
-         v4l2{codec}enc name=encoder output-io-mode=dmabuf-import ! {hevc}\
+         v4l2{codec}enc name=encoder output-io-mode=dmabuf-import ! {codec_caps}\
          {codec}parse config-interval=-1 ! video/x-{codec},stream-format=byte-stream,alignment=au ! \
          appsink name=frames sync=false max-buffers=2",
         output.width,

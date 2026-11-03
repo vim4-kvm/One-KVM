@@ -166,36 +166,62 @@ pub fn wave5_device(name: &str) -> Result<PathBuf> {
     Ok(devices.remove(0))
 }
 
-pub fn wave5_input_status() -> VideoInputStatus {
-    fn probe() -> Result<VideoInputStatus> {
-        let file = File::open(wave5_device("t7-vdin-test")?)?;
-        let caps: v4l2r::ioctl::Capability =
-            v4l2r::ioctl::querycap(&file).map_err(|e| AppError::VideoError(e.to_string()))?;
-        if caps.driver != "t7-vdin-test" {
-            return Err(AppError::VideoError(
-                "Unexpected HDMI capture driver".into(),
-            ));
-        }
-        // v4l2_input is a kernel UAPI struct consisting of integer/byte fields.
-        let mut input: v4l2_input = unsafe { std::mem::zeroed() };
-        unsafe { query_input(file.as_raw_fd(), &mut input) }
-            .map_err(|e| AppError::VideoError(e.to_string()))?;
-        if input.status & (V4L2_IN_ST_NO_SIGNAL | V4L2_IN_ST_NO_SYNC) != 0 {
-            return Ok(VideoInputStatus::no_signal());
-        }
-        // The active allocation can be mapped NV12 or native AMLY. Geometry
-        // comes from RX timings; each pipeline validates its own storage format.
-        let timings: v4l2_dv_timings = v4l2r::ioctl::query_dv_timings(&file)
-            .map_err(|e| AppError::VideoError(e.to_string()))?;
-        // G_FMT describes the old buffer layout until the pipeline releases its
-        // buffers and applies S_FMT. Report the detected input independently so
-        // the existing source monitor can initiate that rebuild.
-        measured_input_status(timings)
+v4l2r::nix::ioctl_readwrite!(get_capture_parm, b'V', 21, v4l2r::bindings::v4l2_streamparm);
+
+fn probe_input(file: &File) -> Result<VideoInputStatus> {
+    // Accept only the capture node identified by QUERYCAP.
+    let caps: v4l2r::ioctl::Capability =
+        v4l2r::ioctl::querycap(file).map_err(|e| AppError::VideoError(e.to_string()))?;
+    if caps.driver != "t7-vdin-test" {
+        return Err(AppError::VideoError(
+            "Unexpected HDMI capture driver".into(),
+        ));
     }
-    probe().unwrap_or_else(|error| {
-        tracing::debug!("Wave5 input status unavailable: {error}");
-        VideoInputStatus::unavailable()
-    })
+    // v4l2_input is a kernel UAPI struct consisting of integer/byte fields.
+    let mut input: v4l2_input = unsafe { std::mem::zeroed() };
+    unsafe { query_input(file.as_raw_fd(), &mut input) }
+        .map_err(|e| AppError::VideoError(e.to_string()))?;
+    if input.status & (V4L2_IN_ST_NO_SIGNAL | V4L2_IN_ST_NO_SYNC) != 0 {
+        return Ok(VideoInputStatus::no_signal());
+    }
+    // The active allocation can be mapped NV12 or native AMLY. Geometry
+    // comes from RX timings; each pipeline validates its own storage format.
+    let timings: v4l2_dv_timings =
+        v4l2r::ioctl::query_dv_timings(file).map_err(|e| AppError::VideoError(e.to_string()))?;
+    // G_FMT describes the old buffer layout until the pipeline releases its
+    // buffers and applies S_FMT. Report the detected input independently so
+    // the existing source monitor can initiate that rebuild.
+    measured_input_status(timings)
+}
+
+pub fn wave5_input_status() -> VideoInputStatus {
+    wave5_device("t7-vdin-test")
+        .and_then(|path| probe_input(&File::open(path)?))
+        .unwrap_or_else(|error| {
+            tracing::debug!("Wave5 input status unavailable: {error}");
+            VideoInputStatus::unavailable()
+        })
+}
+
+pub fn wave5_capture_signal() -> Option<(Resolution, u32)> {
+    use v4l2r::bindings::{v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_CAPTURE, v4l2_streamparm};
+    let file = File::open(wave5_device("t7-vdin-test").ok()?).ok()?;
+    let status = probe_input(&file).ok()?;
+    let resolution = Resolution::new(status.width?, status.height?);
+    let mut parm: v4l2_streamparm = unsafe { std::mem::zeroed() };
+    parm.type_ = v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    let rate = match unsafe { get_capture_parm(file.as_raw_fd(), &mut parm) } {
+        Ok(_) => {
+            let interval = unsafe { parm.parm.capture.timeperframe };
+            if interval.numerator == 0 || interval.denominator == 0 {
+                return None;
+            }
+            f64::from(interval.denominator) / f64::from(interval.numerator)
+        }
+        Err(v4l2r::nix::errno::Errno::ENOTTY) => status.fps?,
+        Err(_) => return None,
+    };
+    Some((resolution, rate.round() as u32))
 }
 
 fn measured_input_status(timings: v4l2_dv_timings) -> Result<VideoInputStatus> {
@@ -224,7 +250,8 @@ fn measured_input_status(timings: v4l2_dv_timings) -> Result<VideoInputStatus> {
         + u64::from(bt.vsync)
         + u64::from(bt.vbackporch);
     let fps = bt.pixelclock as f64 / total_width as f64 / total_height as f64;
-    if !(20.0..=120.0).contains(&fps) {
+    // Allow a few reference-clock ticks of quantization at the RX limit.
+    if !(20.0..=120.001).contains(&fps) {
         return Err(invalid());
     }
     Ok(VideoInputStatus::locked(

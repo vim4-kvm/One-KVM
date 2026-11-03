@@ -1,5 +1,6 @@
 //! The board services own HDMI, USB descriptors and power negotiation.
 use crate::config::{AppConfig, HidBackend, StreamMode};
+use crate::video::codec::registry::VideoEncoderType;
 use crate::video::format::{PixelFormat, Resolution};
 
 pub mod hdr10;
@@ -390,15 +391,15 @@ impl OutputSettings {
         source: Resolution,
         source_fps: u32,
         backend: VideoBackend,
+        codec: VideoEncoderType,
     ) -> u32 {
-        // Scope high refresh to native 1080p and 1440p on the vendor path.
-        // Scaling a UHD source down must not raise its capture/encoding budget.
-        let maximum = if backend == VideoBackend::Vendor
-            && matches!((source.width, source.height), (1920, 1080) | (2560, 1440))
-        {
-            120
-        } else {
-            60
+        // QHD120 AVC exceeds level 5.1, the highest Wave5 level qualified here.
+        let maximum = match (source.width, source.height) {
+            (1920, 1080) => 120,
+            (2560, 1440) if backend == VideoBackend::Vendor || codec == VideoEncoderType::H265 => {
+                120
+            }
+            _ => 60,
         };
         self.frame_rate(source_fps, maximum)
     }
@@ -501,11 +502,7 @@ pub fn parse_signal(info: &str) -> Option<(Resolution, f64)> {
 
 pub fn signal() -> Option<(Resolution, u32)> {
     if VideoBackend::current() == VideoBackend::Wave5 {
-        let status = video_backend::wave5_input_status();
-        return Some((
-            Resolution::new(status.width?, status.height?),
-            status.fps?.round() as u32,
-        ));
+        return video_backend::wave5_capture_signal();
     }
     if !vendor_signal_ready() {
         return None;
@@ -880,16 +877,25 @@ mod tests {
         let native = Resolution::new(1920, 1080);
         let automatic = OutputSettings::default();
         assert_eq!(
-            automatic.h26x_frame_rate(native, 120, VideoBackend::Vendor),
+            automatic.h26x_frame_rate(native, 120, VideoBackend::Vendor, VideoEncoderType::H264),
             120
         );
         assert_eq!(
-            automatic.h26x_frame_rate(native, 60, VideoBackend::Vendor),
+            automatic.h26x_frame_rate(native, 60, VideoBackend::Vendor, VideoEncoderType::H264),
             60
         );
         assert_eq!(
-            automatic.h26x_frame_rate(native, 120, VideoBackend::Wave5),
-            60
+            automatic.h26x_frame_rate(native, 120, VideoBackend::Wave5, VideoEncoderType::H264),
+            120
+        );
+        assert_eq!(
+            automatic.h26x_frame_rate(
+                Resolution::new(2560, 1440),
+                120,
+                VideoBackend::Wave5,
+                VideoEncoderType::H265
+            ),
+            120
         );
         let limited = OutputSettings {
             height: 720,
@@ -898,7 +904,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            limited.h26x_frame_rate(native, 120, VideoBackend::Vendor),
+            limited.h26x_frame_rate(native, 120, VideoBackend::Vendor, VideoEncoderType::H264),
             60
         );
         let high = OutputSettings {
@@ -908,25 +914,53 @@ mod tests {
             ..Default::default()
         };
         assert!(high.validate().is_ok());
-        assert_eq!(high.h26x_frame_rate(native, 100, VideoBackend::Vendor), 100);
         assert_eq!(
-            high.h26x_frame_rate(Resolution::new(3840, 2160), 120, VideoBackend::Vendor),
+            high.h26x_frame_rate(native, 100, VideoBackend::Vendor, VideoEncoderType::H264),
+            100
+        );
+        assert_eq!(
+            high.h26x_frame_rate(
+                Resolution::new(3840, 2160),
+                120,
+                VideoBackend::Vendor,
+                VideoEncoderType::H264
+            ),
             60
         );
         assert_eq!(
-            high.h26x_frame_rate(Resolution::new(2560, 1440), 120, VideoBackend::Vendor),
+            high.h26x_frame_rate(
+                Resolution::new(2560, 1440),
+                120,
+                VideoBackend::Vendor,
+                VideoEncoderType::H264
+            ),
             120
         );
         assert_eq!(
-            automatic.h26x_frame_rate(Resolution::new(2560, 1440), 120, VideoBackend::Wave5),
+            automatic.h26x_frame_rate(
+                Resolution::new(2560, 1440),
+                120,
+                VideoBackend::Wave5,
+                VideoEncoderType::H264
+            ),
             60
         );
         assert_eq!(
-            limited.h26x_frame_rate(Resolution::new(2560, 1440), 120, VideoBackend::Vendor),
+            limited.h26x_frame_rate(
+                Resolution::new(2560, 1440),
+                120,
+                VideoBackend::Vendor,
+                VideoEncoderType::H264
+            ),
             60
         );
         assert_eq!(
-            automatic.h26x_frame_rate(Resolution::new(3440, 1440), 120, VideoBackend::Vendor),
+            automatic.h26x_frame_rate(
+                Resolution::new(3440, 1440),
+                120,
+                VideoBackend::Vendor,
+                VideoEncoderType::H264
+            ),
             60
         );
         assert!(OutputSettings { fps: 121, ..high }.validate().is_err());

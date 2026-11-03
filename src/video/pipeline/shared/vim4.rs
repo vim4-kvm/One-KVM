@@ -45,15 +45,28 @@ impl Drop for Capture {
     }
 }
 
+fn output_fps(
+    config: &SharedVideoPipelineConfig,
+    source: Resolution,
+    source_fps: u32,
+    native_hdr: bool,
+) -> u32 {
+    let backend = VideoBackend::current();
+    let budget = if native_hdr && backend == VideoBackend::Wave5 {
+        source_fps.min(60)
+    } else {
+        source_fps
+    };
+    config.output.h26x_frame_rate(source, budget, backend, config.output_codec)
+}
+
 fn description(
     config: &SharedVideoPipelineConfig,
     source: Resolution,
     source_fps: u32,
     native_hdr: bool,
 ) -> Result<String> {
-    let fps = config
-        .output
-        .h26x_frame_rate(source, source_fps, VideoBackend::current());
+    let fps = output_fps(config, source, source_fps, native_hdr);
     if VideoBackend::current() == VideoBackend::Wave5 {
         return wave5::description(config, source, fps, native_hdr);
     }
@@ -356,13 +369,15 @@ impl SharedVideoPipeline {
         } else {
             None
         };
-        let fps = config
-            .output
-            .h26x_frame_rate(source.0, source.1, VideoBackend::current());
+        let capture_hdr = native_hdr(config);
+        let fps = output_fps(config, source.0, source.1, capture_hdr);
+        if fps < config.output.frame_rate(source.1, 120) && source.1 > 60 {
+            info!(fps, source_fps = source.1, codec = ?config.output_codec,
+                "Using the VIM4 output limit for this source and codec");
+        }
         let error = |e: &dyn std::fmt::Display| AppError::VideoError(e.to_string());
         // SDR has no PQ samples to preserve. Keep its DMA/8-bit fast path even
         // while the user preference allows HDR, and rebuild on EOTF changes.
-        let capture_hdr = native_hdr(config);
         let element = gst::parse::launch(&description(config, source.0, source.1, capture_hdr)?)
             .map_err(|e| error(&e))?;
         let capture = Capture(
