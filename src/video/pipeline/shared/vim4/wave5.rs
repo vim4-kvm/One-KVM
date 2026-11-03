@@ -3,13 +3,7 @@ use super::*;
 use crate::platform::vim4::video_backend::{output_resolution, wave5_device, wave5_encoder_device};
 use gstreamer_allocators::{DmaBufAllocator, DmaBufAllocatorExtManual, DmaBufMemory};
 use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
-use std::os::fd::{AsRawFd, BorrowedFd};
-use v4l2r::bindings::{
-    v4l2_queryctrl, V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, V4L2_CTRL_FLAG_DISABLED,
-};
-
-v4l2r::nix::ioctl_readwrite!(query_control, b'V', 36, v4l2_queryctrl);
-const INTRA_REFRESH_PERIOD: i32 = 45;
+use std::os::fd::BorrowedFd;
 
 #[derive(Default)]
 pub(super) struct Progress {
@@ -24,27 +18,6 @@ impl Progress {
             self.pushed.load(Ordering::Relaxed),
         )
     }
-}
-
-fn require_intra_refresh(device: &std::path::Path) -> Result<()> {
-    let file = std::fs::File::open(device)?;
-    // This UAPI structure contains only integer and byte fields.
-    let mut control: v4l2_queryctrl = unsafe { std::mem::zeroed() };
-    control.id = V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD;
-    unsafe { query_control(file.as_raw_fd(), &mut control) }.map_err(|error| {
-        AppError::VideoError(format!(
-            "Wave5 requires the cyclic intra refresh driver: {error}"
-        ))
-    })?;
-    if control.flags & V4L2_CTRL_FLAG_DISABLED != 0
-        || control.minimum > INTRA_REFRESH_PERIOD
-        || control.maximum < INTRA_REFRESH_PERIOD
-    {
-        return Err(AppError::VideoError(
-            "Wave5 cyclic refresh period is unavailable".into(),
-        ));
-    }
-    Ok(())
 }
 
 pub(super) fn description(
@@ -223,16 +196,13 @@ pub(super) fn configure(
             expected.display()
         )));
     }
-    require_intra_refresh(&selected)?;
     let mut controls = gst::Structure::builder("controls")
         .field(
             "video_bitrate",
             (config.bitrate_kbps().clamp(1000, 60000) * 1000) as i32,
         )
-        // Spread refresh work across frames while keeping explicit recovery IDRs.
-        // At UHD this refreshes three AVC MB rows or one HEVC CTU row per frame.
         .field("video_gop_size", 0i32)
-        .field("intra_refresh_period", INTRA_REFRESH_PERIOD)
+        .field("intra_refresh_period", 0i32)
         .field("frame_level_rate_control_enable", 1i32)
         .field("h264_mb_level_rate_control", 1i32)
         .build();
@@ -242,16 +212,21 @@ pub(super) fn configure(
             controls.set("hevc_profile", 2i32);
         }
         let quality = config.output.hevc_quality;
-        if crate::platform::vim4::wave5_caps::current().supports(quality) {
-            for (name, value) in crate::platform::vim4::wave5_caps::quality_controls(quality) {
-                controls.set(name, value);
-            }
+        let quality = if crate::platform::vim4::wave5_caps::current().supports(quality) {
+            quality
         } else {
             warn!(
                 ?quality,
                 "Saved HEVC quality mode unavailable; using bitrate control"
             );
+            crate::platform::vim4::HevcQuality::Bitrate
+        };
+        for (name, value) in crate::platform::vim4::wave5_caps::quality_controls(quality) {
+            controls.set(name, value);
         }
+    } else {
+        // Bound recovery IDR size after a long run of static skips.
+        controls.set("h264_i_frame_minimum_qp_value", 26i32);
     }
     encoder.set_property("extra-controls", controls);
     let last_metadata = std::sync::Mutex::new(None);
