@@ -286,7 +286,7 @@ Linux VIM4 另提供默认关闭的 `ONEKVM_UDP_BATCH=1` 实验开关，在同�
 范围、取消与背压语义见 [UDP 批处理](libs/webrtc-util/VIM4.md)，验收须同时报告
 完整发送路径和浏览器尾延迟，不能仅根据减少系统调用就启用。
 7.3 Wave5 的 AVC 和 HEVC 都使用 GOP 0，关闭循环刷新，在新观看者接入或收到 PLI/FIR 时输出 IDR。
-AVC 与 HEVC 码率模式使用帧级码控，I 帧 QP 下限为 26。AVC 每次 IDR 后的首张 P 帧
+AVC 与 HEVC 码率模式使用帧级码控，I 帧 QP 下限为 26。AVC 起播或显式请求 IDR 后的首张 P 帧
 QP 下限为 12，随后每帧减 1，第 13 张 P 帧恢复为 0。网页和 UU 共用编码管线。
 5.15 VIM4 H.264 使用 `gop=0 intra-refresh-rows=3`，H.265 使用
 `gop=0 intra-refresh-rows=1`（HEVC 码率不高于 1 Mbps 时为 0 行），分别每帧刷新三行 MB、一行 CTU，避免周期
