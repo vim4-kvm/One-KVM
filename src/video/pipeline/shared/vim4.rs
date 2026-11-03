@@ -71,7 +71,7 @@ fn description(
         return wave5::description(config, source, fps, native_hdr);
     }
     if native_hdr {
-        return hdr_description(config, source, source_fps, fps);
+        return hdr_description(config, source, fps);
     }
     let codec = match config.output_codec {
         VideoEncoderType::H264 => "h264",
@@ -110,7 +110,6 @@ fn description(
     let capture = vendor_capture(
         std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").ok().as_deref(),
         source,
-        source_fps,
     )?;
     let encoder = if config.output_codec == VideoEncoderType::H265
         && config.output.hevc_quality != crate::platform::vim4::HevcQuality::Bitrate
@@ -139,7 +138,6 @@ fn native_hdr(config: &SharedVideoPipelineConfig) -> bool {
 fn hdr_description(
     config: &SharedVideoPipelineConfig,
     source: Resolution,
-    source_fps: u32,
     fps: u32,
 ) -> Result<String> {
     let capture = if config.output.height > 0 && config.output.height < source.height {
@@ -151,7 +149,7 @@ fn hdr_description(
     };
     // JPEG snapshots continue to use the independent SDR capture. They must
     // never reinterpret raw PQ samples as an ordinary eight-bit JPEG.
-    let snapshot = vendor_capture(Some("1"), source, source_fps)?
+    let snapshot = vendor_capture(Some("1"), source)?
         .replace("name=source", "name=snapshot_source");
     Ok(format!(
         "{snapshot} ! {}fakesink sync=false async=false \
@@ -165,12 +163,12 @@ fn hdr_description(
     ))
 }
 
-fn vendor_capture(secondary: Option<&str>, source: Resolution, fps: u32) -> Result<String> {
+fn vendor_capture(secondary: Option<&str>, source: Resolution) -> Result<String> {
     match secondary {
         None | Some("0") => Ok("vfmcapsrc name=source".into()),
         Some("1") => Ok(format!(
             "v4l2src name=source device=/dev/video71 io-mode=dmabuf do-timestamp=true ! \
-             video/x-raw,format=NV21,width={},height={},framerate={fps}/1,colorimetry=bt709",
+             video/x-raw,format=NV21,width={},height={},colorimetry=bt709",
             source.width, source.height
         )),
         _ => Err(AppError::VideoError(
