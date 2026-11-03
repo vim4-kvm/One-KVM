@@ -198,7 +198,10 @@ impl WebRtcStreamer {
         // Create new pipeline with new codec if capture source is configured
         let has_capture = self.capture_device.read().await.is_some();
         if has_capture {
-            self.ensure_video_pipeline().await?;
+            if let Err(error) = self.ensure_video_pipeline().await {
+                *self.video_codec.write().await = current;
+                return Err(error);
+            }
         }
 
         info!("Video codec switched to {:?}", codec);
@@ -1721,6 +1724,17 @@ mod tests {
         assert_eq!(config.bitrate_preset, BitratePreset::Balanced);
         assert_eq!(config.fps, 30);
         assert!(!config.audio_enabled);
+    }
+
+    #[tokio::test]
+    async fn failed_codec_switch_can_be_retried() {
+        let streamer = WebRtcStreamer::new();
+        streamer.set_capture_device("/missing-capture-device".into(), 80, None).await;
+        let original = streamer.current_video_codec().await;
+        for _ in 0..2 {
+            assert!(streamer.set_video_codec(VideoCodecType::VP8).await.is_err());
+            assert_eq!(streamer.current_video_codec().await, original);
+        }
     }
 
     #[tokio::test]
