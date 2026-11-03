@@ -196,31 +196,34 @@ pub(super) fn configure(
             expected.display()
         )));
     }
+    let hevc = config.output_codec == VideoEncoderType::H265;
     let mut controls = gst::Structure::builder("controls")
         .field(
             "video_bitrate",
             (config.bitrate_kbps().clamp(1000, 60000) * 1000) as i32,
         )
         .field("video_gop_size", 0i32)
-        .field("intra_refresh_period", 0i32)
+        .field("intra_refresh_period", if hevc { 0i32 } else { 45i32 })
         .field("frame_level_rate_control_enable", 1i32)
-        .field("h264_mb_level_rate_control", 1i32)
+        .field("h264_mb_level_rate_control", i32::from(!hevc))
         .build();
-    if config.output_codec == VideoEncoderType::H265 {
+    if hevc {
         controls.set("hevc_level", 8i32);
         if hdr {
             controls.set("hevc_profile", 2i32);
         }
         let quality = config.output.hevc_quality;
-        if crate::platform::vim4::wave5_caps::current().supports(quality) {
-            for (name, value) in crate::platform::vim4::wave5_caps::quality_controls(quality) {
-                controls.set(name, value);
-            }
+        let quality = if crate::platform::vim4::wave5_caps::current().supports(quality) {
+            quality
         } else {
             warn!(
                 ?quality,
                 "Saved HEVC quality mode unavailable; using bitrate control"
             );
+            crate::platform::vim4::HevcQuality::Bitrate
+        };
+        for (name, value) in crate::platform::vim4::wave5_caps::quality_controls(quality) {
+            controls.set(name, value);
         }
     }
     encoder.set_property("extra-controls", controls);

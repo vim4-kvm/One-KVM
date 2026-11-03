@@ -281,7 +281,7 @@ fn probe_visible_hevc(
 /// Use explicit per-picture QPs; CONSTANT_QUALITY is a rounded percentage.
 pub fn quality_controls(quality: HevcQuality) -> Vec<(&'static str, i32)> {
     if quality == HevcQuality::Bitrate {
-        return Vec::new();
+        return vec![("hevc_i_frame_minimum_qp_value", 26)];
     }
     let mut controls = vec![
         ("frame_level_rate_control_enable", 0),
