@@ -213,9 +213,11 @@ pub fn wave5_capture_signal() -> Option<(Resolution, u32)> {
     let rate = match unsafe { get_vrr_control(file.as_raw_fd(), &mut ctrl) } {
         Ok(_) if ctrl.value == 0 => status.fps?.round() as u32,
         Ok(_) if ctrl.value > 0 => ctrl.value as u32,
+        // Locked Gaming VRR without a signalled base uses the local output budget.
+        Ok(_) if ctrl.value == -1 => 60,
         Err(v4l2r::nix::errno::Errno::EINVAL | v4l2r::nix::errno::Errno::ENOTTY) =>
             status.fps?.round() as u32,
-        _ => return None, // Unknown VRR base or capture failure.
+        _ => return None,
     };
     Some((resolution, rate))
 }
