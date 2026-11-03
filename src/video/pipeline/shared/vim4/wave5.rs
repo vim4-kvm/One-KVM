@@ -203,9 +203,9 @@ pub(super) fn configure(
             (config.bitrate_kbps().clamp(1000, 60000) * 1000) as i32,
         )
         .field("video_gop_size", 0i32)
-        .field("intra_refresh_period", if hevc { 0i32 } else { 45i32 })
+        .field("intra_refresh_period", 0i32)
         .field("frame_level_rate_control_enable", 1i32)
-        .field("h264_mb_level_rate_control", i32::from(!hevc))
+        .field("h264_mb_level_rate_control", 0i32)
         .build();
     if hevc {
         controls.set("hevc_level", 8i32);
@@ -225,6 +225,9 @@ pub(super) fn configure(
         for (name, value) in crate::platform::vim4::wave5_caps::quality_controls(quality) {
             controls.set(name, value);
         }
+    } else {
+        controls.set("h264_i_frame_minimum_qp_value", 26i32);
+        controls.set("h264_p_frame_minimum_qp_value", 12i32);
     }
     encoder.set_property("extra-controls", controls);
     let last_metadata = std::sync::Mutex::new(None);
