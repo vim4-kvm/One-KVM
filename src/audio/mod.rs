@@ -21,6 +21,7 @@ pub mod uac;
 
 pub use capture::{AudioCapturer, AudioConfig, AudioFrame};
 pub use controller::AudioController;
+pub(crate) use device::canonical_device_name;
 pub use device::{enumerate_audio_devices, enumerate_audio_devices_with_current, AudioDeviceInfo};
 pub use encoder::{OpusConfig, OpusEncoder, OpusFrame};
 pub use monitor::{AudioHealthMonitor, AudioHealthStatus};

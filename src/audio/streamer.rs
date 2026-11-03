@@ -54,7 +54,16 @@ pub enum AudioStreamState {
     Stopped,
     Starting,
     Running,
+    SourceChanged,
     Error,
+}
+
+fn capture_ended_state(state: CaptureState) -> AudioStreamState {
+    if state == CaptureState::SourceChanged {
+        AudioStreamState::SourceChanged
+    } else {
+        AudioStreamState::Error
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -117,6 +126,11 @@ impl AudioStreamer {
 
     pub fn state_watch(&self) -> watch::Receiver<AudioStreamState> {
         self.state_rx.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_test_state(&self, state: AudioStreamState) {
+        self.state.send_replace(state);
     }
 
     pub fn subscribe_opus(&self) -> mpsc::Receiver<Arc<OpusFrame>> {
@@ -329,9 +343,12 @@ impl AudioStreamer {
                 break;
             }
 
-            if matches!(capturer.state(), CaptureState::Error | CaptureState::SourceChanged) {
+            if matches!(
+                capturer.state(),
+                CaptureState::Error | CaptureState::SourceChanged
+            ) {
                 debug!("Audio capture ended, waiting for recovery");
-                let _ = state.send(AudioStreamState::Error);
+                let _ = state.send(capture_ended_state(capturer.state()));
                 break;
             }
 
@@ -400,7 +417,7 @@ impl AudioStreamer {
                 Err(_) => {
                     if capturer.state() != CaptureState::Running {
                         info!("Audio capture stopped, ending stream task");
-                        let _ = state.send(AudioStreamState::Error);
+                        let _ = state.send(capture_ended_state(capturer.state()));
                         break;
                     }
                 }
@@ -426,6 +443,51 @@ impl Default for AudioStreamer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn source_change_survives_capture_cleanup_without_becoming_device_error() {
+        for (capture_state, expected) in [
+            (CaptureState::SourceChanged, AudioStreamState::SourceChanged),
+            (CaptureState::Error, AudioStreamState::Error),
+        ] {
+            let capturer = Arc::new(AudioCapturer::new(AudioConfig::default()));
+            capturer.set_test_state(capture_state);
+            let (state, observed) = watch::channel(AudioStreamState::Running);
+            let (_shutdown, shutdown) = watch::channel(0);
+            AudioStreamer::stream_task(
+                capturer.clone(),
+                Arc::new(AsyncMutex::new(None)),
+                Arc::new(Mutex::new(Vec::new())),
+                state,
+                Arc::new(AtomicBool::new(false)),
+                shutdown,
+            )
+            .await;
+            assert_eq!(*observed.borrow(), expected);
+            assert_eq!(capturer.state(), CaptureState::Stopped);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn source_change_during_receive_wait_keeps_its_cause() {
+        let capturer = Arc::new(AudioCapturer::new(AudioConfig::default()));
+        capturer.set_test_state(CaptureState::Running);
+        let (state, observed) = watch::channel(AudioStreamState::Running);
+        let (_shutdown, shutdown) = watch::channel(0);
+        let task = tokio::spawn(AudioStreamer::stream_task(
+            capturer.clone(),
+            Arc::new(AsyncMutex::new(None)),
+            Arc::new(Mutex::new(Vec::new())),
+            state,
+            Arc::new(AtomicBool::new(false)),
+            shutdown,
+        ));
+        tokio::task::yield_now().await;
+        capturer.set_test_state(CaptureState::SourceChanged);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        task.await.unwrap();
+        assert_eq!(*observed.borrow(), AudioStreamState::SourceChanged);
+    }
     use bytes::Bytes;
 
     #[test]

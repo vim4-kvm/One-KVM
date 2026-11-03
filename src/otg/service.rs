@@ -19,6 +19,8 @@ pub struct HidDevicePaths {
     pub mouse_relative: Option<PathBuf>,
     pub mouse_absolute: Option<PathBuf>,
     pub consumer: Option<PathBuf>,
+    /// Route consumer reports through the numbered absolute pointer interface.
+    pub consumer_on_absolute: bool,
     pub udc: Option<String>,
     pub keyboard_leds_enabled: bool,
 }
@@ -741,6 +743,14 @@ mod tests {
         assert!(paths.keyboard.is_none());
         assert!(paths.consumer.is_none());
         assert!(!paths.keyboard_leds_enabled);
+        config.hid.otg_functions.consumer = true;
+        let paths = crate::platform::vim4::hid_paths(&config.hid);
+        assert!(paths.consumer_on_absolute);
+        assert!(paths.consumer.is_none());
+        config.hid.otg_functions.mouse_absolute = false;
+        let paths = crate::platform::vim4::hid_paths(&config.hid);
+        assert!(!paths.consumer_on_absolute);
+        assert_eq!(paths.consumer, Some(PathBuf::from("/dev/hidg3")));
     }
 
     #[test]

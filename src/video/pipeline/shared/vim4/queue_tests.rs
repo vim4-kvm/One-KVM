@@ -23,7 +23,7 @@ fn lowest_hevc_tier_keeps_recovery_keyframes_without_cyclic_refresh_overhead() {
 #[test]
 fn secondary_capture_negotiates_full_resolution_sdr_and_rejects_invalid_selection() {
     gst::init().unwrap();
-    let source = vendor_capture(Some("1"), Resolution::new(3840, 2160), 60).unwrap();
+    let source = vendor_capture(Some("1"), Resolution::new(3840, 2160)).unwrap();
     let pipeline = gst::parse::launch(&format!("{source} ! fakesink"))
         .unwrap()
         .downcast::<gst::Pipeline>()
@@ -48,11 +48,15 @@ fn secondary_capture_negotiates_full_resolution_sdr_and_rejects_invalid_selectio
     let caps = filter.property::<gst::Caps>("caps");
     let info = VideoInfo::from_caps(&caps).unwrap();
     assert_eq!(
-        (info.width(), info.height(), info.fps()),
-        (3840, 2160, gst::Fraction::new(60, 1))
+        (info.width(), info.height()),
+        (3840, 2160)
     );
     assert_eq!(info.format(), VideoFormat::Nv21);
-    assert!(vendor_capture(Some("unexpected"), Resolution::new(3840, 2160), 60).is_err());
+    let fractional = gst::Caps::builder("video/x-raw")
+        .field("framerate", gst::Fraction::new(60000, 1001))
+        .build();
+    assert!(caps.can_intersect(&fractional));
+    assert!(vendor_capture(Some("unexpected"), Resolution::new(3840, 2160)).is_err());
 }
 
 #[test]

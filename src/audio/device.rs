@@ -25,8 +25,26 @@ pub struct AudioDeviceInfo {
     pub usb_bus: Option<String>,
 }
 
+impl AudioDeviceInfo {
+    pub(crate) fn matches_name(&self, name: &str) -> bool {
+        self.name == name
+            || (cfg!(unix) && name == format!("hw:{},{}", self.card_index, self.device_index))
+    }
+}
+
 pub fn enumerate_audio_devices() -> Result<Vec<AudioDeviceInfo>> {
     imp::enumerate_audio_devices_with_current(None)
+}
+
+pub(crate) fn canonical_device_name(name: &str) -> String {
+    #[cfg(unix)]
+    {
+        imp::canonical_device_name(name)
+    }
+    #[cfg(windows)]
+    {
+        name.to_string()
+    }
 }
 
 pub fn enumerate_audio_devices_with_current(

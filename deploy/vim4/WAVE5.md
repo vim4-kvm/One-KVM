@@ -102,7 +102,7 @@ installed `/usr/libexec/vim4-onekvm-edge` helper and its dedicated sudoers rule.
 It uses `/var/lib/one-kvm-edge/msd` and `/run/vim4-onekvm-edge-usb`; production
 media and USB journals remain separate. The preparation service adds unlinked
 NCM and playback-only UAC2 instances without replacing the existing HID devices.
-The API reserves media capacity within the five-IN-endpoint budget and rejects
+The API counts only mounted media toward the five-IN-endpoint budget and rejects
 USB configuration changes while a host still owns a mounted image. The helper
 checks again under the shared media locks. Service stop preserves mounted media
 and its USB profile; after host SCSI eject the baseline can be restored safely.

@@ -62,7 +62,7 @@ impl Default for WebRtcStreamerConfig {
             #[cfg(feature = "vim4")]
             output: Default::default(),
             webrtc: WebRtcConfig::default(),
-            video_codec: VideoCodecType::H264,
+            video_codec: VideoCodecType::default(),
             resolution: Resolution::HD720,
             input_format: PixelFormat::Mjpeg,
             bitrate_preset: BitratePreset::Balanced,
@@ -198,7 +198,10 @@ impl WebRtcStreamer {
         // Create new pipeline with new codec if capture source is configured
         let has_capture = self.capture_device.read().await.is_some();
         if has_capture {
-            self.ensure_video_pipeline().await?;
+            if let Err(error) = self.ensure_video_pipeline().await {
+                *self.video_codec.write().await = current;
+                return Err(error);
+            }
         }
 
         info!("Video codec switched to {:?}", codec);
@@ -737,9 +740,7 @@ impl WebRtcStreamer {
             }
             #[cfg(feature = "vim4")]
             VideoEncoderType::H265
-                if pipeline.config().await.output.hdr
-                    && crate::platform::vim4::VideoBackend::current()
-                        == crate::platform::vim4::VideoBackend::Vendor =>
+                if pipeline.config().await.output.hdr =>
             {
                 Some("level-id=180;profile-id=2;tier-flag=0;tx-mode=SRST".into())
             }
@@ -1631,6 +1632,21 @@ mod tests {
 
     #[cfg(feature = "vim4")]
     #[tokio::test]
+    async fn native_hevc_sdp_matches_hdr_output_without_starting_capture() {
+        // Run this test with VIM4_VIDEO_BACKEND=wave5 as well as the default.
+        let streamer = WebRtcStreamer::new();
+        for hdr in [false, true, false] {
+            let mut config = SharedVideoPipelineConfig::default();
+            config.output.hdr = hdr;
+            let pipeline = SharedVideoPipeline::new(config).unwrap();
+            let fmtp = streamer.negotiate_video_fmtp(&pipeline, VideoEncoderType::H265).await;
+            assert_eq!(fmtp.as_deref(), hdr.then_some("level-id=180;profile-id=2;tier-flag=0;tx-mode=SRST"));
+            assert!(!pipeline.is_running());
+        }
+    }
+
+    #[cfg(feature = "vim4")]
+    #[tokio::test]
     async fn session_hdr_restore_does_not_require_a_signal_or_start_capture() {
         use crate::video::traits::VideoOutput;
         let streamer = WebRtcStreamer::new();
@@ -1708,6 +1724,17 @@ mod tests {
         assert_eq!(config.bitrate_preset, BitratePreset::Balanced);
         assert_eq!(config.fps, 30);
         assert!(!config.audio_enabled);
+    }
+
+    #[tokio::test]
+    async fn failed_codec_switch_can_be_retried() {
+        let streamer = WebRtcStreamer::new();
+        streamer.set_capture_device("/missing-capture-device".into(), 80, None).await;
+        let original = streamer.current_video_codec().await;
+        for _ in 0..2 {
+            assert!(streamer.set_video_codec(VideoCodecType::VP8).await.is_err());
+            assert_eq!(streamer.current_video_codec().await, original);
+        }
     }
 
     #[tokio::test]

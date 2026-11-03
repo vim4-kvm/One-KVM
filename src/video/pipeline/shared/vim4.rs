@@ -46,20 +46,33 @@ impl Drop for Capture {
     }
 }
 
+fn output_fps(
+    config: &SharedVideoPipelineConfig,
+    source: Resolution,
+    source_fps: u32,
+    native_hdr: bool,
+) -> u32 {
+    let backend = VideoBackend::current();
+    let budget = if native_hdr && backend == VideoBackend::Wave5 {
+        source_fps.min(60)
+    } else {
+        source_fps
+    };
+    config.output.h26x_frame_rate(source, budget, backend, config.output_codec)
+}
+
 fn description(
     config: &SharedVideoPipelineConfig,
     source: Resolution,
     source_fps: u32,
     native_hdr: bool,
 ) -> Result<String> {
-    let fps = config
-        .output
-        .h26x_frame_rate(source, source_fps, VideoBackend::current());
+    let fps = output_fps(config, source, source_fps, native_hdr);
     if VideoBackend::current() == VideoBackend::Wave5 {
-        return wave5::description(config, source, fps);
+        return wave5::description(config, source, fps, native_hdr);
     }
     if native_hdr {
-        return hdr_description(config, source, source_fps, fps);
+        return hdr_description(config, source, fps);
     }
     let codec = match config.output_codec {
         VideoEncoderType::H264 => "h264",
@@ -98,7 +111,6 @@ fn description(
     let capture = vendor_capture(
         std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").ok().as_deref(),
         source,
-        source_fps,
     )?;
     let encoder = if config.output_codec == VideoEncoderType::H265
         && config.output.hevc_quality != crate::platform::vim4::HevcQuality::Bitrate
@@ -119,8 +131,7 @@ fn description(
 }
 
 fn native_hdr(config: &SharedVideoPipelineConfig) -> bool {
-    VideoBackend::current() == VideoBackend::Vendor
-        && config.output.hdr
+    config.output.hdr
         && config.output_codec == VideoEncoderType::H265
         && crate::platform::vim4::pq_input()
 }
@@ -128,7 +139,6 @@ fn native_hdr(config: &SharedVideoPipelineConfig) -> bool {
 fn hdr_description(
     config: &SharedVideoPipelineConfig,
     source: Resolution,
-    source_fps: u32,
     fps: u32,
 ) -> Result<String> {
     let capture = if config.output.height > 0 && config.output.height < source.height {
@@ -140,7 +150,7 @@ fn hdr_description(
     };
     // JPEG snapshots continue to use the independent SDR capture. They must
     // never reinterpret raw PQ samples as an ordinary eight-bit JPEG.
-    let snapshot = vendor_capture(Some("1"), source, source_fps)?
+    let snapshot = vendor_capture(Some("1"), source)?
         .replace("name=source", "name=snapshot_source");
     Ok(format!(
         "{snapshot} ! {}fakesink sync=false async=false \
@@ -154,12 +164,12 @@ fn hdr_description(
     ))
 }
 
-fn vendor_capture(secondary: Option<&str>, source: Resolution, fps: u32) -> Result<String> {
+fn vendor_capture(secondary: Option<&str>, source: Resolution) -> Result<String> {
     match secondary {
         None | Some("0") => Ok("vfmcapsrc name=source".into()),
         Some("1") => Ok(format!(
             "v4l2src name=source device=/dev/video71 io-mode=dmabuf do-timestamp=true ! \
-             video/x-raw,format=NV21,width={},height={},framerate={fps}/1,colorimetry=bt709",
+             video/x-raw,format=NV21,width={},height={},colorimetry=bt709",
             source.width, source.height
         )),
         _ => Err(AppError::VideoError(
@@ -358,13 +368,15 @@ impl SharedVideoPipeline {
         } else {
             None
         };
-        let fps = config
-            .output
-            .h26x_frame_rate(source.0, source.1, VideoBackend::current());
+        let capture_hdr = native_hdr(config);
+        let fps = output_fps(config, source.0, source.1, capture_hdr);
+        if fps < config.output.frame_rate(source.1, 120) && source.1 > 60 {
+            info!(fps, source_fps = source.1, codec = ?config.output_codec,
+                "Using the VIM4 output limit for this source and codec");
+        }
         let error = |e: &dyn std::fmt::Display| AppError::VideoError(e.to_string());
         // SDR has no PQ samples to preserve. Keep its DMA/8-bit fast path even
         // while the user preference allows HDR, and rebuild on EOTF changes.
-        let capture_hdr = native_hdr(config);
         let element = gst::parse::launch(&description(config, source.0, source.1, capture_hdr)?)
             .map_err(|e| error(&e))?;
         let capture = Capture(
@@ -382,7 +394,7 @@ impl SharedVideoPipeline {
             .bus()
             .ok_or_else(|| AppError::VideoError("Missing bus".into()))?;
         let progress = if VideoBackend::current() == VideoBackend::Wave5 {
-            Some(wave5::configure(&capture.0, config, source.0)?)
+            Some(wave5::configure(&capture.0, config, source.0, capture_hdr)?)
         } else {
             None
         };
@@ -408,13 +420,12 @@ impl SharedVideoPipeline {
             .set_state(gst::State::Playing)
             .map_err(|e| error(&e))?;
         let mut last_frame = Instant::now();
-        let _snapshot = self
-            .snapshot_tap
-            .attach(&capture.0)
-            .map_err(|e| error(&e))?;
+        let _snapshot = self.snapshot_tap.attach(&capture.0).map_err(|e| error(&e))?;
         let mut check = Instant::now();
         let mut source_changes = crate::platform::vim4::SignalChange::default();
         let mut frames = 0;
+        let mut capture_epoch = None;
+        let mut previous_pts = None;
         let mut stats_time = Instant::now();
         let mut idle_since = None;
         let mut total_frames = 0u64;
@@ -530,6 +541,21 @@ impl SharedVideoPipeline {
                     true
                 }
             });
+            // Keep the capture clock through the Wave5 bridge. Anchor its
+            // running-time origin once per pipeline, not at each dequeue.
+            let nominal = Duration::from_nanos(1_000_000_000 / u64::from(fps));
+            let (pts_ms, duration) = if progress.is_some() {
+                let pts = buffer.pts().ok_or_else(|| AppError::VideoError("Missing Wave5 PTS".into()))?;
+                let (origin, start_ms) = *capture_epoch.get_or_insert_with(|| (pts, self.pts_ms()));
+                let elapsed = pts.checked_sub(origin)
+                    .ok_or_else(|| AppError::VideoError("Wave5 PTS precedes stream origin".into()))?;
+                let spacing = previous_pts.and_then(|prev| pts.checked_sub(prev));
+                previous_pts = Some(pts);
+                (start_ms + elapsed.mseconds() as i64,
+                 spacing.map(|gap| Duration::from_nanos(gap.nseconds())).unwrap_or(nominal))
+            } else {
+                (self.pts_ms(), nominal)
+            };
             let frame = Arc::new(EncodedVideoFrame {
                 color_space: sample
                     .caps()
@@ -551,9 +577,9 @@ impl SharedVideoPipeline {
                 encoded_at: last_frame,
                 data,
                 is_keyframe,
-                pts_ms: self.pts_ms(),
+                pts_ms,
                 sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
-                duration: Duration::from_nanos(1_000_000_000 / u64::from(fps)),
+                duration,
                 codec: config.output_codec,
             });
             // Continue consuming the encoder while viewers are slow. Delivery

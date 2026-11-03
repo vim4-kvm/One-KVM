@@ -1,7 +1,9 @@
 //! The board services own HDMI, USB descriptors and power negotiation.
 use crate::config::{AppConfig, HidBackend, StreamMode};
+use crate::video::codec::registry::VideoEncoderType;
 use crate::video::format::{PixelFormat, Resolution};
 
+pub mod hdr10;
 mod usb_serial;
 pub mod video_backend;
 pub mod wave5_caps;
@@ -33,6 +35,21 @@ fn parse_global_hdr_default(text: &str) -> Option<bool> {
 }
 
 pub fn hdr_remote_available() -> bool {
+    if VideoBackend::current() == VideoBackend::Wave5 {
+        return wave5_caps::current().p010_main10
+            && wave5_caps::capture_has_amly()
+            && gstreamer::init().is_ok()
+            && gstreamer::ElementFactory::find("vim4amlysrc").is_some()
+            && gstreamer::ElementFactory::find("v4l2h265enc").is_some_and(|factory| {
+                let caps = "video/x-raw,format=P010_10LE"
+                    .parse::<gstreamer::Caps>()
+                    .unwrap();
+                factory.static_pad_templates().iter().any(|pad| {
+                    pad.direction() == gstreamer::PadDirection::Sink
+                        && pad.caps().can_intersect(&caps)
+                })
+            });
+    }
     VideoBackend::current() == VideoBackend::Vendor
         && std::path::Path::new("/usr/lib/vim4-kvm/gstreamer-1.0/libgstvim4hevc10.so").exists()
         && std::fs::read_to_string("/sys/module/vfm_cap/parameters/hdr_metadata_version")
@@ -42,6 +59,9 @@ pub fn hdr_remote_available() -> bool {
 }
 
 pub fn pq_input() -> bool {
+    if VideoBackend::current() == VideoBackend::Wave5 {
+        return hdr10::current().is_some();
+    }
     std::fs::read_to_string("/sys/class/hdmirx/hdmirx0/info")
         .is_ok_and(|info| parse_pq_input(&info))
 }
@@ -137,33 +157,40 @@ pub fn hid_paths(hid: &crate::config::HidConfig) -> crate::otg::HidDevicePaths {
         keyboard: functions.keyboard.then(|| "/dev/hidg0".into()),
         mouse_absolute: functions.mouse_absolute.then(|| "/dev/hidg1".into()),
         mouse_relative: functions.mouse_relative.then(|| "/dev/hidg2".into()),
-        consumer: functions.consumer.then(|| "/dev/hidg3".into()),
+        consumer: (functions.consumer && !functions.mouse_absolute).then(|| "/dev/hidg3".into()),
+        consumer_on_absolute: functions.consumer && functions.mouse_absolute,
         udc: hid.resolved_otg_udc(),
         keyboard_leds_enabled: hid.effective_otg_keyboard_leds(),
     }
 }
 
+pub fn media_mounted() -> crate::error::Result<bool> {
+    let path = std::path::Path::new(GADGET).join("functions/mass_storage.disk0/lun.0/file");
+    read_media_mounted(&path)
+}
+
+fn read_media_mounted(path: &std::path::Path) -> crate::error::Result<bool> {
+    match std::fs::read_to_string(path) {
+        Ok(value) => Ok(!value.trim().is_empty()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(crate::error::AppError::Config(format!(
+            "Cannot check USB media: {error}"
+        ))),
+    }
+}
+
 /// Validate endpoint capacity before closing active HID handles.
 pub fn validate_usb_config(previous: &AppConfig, config: &AppConfig) -> crate::error::Result<()> {
+    let mounted = media_mounted()?;
     validate_usb_profile(
         &config.hid,
-        &config.msd,
+        mounted,
         &config.otg_network,
         &config.uac,
         &config.otg_serial,
         VideoBackend::current() == VideoBackend::Vendor || usb_serial::available(),
     )?;
     if VideoBackend::current() == VideoBackend::Wave5 {
-        let path = std::path::Path::new(GADGET).join("functions/mass_storage.disk0/lun.0/file");
-        let mounted = match std::fs::read_to_string(path) {
-            Ok(value) => !value.trim().is_empty(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => {
-                return Err(crate::error::AppError::Config(format!(
-                    "Cannot check USB media: {error}"
-                )))
-            }
-        };
         validate_mounted_usb_change(previous, config, mounted)?;
     }
     Ok(())
@@ -199,7 +226,7 @@ fn validate_mounted_usb_change(
 
 fn validate_usb_profile(
     hid: &crate::config::HidConfig,
-    msd: &crate::config::MsdConfig,
+    mounted: bool,
     network: &crate::config::OtgNetworkConfig,
     uac: &crate::config::UacConfig,
     serial: &crate::config::OtgSerialConfig,
@@ -219,11 +246,11 @@ fn validate_usb_profile(
     let endpoints = u8::from(functions.keyboard)
         + u8::from(functions.mouse_absolute)
         + u8::from(functions.mouse_relative)
-        + u8::from(functions.consumer)
+        + u8::from(functions.consumer && !functions.mouse_absolute)
         + u8::from(network.enabled) * 2
         + u8::from(uac.enabled)
         + u8::from(serial.enabled) * 2
-        + u8::from(msd.enabled);
+        + u8::from(mounted);
     if endpoints > 5 {
         return Err(AppError::BadRequest("VIM4 supports at most 5 USB IN endpoints; disable some HID, network, microphone, serial or virtual media functions".into()));
     }
@@ -245,7 +272,7 @@ pub async fn configure_usb(
     use crate::error::AppError;
     let (functions, endpoints) = validate_usb_profile(
         hid,
-        msd,
+        media_mounted()?,
         network,
         uac,
         serial,
@@ -261,6 +288,7 @@ pub async fn configure_usb(
     }
     let profile = serde_json::json!({
         "hid": functions,
+        "merge_consumer": true,
         "descriptor": {
             "idVendor": format!("0x{:04x}", hid.otg_descriptor.vendor_id),
             "idProduct": format!("0x{:04x}", hid.otg_descriptor.product_id),
@@ -363,15 +391,15 @@ impl OutputSettings {
         source: Resolution,
         source_fps: u32,
         backend: VideoBackend,
+        codec: VideoEncoderType,
     ) -> u32 {
-        // Scope high refresh to native 1080p and 1440p on the vendor path.
-        // Scaling a UHD source down must not raise its capture/encoding budget.
-        let maximum = if backend == VideoBackend::Vendor
-            && matches!((source.width, source.height), (1920, 1080) | (2560, 1440))
-        {
-            120
-        } else {
-            60
+        // QHD120 AVC exceeds level 5.1, the highest Wave5 level qualified here.
+        let maximum = match (source.width, source.height) {
+            (1920, 1080) => 120,
+            (2560, 1440) if backend == VideoBackend::Vendor || codec == VideoEncoderType::H265 => {
+                120
+            }
+            _ => 60,
         };
         self.frame_rate(source_fps, maximum)
     }
@@ -474,11 +502,7 @@ pub fn parse_signal(info: &str) -> Option<(Resolution, f64)> {
 
 pub fn signal() -> Option<(Resolution, u32)> {
     if VideoBackend::current() == VideoBackend::Wave5 {
-        let status = video_backend::wave5_input_status();
-        return Some((
-            Resolution::new(status.width?, status.height?),
-            status.fps?.round() as u32,
-        ));
+        return video_backend::wave5_capture_signal();
     }
     if !vendor_signal_ready() {
         return None;
@@ -602,6 +626,9 @@ pub async fn configure_media_result(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     if !output.status.success() {
+        if String::from_utf8_lossy(&output.stderr).contains("MSD_USB_ENDPOINTS_FULL") {
+            return Err(crate::error::MsdErrorCode::MsdUsbEndpointsFull.into());
+        }
         if String::from_utf8_lossy(&output.stderr).contains("MSD_EXTERNAL_MEDIA") {
             return Err(crate::error::MsdErrorCode::MsdExternalMedia.into());
         }
@@ -689,7 +716,50 @@ mod tests {
         assert_eq!(config.audio.device, "hw:USB,0");
     }
     #[test]
-    fn usb_profiles_reserve_media_capacity_and_reject_endpoint_overcommit() {
+    fn disabled_msd_still_counts_manager_mounted_media() {
+        use crate::config::*;
+        let directory = tempfile::tempdir().unwrap();
+        let lun_file = directory.path().join("file");
+        std::fs::write(&lun_file, "/var/lib/shared/manager.img\n").unwrap();
+        let mut config = AppConfig::default();
+        config.msd.enabled = false;
+        config.hid.backend = HidBackend::Otg;
+        config.hid.otg_profile = OtgHidProfile::Custom;
+        config.hid.otg_functions = OtgHidFunctions {
+            keyboard: true,
+            mouse_absolute: true,
+            mouse_relative: true,
+            consumer: true,
+        };
+        // Merged consumer keys add nothing: 3 HID + network 2 + disk 1 = 6.
+        config.otg_network.enabled = true;
+        config.otg_serial.enabled = false;
+        config.uac.enabled = false;
+        let mounted = read_media_mounted(&lun_file).unwrap();
+        assert!(mounted);
+        assert!(validate_usb_profile(
+            &config.hid,
+            mounted,
+            &config.otg_network,
+            &config.uac,
+            &config.otg_serial,
+            false,
+        )
+        .is_err());
+        std::fs::write(&lun_file, "\n").unwrap();
+        assert!(validate_usb_profile(
+            &config.hid,
+            read_media_mounted(&lun_file).unwrap(),
+            &config.otg_network,
+            &config.uac,
+            &config.otg_serial,
+            false,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn usb_profiles_count_mounted_media_and_reject_endpoint_overcommit() {
         use crate::config::*;
         for serial_available in [false, true] {
             for mask in 0u16..256 {
@@ -703,17 +773,19 @@ mod tests {
                     mouse_relative: enabled(2),
                     consumer: enabled(3),
                 };
-                config.msd.enabled = enabled(4);
+                config.msd.enabled = true;
+                let mounted = enabled(4);
                 config.otg_network.enabled = enabled(5);
                 config.uac.enabled = enabled(6);
                 config.otg_serial.enabled = enabled(7);
                 let endpoints = (mask & 0x1fu16).count_ones()
+                    - u32::from(enabled(1) && enabled(3))
                     + u32::from(enabled(5)) * 2
                     + u32::from(enabled(6))
                     + u32::from(enabled(7)) * 2;
                 let result = validate_usb_profile(
                     &config.hid,
-                    &config.msd,
+                    mounted,
                     &config.otg_network,
                     &config.uac,
                     &config.otg_serial,
@@ -805,16 +877,25 @@ mod tests {
         let native = Resolution::new(1920, 1080);
         let automatic = OutputSettings::default();
         assert_eq!(
-            automatic.h26x_frame_rate(native, 120, VideoBackend::Vendor),
+            automatic.h26x_frame_rate(native, 120, VideoBackend::Vendor, VideoEncoderType::H264),
             120
         );
         assert_eq!(
-            automatic.h26x_frame_rate(native, 60, VideoBackend::Vendor),
+            automatic.h26x_frame_rate(native, 60, VideoBackend::Vendor, VideoEncoderType::H264),
             60
         );
         assert_eq!(
-            automatic.h26x_frame_rate(native, 120, VideoBackend::Wave5),
-            60
+            automatic.h26x_frame_rate(native, 120, VideoBackend::Wave5, VideoEncoderType::H264),
+            120
+        );
+        assert_eq!(
+            automatic.h26x_frame_rate(
+                Resolution::new(2560, 1440),
+                120,
+                VideoBackend::Wave5,
+                VideoEncoderType::H265
+            ),
+            120
         );
         let limited = OutputSettings {
             height: 720,
@@ -823,7 +904,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            limited.h26x_frame_rate(native, 120, VideoBackend::Vendor),
+            limited.h26x_frame_rate(native, 120, VideoBackend::Vendor, VideoEncoderType::H264),
             60
         );
         let high = OutputSettings {
@@ -833,25 +914,53 @@ mod tests {
             ..Default::default()
         };
         assert!(high.validate().is_ok());
-        assert_eq!(high.h26x_frame_rate(native, 100, VideoBackend::Vendor), 100);
         assert_eq!(
-            high.h26x_frame_rate(Resolution::new(3840, 2160), 120, VideoBackend::Vendor),
+            high.h26x_frame_rate(native, 100, VideoBackend::Vendor, VideoEncoderType::H264),
+            100
+        );
+        assert_eq!(
+            high.h26x_frame_rate(
+                Resolution::new(3840, 2160),
+                120,
+                VideoBackend::Vendor,
+                VideoEncoderType::H264
+            ),
             60
         );
         assert_eq!(
-            high.h26x_frame_rate(Resolution::new(2560, 1440), 120, VideoBackend::Vendor),
+            high.h26x_frame_rate(
+                Resolution::new(2560, 1440),
+                120,
+                VideoBackend::Vendor,
+                VideoEncoderType::H264
+            ),
             120
         );
         assert_eq!(
-            automatic.h26x_frame_rate(Resolution::new(2560, 1440), 120, VideoBackend::Wave5),
+            automatic.h26x_frame_rate(
+                Resolution::new(2560, 1440),
+                120,
+                VideoBackend::Wave5,
+                VideoEncoderType::H264
+            ),
             60
         );
         assert_eq!(
-            limited.h26x_frame_rate(Resolution::new(2560, 1440), 120, VideoBackend::Vendor),
+            limited.h26x_frame_rate(
+                Resolution::new(2560, 1440),
+                120,
+                VideoBackend::Vendor,
+                VideoEncoderType::H264
+            ),
             60
         );
         assert_eq!(
-            automatic.h26x_frame_rate(Resolution::new(3440, 1440), 120, VideoBackend::Vendor),
+            automatic.h26x_frame_rate(
+                Resolution::new(3440, 1440),
+                120,
+                VideoBackend::Vendor,
+                VideoEncoderType::H264
+            ),
             60
         );
         assert!(OutputSettings { fps: 121, ..high }.validate().is_err());

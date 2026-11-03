@@ -9,14 +9,19 @@ use super::apply::{apply_audio_config, try_apply_lock};
 use super::types::AudioConfigUpdate;
 
 pub async fn get_audio_config(State(state): State<Arc<AppState>>) -> Json<AudioConfig> {
-    Json(state.config.get().audio.clone())
+    let mut config = state.config.get().audio.clone();
+    config.device = crate::audio::canonical_device_name(&config.device);
+    Json(config)
 }
 
 pub async fn update_audio_config(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<AudioConfigUpdate>,
+    Json(mut req): Json<AudioConfigUpdate>,
 ) -> Result<Json<AudioConfig>> {
     req.validate()?;
+    if let Some(device) = &mut req.device {
+        *device = crate::audio::canonical_device_name(device);
+    }
 
     let _apply_guard = try_apply_lock(&state.config_apply_locks.audio, "audio")?;
     let old_audio_config = state.config.get().audio.clone();

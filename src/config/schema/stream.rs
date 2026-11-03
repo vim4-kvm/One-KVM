@@ -193,6 +193,8 @@ impl EncoderType {
 #[serde(default)]
 pub struct StreamConfig {
     pub mode: StreamMode,
+    #[typeshare(skip)]
+    pub video_codec: crate::video::codec::VideoCodecType,
     pub encoder: EncoderType,
     pub bitrate_preset: BitratePreset,
     pub stun_server: Option<String>,
@@ -211,6 +213,7 @@ impl Default for StreamConfig {
     fn default() -> Self {
         Self {
             mode: StreamMode::Mjpeg,
+            video_codec: Default::default(),
             encoder: EncoderType::Auto,
             bitrate_preset: BitratePreset::Balanced,
             stun_server: None,

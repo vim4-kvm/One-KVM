@@ -67,8 +67,9 @@ export default {
     },
   },
   vim4Usb: {
-    endpoints: 'Endpoint budget: {count} / 5 (reserving one when virtual media is enabled). Disable some functions before saving if over the limit.',
-    hint: 'Saving re-enumerates USB devices. Safely eject virtual media on the target first. Each HID, microphone and mounted disk uses one IN endpoint; networking and serial each use two. VIM4 supports up to five. Stopping One-KVM restores the previous USB configuration. Keyboard LEDs controls feedback. One virtual drive is supported, using application-managed storage.',
+    endpoints: 'USB endpoints: {count} / 5 (virtual media uses one when mounted)',
+    overLimit: 'USB endpoint limit exceeded ({count} / 5). Disable some functions before saving.',
+    hint: 'Saving re-enumerates USB devices. Safely eject virtual media on the target first. Media keys share the absolute mouse interface when both are enabled and otherwise use one IN endpoint. Each HID interface and the microphone use one IN endpoint, and virtual media uses one only while mounted; networking and serial each use two. VIM4 supports up to five. Stopping One-KVM restores the previous USB configuration. Keyboard LEDs controls feedback. One virtual drive is supported, using application-managed storage.',
     network: 'USB networking uses a dedicated NetworkManager shared connection with DHCP/NAT; Ethernet bridging is unavailable. The USB microphone uses 48 kHz stereo; browser capture requires HTTPS or a secure context.',
   },
   vim4Video: {
@@ -680,6 +681,7 @@ export default {
       storageReadOnly: 'Virtual media storage is read-only.',
       storagePermissionDenied: 'Permission to access virtual media storage was denied.',
       mediumRemovalPrevented: 'The controlled computer is using this virtual medium and has prevented its removal. Eject or unmount it on the controlled computer, then try again.',
+      usbEndpointsFull: 'USB endpoints are full (5 / 5). Disable the microphone, consumer keys or another function in Settings → HID before mounting virtual media.',
       externalMedia: 'Another interface or the manager mounted this medium. Safely eject it on the controlled computer, then eject it in the manager before mounting or ejecting media here.',
       disconnectFailed: 'Virtual media could not be disconnected. Please try again or check the system logs.',
     },

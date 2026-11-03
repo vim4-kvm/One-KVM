@@ -3,13 +3,7 @@ use super::*;
 use crate::platform::vim4::video_backend::{output_resolution, wave5_device, wave5_encoder_device};
 use gstreamer_allocators::{DmaBufAllocator, DmaBufAllocatorExtManual, DmaBufMemory};
 use gstreamer_app::{AppSink, AppSinkCallbacks, AppSrc};
-use std::os::fd::{AsRawFd, BorrowedFd};
-use v4l2r::bindings::{
-    v4l2_queryctrl, V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD, V4L2_CTRL_FLAG_DISABLED,
-};
-
-v4l2r::nix::ioctl_readwrite!(query_control, b'V', 36, v4l2_queryctrl);
-const INTRA_REFRESH_PERIOD: i32 = 45;
+use std::os::fd::BorrowedFd;
 
 #[derive(Default)]
 pub(super) struct Progress {
@@ -26,40 +20,40 @@ impl Progress {
     }
 }
 
-fn require_intra_refresh(device: &std::path::Path) -> Result<()> {
-    let file = std::fs::File::open(device)?;
-    // This UAPI structure contains only integer and byte fields.
-    let mut control: v4l2_queryctrl = unsafe { std::mem::zeroed() };
-    control.id = V4L2_CID_MPEG_VIDEO_INTRA_REFRESH_PERIOD;
-    unsafe { query_control(file.as_raw_fd(), &mut control) }.map_err(|error| {
-        AppError::VideoError(format!(
-            "Wave5 requires the cyclic intra refresh driver: {error}"
-        ))
-    })?;
-    if control.flags & V4L2_CTRL_FLAG_DISABLED != 0
-        || control.minimum > INTRA_REFRESH_PERIOD
-        || control.maximum < INTRA_REFRESH_PERIOD
-    {
-        return Err(AppError::VideoError(
-            "Wave5 cyclic refresh period is unavailable".into(),
-        ));
-    }
-    Ok(())
-}
-
 pub(super) fn description(
     config: &SharedVideoPipelineConfig,
     source: Resolution,
     fps: u32,
+    hdr: bool,
 ) -> Result<String> {
     let output = output_resolution(config.output, source);
+    if hdr && super::broker::enabled() {
+        return Err(AppError::VideoError("Broker capture supports SDR NV12 only".into()));
+    }
+    if hdr {
+        // HDMI reports its measured fractional rate (e.g. 59.999 Hz).
+        // Permit timestamp-only repeats when the selected output is 60 Hz;
+        // drop-only negotiation rejects an output slightly above the source.
+        return Ok(format!(
+            "vim4amlysrc name=source width={} height={} ! {}queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! \
+             videorate ! video/x-raw,format=P010_10LE,framerate={fps}/1 ! \
+             appsink name=plane_bridge emit-signals=false sync=false async=false max-buffers=1 \
+             appsrc name=encoder_source is-live=true format=time block=true max-buffers=2 \
+             caps=\"video/x-raw,format=P010_10LE,width={},height={},framerate={fps}/1,colorimetry=bt2100-pq,interlace-mode=progressive,pixel-aspect-ratio=1/1\" ! \
+             v4l2h265enc name=encoder output-io-mode=dmabuf-import ! \
+             h265parse config-interval=-1 ! video/x-h265,profile=main-10,stream-format=byte-stream,alignment=au ! \
+             appsink name=frames sync=false max-buffers=2",
+             output.width, output.height, crate::video::snapshot::vim4::BRANCH, output.width, output.height));
+    }
     let codec = match config.output_codec {
         VideoEncoderType::H264 => "h264",
         VideoEncoderType::H265 => "h265",
         _ => return Err(AppError::VideoError("Wave5 requires H.264 or H.265".into())),
     };
-    let hevc = if codec == "h265" {
+    let codec_caps = if codec == "h265" {
         "video/x-h265,profile=main,level=(string)5.1 ! "
+    } else if fps > 60 {
+        "video/x-h264,level=(string)5.1 ! "
     } else {
         ""
     };
@@ -67,22 +61,19 @@ pub(super) fn description(
         if output.width != source.width || output.height != source.height {
             return Err(AppError::VideoError("Broker capture currently requires native size".into()));
         }
-        "appsrc name=source is-live=true format=time block=true max-buffers=1"
+        format!("appsrc name=source is-live=true format=time block=true max-buffers=1 ! video/x-raw,format=NV12,width={},height={}", source.width, source.height)
     } else {
-        "v4l2src name=source io-mode=dmabuf"
+        format!("vim4v4l2src name=source max-fps={fps} height={}", output.height)
     };
     Ok(format!(
-        "{capture} ! video/x-raw,format=NV12,width={},height={} ! \
+        "{capture} ! \
          {}queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! \
-         videorate drop-only=true ! video/x-raw,framerate={fps}/1 ! \
          appsink name=plane_bridge emit-signals=false sync=false async=false max-buffers=1 \
          appsrc name=encoder_source is-live=true format=time block=true max-buffers=2 \
          caps=\"video/x-raw,format=NV12,width={},height={},framerate={fps}/1,colorimetry=bt709,interlace-mode=progressive,pixel-aspect-ratio=1/1\" ! \
-         v4l2{codec}enc name=encoder output-io-mode=dmabuf-import ! {hevc}\
+         v4l2{codec}enc name=encoder output-io-mode=dmabuf-import ! {codec_caps}\
          {codec}parse config-interval=-1 ! video/x-{codec},stream-format=byte-stream,alignment=au ! \
          appsink name=frames sync=false max-buffers=2",
-        output.width,
-        output.height,
         crate::video::snapshot::vim4::BRANCH,
         output.width,
         output.height,
@@ -194,6 +185,7 @@ pub(super) fn configure(
     pipeline: &gst::Pipeline,
     config: &SharedVideoPipelineConfig,
     source: Resolution,
+    hdr: bool,
 ) -> Result<Arc<Progress>> {
     let missing = |name| AppError::VideoError(format!("Missing Wave5 element {name}"));
     let capture = pipeline
@@ -206,7 +198,7 @@ pub(super) fn configure(
             .map_err(|e| AppError::VideoError(e.to_string()))?;
         capture.set_property("caps", caps);
         super::broker::attach(pipeline, source.width, source.height)?;
-    } else {
+    } else if hdr {
         capture.set_property(
             "device",
             wave5_device("t7-vdin-test")?.to_string_lossy().as_ref(),
@@ -226,41 +218,81 @@ pub(super) fn configure(
             expected.display()
         )));
     }
-    require_intra_refresh(&selected)?;
+    let hevc = config.output_codec == VideoEncoderType::H265;
     let mut controls = gst::Structure::builder("controls")
         .field(
             "video_bitrate",
             (config.bitrate_kbps().clamp(1000, 60000) * 1000) as i32,
         )
-        // Spread refresh work across frames while keeping explicit recovery IDRs.
-        // At UHD this refreshes three AVC MB rows or one HEVC CTU row per frame.
         .field("video_gop_size", 0i32)
-        .field("intra_refresh_period", INTRA_REFRESH_PERIOD)
+        .field("intra_refresh_period", 0i32)
         .field("frame_level_rate_control_enable", 1i32)
-        .field("h264_mb_level_rate_control", 1i32)
+        .field("h264_mb_level_rate_control", 0i32)
         .build();
-    if config.output_codec == VideoEncoderType::H265 {
+    if hevc {
         controls.set("hevc_level", 8i32);
+        if hdr {
+            controls.set("hevc_profile", 2i32);
+        }
         let quality = config.output.hevc_quality;
-        if crate::platform::vim4::wave5_caps::current().supports(quality) {
-            for (name, value) in crate::platform::vim4::wave5_caps::quality_controls(quality) {
-                controls.set(name, value);
-            }
+        let quality = if crate::platform::vim4::wave5_caps::current().supports(quality) {
+            quality
         } else {
             warn!(
                 ?quality,
                 "Saved HEVC quality mode unavailable; using bitrate control"
             );
+            crate::platform::vim4::HevcQuality::Bitrate
+        };
+        for (name, value) in crate::platform::vim4::wave5_caps::quality_controls(quality) {
+            controls.set(name, value);
         }
+    } else {
+        controls.set("h264_i_frame_minimum_qp_value", 26i32);
+        controls.set("h264_p_frame_minimum_qp_value", 12i32);
     }
     encoder.set_property("extra-controls", controls);
+    let last_metadata = std::sync::Mutex::new(None);
     encoder
         .static_pad("src")
         .ok_or_else(|| missing("encoder src pad"))?
-        .add_probe(gst::PadProbeType::BUFFER, |_, info| {
+        .add_probe(gst::PadProbeType::BUFFER, move |_, info| {
             if let Some(buffer) = info.buffer_mut() {
                 match cached_bitstream(buffer) {
-                    Ok(cached) => *buffer = cached,
+                    Ok(mut cached) => {
+                        if hdr {
+                            let Some(metadata) = crate::platform::vim4::hdr10::current() else {
+                                return gst::PadProbeReturn::Drop;
+                            };
+                            let mut previous = last_metadata.lock().unwrap();
+                            let Ok(mapped) = cached.map_readable() else {
+                                return gst::PadProbeReturn::Drop;
+                            };
+                            let changed = previous.as_ref() != Some(&metadata);
+                            let Ok(bytes) = crate::video::codec::h265_bitstream::with_hdr10(
+                                mapped.as_slice(),
+                                &metadata,
+                                changed,
+                            ) else {
+                                return gst::PadProbeReturn::Drop;
+                            };
+                            drop(mapped);
+                            let mut replacement = gst::Buffer::from_mut_slice(bytes);
+                            if cached
+                                .copy_into(
+                                    replacement.get_mut().unwrap(),
+                                    gst::BufferCopyFlags::TIMESTAMPS | gst::BufferCopyFlags::FLAGS,
+                                    ..,
+                                )
+                                .is_err()
+                            {
+                                return gst::PadProbeReturn::Drop;
+                            }
+                            *previous = Some(metadata);
+                            cached = replacement;
+                        }
+                        *buffer = cached;
+                    }
                     Err(error) => {
                         tracing::error!("Cannot cache Wave5 bitstream: {error}");
                         return gst::PadProbeReturn::Drop;
@@ -269,10 +301,14 @@ pub(super) fn configure(
             }
             gst::PadProbeReturn::Ok
         });
-    attach_plane_bridge(pipeline, output_resolution(config.output, source))
+    attach_plane_bridge(pipeline, output_resolution(config.output, source), hdr)
 }
 
-fn attach_plane_bridge(pipeline: &gst::Pipeline, source: Resolution) -> Result<Arc<Progress>> {
+fn attach_plane_bridge(
+    pipeline: &gst::Pipeline,
+    source: Resolution,
+    hdr: bool,
+) -> Result<Arc<Progress>> {
     let missing = |name| AppError::VideoError(format!("Missing Wave5 element {name}"));
     let input = pipeline
         .by_name("encoder_source")
@@ -320,7 +356,12 @@ fn attach_plane_bridge(pipeline: &gst::Pipeline, source: Resolution) -> Result<A
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                 counters.received.fetch_add(1, Ordering::Relaxed);
                 let buffer = sample.buffer_owned().ok_or(gst::FlowError::Error)?;
-                let view = plane_view(&buffer, source.width, source.height).map_err(|error| {
+                let view = if hdr {
+                    Ok(buffer)
+                } else {
+                    plane_view(&buffer, source.width, source.height)
+                }
+                .map_err(|error| {
                     tracing::error!("{error}");
                     gst::FlowError::Error
                 })?;
@@ -341,6 +382,34 @@ fn attach_plane_bridge(pipeline: &gst::Pipeline, source: Resolution) -> Result<A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_rate_negotiates_fractional_hdmi_at_integer_output() {
+        gst::init().unwrap();
+        let text = description(
+            &SharedVideoPipelineConfig::default(),
+            Resolution { width: 64, height: 32 },
+            60,
+            true,
+        ).unwrap();
+        // Exercise the actual capture-side rate section with a software source;
+        // GPU capture and the DMA bridge are covered by the board smoke test.
+        let section = text.split_once("videorate").unwrap().1
+            .split_once(" ! appsink name=plane_bridge").unwrap().0;
+        for rate in ["59999/1000", "60000/1001", "60/1"] {
+            let pipeline = gst::parse::launch(&format!(
+                "videotestsrc num-buffers=10 ! video/x-raw,format=P010_10LE,width=64,height=32,framerate={rate} ! videorate{section} ! fakesink sync=false"
+            )).unwrap().downcast::<gst::Pipeline>().unwrap();
+            pipeline.set_state(gst::State::Playing).unwrap();
+            let message = pipeline.bus().unwrap().timed_pop_filtered(
+                gst::ClockTime::from_seconds(3),
+                &[gst::MessageType::Eos, gst::MessageType::Error],
+            );
+            pipeline.set_state(gst::State::Null).unwrap();
+            assert!(matches!(message.as_ref().map(|m| m.view()), Some(gst::MessageView::Eos(_))),
+                "Native rate negotiation failed for {rate}: {message:?}");
+        }
+    }
 
     // A file-backed DMA allocator exercises ownership/layout without hardware;
     // actual exported DMA-buf import is covered by the board test.
@@ -453,7 +522,7 @@ mod tests {
                 .unwrap()
                 .downcast::<AppSink>()
                 .unwrap();
-            attach_plane_bridge(&pipeline, Resolution::new(64, 32)).unwrap();
+            attach_plane_bridge(&pipeline, Resolution::new(64, 32), false).unwrap();
             let (released, received) = mpsc::channel::<()>();
             unsafe extern "C" fn finalized(
                 data: *mut c_void,

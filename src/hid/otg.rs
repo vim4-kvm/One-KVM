@@ -73,6 +73,7 @@ pub struct OtgBackend {
     mouse_rel_path: Option<PathBuf>,
     mouse_abs_path: Option<PathBuf>,
     consumer_path: Option<PathBuf>,
+    consumer_on_absolute: bool,
     keyboard_dev: Mutex<Option<File>>,
     mouse_rel_dev: Mutex<Option<File>>,
     mouse_abs_dev: Mutex<Option<File>>,
@@ -140,6 +141,7 @@ impl OtgBackend {
             mouse_rel_path: paths.mouse_relative,
             mouse_abs_path: paths.mouse_absolute,
             consumer_path: paths.consumer,
+            consumer_on_absolute: paths.consumer_on_absolute,
             keyboard_dev: Mutex::new(None),
             mouse_rel_dev: Mutex::new(None),
             mouse_abs_dev: Mutex::new(None),
@@ -515,6 +517,26 @@ impl OtgBackend {
         }
     }
 
+    // The VIM4 merged descriptor numbers both collections. Standalone
+    // interfaces use the same payloads with no leading report ID.
+    fn write_numbered_report(&self, file: &mut File, report: &[u8]) -> std::io::Result<bool> {
+        let start = usize::from(!self.consumer_on_absolute);
+        self.write_with_timeout(file, &report[start..])
+    }
+
+    fn write_absolute_packet(
+        &self,
+        file: &mut File,
+        buttons: u8,
+        x: u16,
+        y: u16,
+        wheel: i8,
+    ) -> std::io::Result<bool> {
+        let [xl, xh] = x.to_le_bytes();
+        let [yl, yh] = y.to_le_bytes();
+        self.write_numbered_report(file, &[1, buttons, xl, xh, yl, yh, wheel as u8])
+    }
+
     fn send_mouse_report_absolute(&self, buttons: u8, x: u16, y: u16, wheel: i8) -> Result<()> {
         if self.mouse_abs_path.is_none() {
             return Ok(());
@@ -525,15 +547,7 @@ impl OtgBackend {
 
         let mut dev = self.mouse_abs_dev.lock();
         if let Some(ref mut file) = *dev {
-            let data = [
-                buttons,
-                (x & 0xFF) as u8,
-                (x >> 8) as u8,
-                (y & 0xFF) as u8,
-                (y >> 8) as u8,
-                wheel as u8,
-            ];
-            match self.write_with_timeout(file, &data) {
+            match self.write_absolute_packet(file, buttons, x, y, wheel) {
                 Ok(true) => {
                     self.mark_online();
                     self.reset_error_count();
@@ -558,20 +572,22 @@ impl OtgBackend {
 
     /// Press (`usage`) then release (`0x0000`).
     fn send_consumer_report(&self, usage: u16) -> Result<()> {
-        if self.consumer_path.is_none() {
-            return Ok(());
-        }
-
-        self.ensure_device(DeviceType::ConsumerControl)?;
-
-        let mut dev = self.consumer_dev.lock();
+        let mut dev = if self.consumer_on_absolute {
+            self.ensure_device(DeviceType::MouseAbsolute)?;
+            self.mouse_abs_dev.lock()
+        } else {
+            if self.consumer_path.is_none() {
+                return Ok(());
+            }
+            self.ensure_device(DeviceType::ConsumerControl)?;
+            self.consumer_dev.lock()
+        };
         if let Some(ref mut file) = *dev {
-            let data = [(usage & 0xFF) as u8, (usage >> 8) as u8];
-            match self.write_with_timeout(file, &data) {
+            let [lo, hi] = usage.to_le_bytes();
+            match self.write_numbered_report(file, &[2, lo, hi]) {
                 Ok(true) => {
-                    trace!("Sent consumer report: {:02X?}", data);
-                    let release = [0u8, 0u8];
-                    let _ = self.write_with_timeout(file, &release);
+                    trace!("Sent consumer usage: {usage:#06x}");
+                    let _ = self.write_numbered_report(file, &[2, 0, 0]);
                     self.mark_online();
                     self.reset_error_count();
                     Ok(())
@@ -904,15 +920,7 @@ impl HidBackend for OtgBackend {
         let file = dev
             .as_mut()
             .ok_or_else(|| AppError::BadRequest("Absolute mouse device not opened".into()))?;
-        let data = [
-            buttons,
-            x as u8,
-            (x >> 8) as u8,
-            y as u8,
-            (y >> 8) as u8,
-            wheel as u8,
-        ];
-        if !self.write_with_timeout(file, &data)? {
+        if !self.write_absolute_packet(file, buttons, x, y, wheel)? {
             return Err(AppError::BadRequest(
                 "Absolute mouse write timed out".into(),
             ));
@@ -1135,6 +1143,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn absolute_and_consumer_framing_matches_interface_layout() {
+        for merged in [false, true] {
+            let absolute = tempfile::NamedTempFile::new().unwrap();
+            let consumer = tempfile::NamedTempFile::new().unwrap();
+            let backend = OtgBackend::from_handles(HidDevicePaths {
+                mouse_absolute: Some(absolute.path().to_path_buf()),
+                consumer: (!merged).then(|| consumer.path().to_path_buf()),
+                consumer_on_absolute: merged,
+                ..Default::default()
+            })
+            .unwrap();
+            backend
+                .send_mouse_report_absolute(1, 0x1234, 0x5678, -1)
+                .unwrap();
+            backend.send_consumer_report(0xe9).unwrap();
+            backend.write_absolute_report(0, 0x100, 2, 1).await.unwrap();
+            let abs = fs::read(absolute.path()).unwrap();
+            let media = fs::read(consumer.path()).unwrap();
+            if merged {
+                assert_eq!(
+                    abs,
+                    [1, 1, 0x34, 0x12, 0x78, 0x56, 255, 2, 0xe9, 0, 2, 0, 0, 1, 0, 0, 1, 2, 0, 1]
+                );
+                assert!(media.is_empty());
+            } else {
+                assert_eq!(abs, [1, 0x34, 0x12, 0x78, 0x56, 255, 0, 0, 1, 2, 0, 1]);
+                assert_eq!(media, [0xe9, 0, 0, 0]);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn mouse_compatibility_writes_both_endpoints_and_preserves_default() {
         use crate::hid::MouseButton;
         for enabled in [false, true] {
@@ -1144,6 +1184,7 @@ mod tests {
                 HidDevicePaths {
                     mouse_relative: Some(relative.path().to_path_buf()),
                     mouse_absolute: Some(absolute.path().to_path_buf()),
+                    consumer_on_absolute: true,
                     ..Default::default()
                 },
                 enabled,
@@ -1159,7 +1200,13 @@ mod tests {
             }
             let abs = fs::read(absolute.path()).unwrap();
             let rel = fs::read(relative.path()).unwrap();
-            let buttons: Vec<_> = abs.chunks_exact(6).map(|packet| packet[0]).collect();
+            let buttons: Vec<_> = abs
+                .chunks_exact(7)
+                .map(|packet| {
+                    assert_eq!(packet[0], 1);
+                    packet[1]
+                })
+                .collect();
             assert_eq!(buttons, if enabled { vec![0, 1, 0] } else { vec![0, 0] });
             let dx: i32 = rel
                 .chunks_exact(4)

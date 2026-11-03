@@ -19,18 +19,23 @@ pub struct OtgConfigResponse {
     pub uac: crate::config::UacConfig,
     pub serial: crate::config::OtgSerialConfig,
     pub status: OtgNetworkStatus,
+    /// Shared board LUN state, independent of the application's MSD controller.
+    #[cfg(feature = "vim4")]
+    pub media_mounted: bool,
 }
 
-pub async fn get_otg_config(State(state): State<UsbApiState>) -> Json<OtgConfigResponse> {
+pub async fn get_otg_config(State(state): State<UsbApiState>) -> Result<Json<OtgConfigResponse>> {
     let config = state.config.get();
-    Json(OtgConfigResponse {
+    Ok(Json(OtgConfigResponse {
         hid: config.hid.clone(),
         msd: config.msd.clone(),
         network: config.otg_network.clone(),
         uac: config.uac.clone(),
         serial: config.otg_serial.clone(),
         status: state.otg.network_status().await,
-    })
+        #[cfg(feature = "vim4")]
+        media_mounted: crate::platform::vim4::media_mounted()?,
+    }))
 }
 
 pub async fn update_otg_config(
@@ -81,5 +86,7 @@ pub(super) async fn update_otg_config_inner(
         uac: staged_config.uac,
         serial: staged_config.otg_serial,
         status: state.otg.network_status().await,
+        #[cfg(feature = "vim4")]
+        media_mounted: crate::platform::vim4::media_mounted()?,
     })
 }

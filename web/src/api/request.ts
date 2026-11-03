@@ -90,6 +90,7 @@ const msdErrorKeys: Record<string, string> = {
   MSD_STORAGE_PERMISSION_DENIED: 'msd.errors.storagePermissionDenied',
   MSD_MEDIUM_REMOVAL_PREVENTED: 'msd.errors.mediumRemovalPrevented',
   MSD_EXTERNAL_MEDIA: 'msd.errors.externalMedia',
+  MSD_USB_ENDPOINTS_FULL: 'msd.errors.usbEndpointsFull',
   MSD_DISCONNECT_FAILED: 'msd.errors.disconnectFailed',
 }
 

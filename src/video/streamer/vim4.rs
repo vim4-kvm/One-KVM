@@ -90,9 +90,8 @@ impl Streamer {
         let (capture, filter) = if wave5 {
             let output =
                 crate::platform::vim4::video_backend::output_resolution(config.output, source.0);
-            (format!("v4l2src name=source io-mode=dmabuf ! video/x-raw,format=NV12,width={},height={} ! ",
-                output.width, output.height),
-             format!("videorate drop-only=true ! video/x-raw,framerate={fps}/1 ! "))
+            (format!("vim4v4l2src name=source max-fps={fps} height={} ! ", output.height),
+             String::new())
         } else {
             (
                 if std::env::var("VIM4_SECONDARY_HDMI_CAPTURE").as_deref() == Ok("1") {
@@ -118,13 +117,6 @@ impl Streamer {
         let pipeline = element
             .downcast::<gst::Pipeline>()
             .map_err(|_| anyhow::anyhow!("Invalid pipeline"))?;
-        if wave5 {
-            let device = crate::platform::vim4::video_backend::wave5_device("t7-vdin-test")?;
-            pipeline
-                .by_name("source")
-                .ok_or_else(|| anyhow::anyhow!("Missing capture source"))?
-                .set_property("device", device.to_string_lossy().as_ref());
-        }
         let result = (|| -> anyhow::Result<bool> {
             let sink = pipeline
                 .by_name("frames")

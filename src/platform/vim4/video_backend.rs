@@ -166,41 +166,60 @@ pub fn wave5_device(name: &str) -> Result<PathBuf> {
     Ok(devices.remove(0))
 }
 
-pub fn wave5_input_status() -> VideoInputStatus {
-    fn probe() -> Result<VideoInputStatus> {
-        let file = File::open(wave5_device("t7-vdin-test")?)?;
-        let caps: v4l2r::ioctl::Capability =
-            v4l2r::ioctl::querycap(&file).map_err(|e| AppError::VideoError(e.to_string()))?;
-        if caps.driver != "t7-vdin-test" {
-            return Err(AppError::VideoError(
-                "Unexpected HDMI capture driver".into(),
-            ));
-        }
-        // v4l2_input is a kernel UAPI struct consisting of integer/byte fields.
-        let mut input: v4l2_input = unsafe { std::mem::zeroed() };
-        unsafe { query_input(file.as_raw_fd(), &mut input) }
-            .map_err(|e| AppError::VideoError(e.to_string()))?;
-        if input.status & (V4L2_IN_ST_NO_SIGNAL | V4L2_IN_ST_NO_SYNC) != 0 {
-            return Ok(VideoInputStatus::no_signal());
-        }
-        let format: v4l2r::Format = v4l2r::ioctl::g_fmt(&file, v4l2r::QueueType::VideoCapture)
-            .map_err(|e| AppError::VideoError(e.to_string()))?;
-        if PixelFormat::from_v4l2r(format.pixelformat) != Some(PixelFormat::Nv12) {
-            return Err(AppError::VideoError(
-                "Wave5 capture must be configured for NV12".into(),
-            ));
-        }
-        let timings: v4l2_dv_timings = v4l2r::ioctl::query_dv_timings(&file)
-            .map_err(|e| AppError::VideoError(e.to_string()))?;
-        // G_FMT describes the old buffer layout until the pipeline releases its
-        // buffers and applies S_FMT. Report the detected input independently so
-        // the existing source monitor can initiate that rebuild.
-        measured_input_status(timings)
+v4l2r::nix::ioctl_readwrite!(get_vrr_control, b'V', 27, v4l2r::bindings::v4l2_control);
+
+fn probe_input(file: &File) -> Result<VideoInputStatus> {
+    // Accept only the capture node identified by QUERYCAP.
+    let caps: v4l2r::ioctl::Capability =
+        v4l2r::ioctl::querycap(file).map_err(|e| AppError::VideoError(e.to_string()))?;
+    if caps.driver != "t7-vdin-test" {
+        return Err(AppError::VideoError(
+            "Unexpected HDMI capture driver".into(),
+        ));
     }
-    probe().unwrap_or_else(|error| {
-        tracing::debug!("Wave5 input status unavailable: {error}");
-        VideoInputStatus::unavailable()
-    })
+    // v4l2_input is a kernel UAPI struct consisting of integer/byte fields.
+    let mut input: v4l2_input = unsafe { std::mem::zeroed() };
+    unsafe { query_input(file.as_raw_fd(), &mut input) }
+        .map_err(|e| AppError::VideoError(e.to_string()))?;
+    if input.status & (V4L2_IN_ST_NO_SIGNAL | V4L2_IN_ST_NO_SYNC) != 0 {
+        return Ok(VideoInputStatus::no_signal());
+    }
+    // The active allocation can be mapped NV12 or native AMLY. Geometry
+    // comes from RX timings; each pipeline validates its own storage format.
+    let timings: v4l2_dv_timings =
+        v4l2r::ioctl::query_dv_timings(file).map_err(|e| AppError::VideoError(e.to_string()))?;
+    // G_FMT describes the old buffer layout until the pipeline releases its
+    // buffers and applies S_FMT. Report the detected input independently so
+    // the existing source monitor can initiate that rebuild.
+    measured_input_status(timings)
+}
+
+pub fn wave5_input_status() -> VideoInputStatus {
+    wave5_device("t7-vdin-test")
+        .and_then(|path| probe_input(&File::open(path)?))
+        .unwrap_or_else(|error| {
+            tracing::debug!("Wave5 input status unavailable: {error}");
+            VideoInputStatus::unavailable()
+        })
+}
+
+pub fn wave5_capture_signal() -> Option<(Resolution, u32)> {
+    use v4l2r::bindings::{v4l2_control, V4L2_CID_USER_BASE};
+    let file = File::open(wave5_device("t7-vdin-test").ok()?).ok()?;
+    let status = probe_input(&file).ok()?;
+    let resolution = Resolution::new(status.width?, status.height?);
+    // V4L2_CID_USER_T7_VDIN_VRR_RATE is absent from older kernel headers.
+    let mut ctrl = v4l2_control { id: V4L2_CID_USER_BASE + 0x1240, value: 0 };
+    let rate = match unsafe { get_vrr_control(file.as_raw_fd(), &mut ctrl) } {
+        Ok(_) if ctrl.value == 0 => status.fps?.round() as u32,
+        Ok(_) if ctrl.value > 0 => ctrl.value as u32,
+        // Locked Gaming VRR without a signalled base uses the local output budget.
+        Ok(_) if ctrl.value == -1 => 60,
+        Err(v4l2r::nix::errno::Errno::EINVAL | v4l2r::nix::errno::Errno::ENOTTY) =>
+            status.fps?.round() as u32,
+        _ => return None,
+    };
+    Some((resolution, rate))
 }
 
 fn measured_input_status(timings: v4l2_dv_timings) -> Result<VideoInputStatus> {
@@ -229,7 +248,8 @@ fn measured_input_status(timings: v4l2_dv_timings) -> Result<VideoInputStatus> {
         + u64::from(bt.vsync)
         + u64::from(bt.vbackporch);
     let fps = bt.pixelclock as f64 / total_width as f64 / total_height as f64;
-    if !(20.0..=120.0).contains(&fps) {
+    // Allow a few reference-clock ticks of quantization at the RX limit.
+    if !(20.0..=120.001).contains(&fps) {
         return Err(invalid());
     }
     Ok(VideoInputStatus::locked(
