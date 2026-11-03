@@ -23,16 +23,6 @@ use crate::video::types::Resolution;
 
 const RTP_MTU: usize = 1200;
 
-fn h26x_rtp_mtu(au_bytes: usize) -> usize {
-    // Chrome 156 dropped complete AVC/HEVC pictures at 2049/2048 packets.
-    // Reserve packets for parameter sets and bytes for the RTP and FU headers.
-    if cfg!(feature = "vim4") && au_bytes > (2048 - 4) * (RTP_MTU - 12 - 3) {
-        1400
-    } else {
-        RTP_MTU
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VideoCodec {
     H264,
@@ -372,7 +362,7 @@ impl UniversalVideoTrack {
         };
         let payloads = state
             .payloader
-            .payload(h26x_rtp_mtu(data.len()) - 12, &data)
+            .payload(RTP_MTU - 12, &data)
             .map_err(|e| AppError::WebRtcError(format!("H264 packetization failed: {e}")))?;
         if payloads.is_empty() {
             return Ok(());
@@ -491,7 +481,7 @@ impl UniversalVideoTrack {
         let (payloads, timestamp, seq_start, num_payloads) = {
             let mut state = h265_state.lock().await;
 
-            let payloads = state.payloader.payload(h26x_rtp_mtu(payload.len()), &payload);
+            let payloads = state.payloader.payload(RTP_MTU, &payload);
 
             if payloads.is_empty() {
                 return Ok(());
