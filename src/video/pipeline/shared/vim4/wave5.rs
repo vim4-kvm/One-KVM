@@ -82,16 +82,14 @@ pub(super) fn description(
         ""
     };
     Ok(format!(
-        "v4l2src name=source io-mode=dmabuf ! video/x-raw,format=NV12,width={},height={} ! \
+        "vim4v4l2src name=source max-fps={fps} height={} ! \
          {}queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! \
-         videorate drop-only=true ! video/x-raw,framerate={fps}/1 ! \
          appsink name=plane_bridge emit-signals=false sync=false async=false max-buffers=1 \
          appsrc name=encoder_source is-live=true format=time block=true max-buffers=2 \
          caps=\"video/x-raw,format=NV12,width={},height={},framerate={fps}/1,colorimetry=bt709,interlace-mode=progressive,pixel-aspect-ratio=1/1\" ! \
          v4l2{codec}enc name=encoder output-io-mode=dmabuf-import ! {codec_caps}\
          {codec}parse config-interval=-1 ! video/x-{codec},stream-format=byte-stream,alignment=au ! \
          appsink name=frames sync=false max-buffers=2",
-        output.width,
         output.height,
         crate::video::snapshot::vim4::BRANCH,
         output.width,
@@ -207,13 +205,10 @@ pub(super) fn configure(
     hdr: bool,
 ) -> Result<Arc<Progress>> {
     let missing = |name| AppError::VideoError(format!("Missing Wave5 element {name}"));
-    let capture = pipeline
-        .by_name("source")
-        .ok_or_else(|| missing("source"))?;
-    capture.set_property(
-        "device",
-        wave5_device("t7-vdin-test")?.to_string_lossy().as_ref(),
-    );
+    if hdr {
+        let capture = pipeline.by_name("source").ok_or_else(|| missing("source"))?;
+        capture.set_property("device", wave5_device("t7-vdin-test")?.to_string_lossy().as_ref());
+    }
     let encoder = pipeline
         .by_name("encoder")
         .ok_or_else(|| missing("encoder"))?;

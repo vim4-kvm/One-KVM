@@ -425,6 +425,8 @@ impl SharedVideoPipeline {
         let mut check = Instant::now();
         let mut source_changes = crate::platform::vim4::SignalChange::default();
         let mut frames = 0;
+        let mut capture_epoch = None;
+        let mut previous_pts = None;
         let mut stats_time = Instant::now();
         let mut idle_since = None;
         let mut total_frames = 0u64;
@@ -540,6 +542,21 @@ impl SharedVideoPipeline {
                     true
                 }
             });
+            // Keep the capture clock through the Wave5 bridge. Anchor its
+            // running-time origin once per pipeline, not at each dequeue.
+            let nominal = Duration::from_nanos(1_000_000_000 / u64::from(fps));
+            let (pts_ms, duration) = if progress.is_some() {
+                let pts = buffer.pts().ok_or_else(|| AppError::VideoError("Missing Wave5 PTS".into()))?;
+                let (origin, start_ms) = *capture_epoch.get_or_insert_with(|| (pts, self.pts_ms()));
+                let elapsed = pts.checked_sub(origin)
+                    .ok_or_else(|| AppError::VideoError("Wave5 PTS precedes stream origin".into()))?;
+                let spacing = previous_pts.and_then(|prev| pts.checked_sub(prev));
+                previous_pts = Some(pts);
+                (start_ms + elapsed.mseconds() as i64,
+                 spacing.map(|gap| Duration::from_nanos(gap.nseconds())).unwrap_or(nominal))
+            } else {
+                (self.pts_ms(), nominal)
+            };
             let frame = Arc::new(EncodedVideoFrame {
                 color_space: sample
                     .caps()
@@ -561,9 +578,9 @@ impl SharedVideoPipeline {
                 encoded_at: last_frame,
                 data,
                 is_keyframe,
-                pts_ms: self.pts_ms(),
+                pts_ms,
                 sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
-                duration: Duration::from_nanos(1_000_000_000 / u64::from(fps)),
+                duration,
                 codec: config.output_codec,
             });
             // Continue consuming the encoder while viewers are slow. Delivery

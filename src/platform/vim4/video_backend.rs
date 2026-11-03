@@ -166,7 +166,7 @@ pub fn wave5_device(name: &str) -> Result<PathBuf> {
     Ok(devices.remove(0))
 }
 
-v4l2r::nix::ioctl_readwrite!(get_capture_parm, b'V', 21, v4l2r::bindings::v4l2_streamparm);
+v4l2r::nix::ioctl_readwrite!(get_vrr_control, b'V', 27, v4l2r::bindings::v4l2_control);
 
 fn probe_input(file: &File) -> Result<VideoInputStatus> {
     // Accept only the capture node identified by QUERYCAP.
@@ -204,24 +204,20 @@ pub fn wave5_input_status() -> VideoInputStatus {
 }
 
 pub fn wave5_capture_signal() -> Option<(Resolution, u32)> {
-    use v4l2r::bindings::{v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_CAPTURE, v4l2_streamparm};
+    use v4l2r::bindings::{v4l2_control, V4L2_CID_USER_BASE};
     let file = File::open(wave5_device("t7-vdin-test").ok()?).ok()?;
     let status = probe_input(&file).ok()?;
     let resolution = Resolution::new(status.width?, status.height?);
-    let mut parm: v4l2_streamparm = unsafe { std::mem::zeroed() };
-    parm.type_ = v4l2_buf_type_V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    let rate = match unsafe { get_capture_parm(file.as_raw_fd(), &mut parm) } {
-        Ok(_) => {
-            let interval = unsafe { parm.parm.capture.timeperframe };
-            if interval.numerator == 0 || interval.denominator == 0 {
-                return None;
-            }
-            f64::from(interval.denominator) / f64::from(interval.numerator)
-        }
-        Err(v4l2r::nix::errno::Errno::ENOTTY) => status.fps?,
-        Err(_) => return None,
+    // V4L2_CID_USER_T7_VDIN_VRR_RATE is absent from older kernel headers.
+    let mut ctrl = v4l2_control { id: V4L2_CID_USER_BASE + 0x1240, value: 0 };
+    let rate = match unsafe { get_vrr_control(file.as_raw_fd(), &mut ctrl) } {
+        Ok(_) if ctrl.value == 0 => status.fps?.round() as u32,
+        Ok(_) if ctrl.value > 0 => ctrl.value as u32,
+        Err(v4l2r::nix::errno::Errno::EINVAL | v4l2r::nix::errno::Errno::ENOTTY) =>
+            status.fps?.round() as u32,
+        _ => return None, // Unknown VRR base or capture failure.
     };
-    Some((resolution, rate.round() as u32))
+    Some((resolution, rate))
 }
 
 fn measured_input_status(timings: v4l2_dv_timings) -> Result<VideoInputStatus> {
