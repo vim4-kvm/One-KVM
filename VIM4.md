@@ -238,7 +238,7 @@ P0-5 原生 HDR 截图候选：Wave5 的截图阀门从当前 P010 采集池借�
 
 在工作区固定的 ARM64 Ubuntu 构建环境运行：
 
-先在主仓运行 `python3 packaging/kernel-edge/build-gstreamer.py build/mainline-gstreamer`
+先在主仓运行 `python3 packaging/kernel/build-gstreamer.py build/mainline-gstreamer`
 （输出目录须为空），生成私有标准 V4L2 插件；组件打包自动执行此步骤。
 独立 worktree 可用 `VIM4_V4L2_PLUGIN` 指定生成的插件文件。
 服务优先选择驱动支持的连续 NV21 单 fd 布局，保留真实 VideoMeta；
