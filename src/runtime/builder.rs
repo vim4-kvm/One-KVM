@@ -392,6 +392,7 @@ fn build_webrtc(
     resolution: Resolution,
 ) -> Arc<WebRtcStreamer> {
     let webrtc = WebRtcStreamer::with_config(WebRtcStreamerConfig {
+        video_codec: config.stream.video_codec,
         #[cfg(feature = "vim4")]
         output: config.video.output,
         resolution,
@@ -406,6 +407,22 @@ fn build_webrtc(
     });
     tracing::info!("WebRTC streamer created");
     webrtc
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn webrtc_starts_with_last_saved_codec_or_legacy_default() {
+    use crate::video::codec::VideoCodecType;
+
+    let mut config = AppConfig::default();
+    for (saved, expected) in [
+        (r#"{"mode":"webrtc"}"#, VideoCodecType::H264),
+        (r#"{"mode":"webrtc","video_codec":"h265"}"#, VideoCodecType::H265),
+    ] {
+        config.stream = serde_json::from_str(saved).unwrap();
+        let streamer = build_webrtc(&config, PixelFormat::Mjpeg, Resolution::HD720);
+        assert_eq!(streamer.current_video_codec().await, expected);
+    }
 }
 
 fn build_ice_config(config: &AppConfig) -> crate::webrtc::config::WebRtcConfig {

@@ -62,7 +62,7 @@ impl Default for WebRtcStreamerConfig {
             #[cfg(feature = "vim4")]
             output: Default::default(),
             webrtc: WebRtcConfig::default(),
-            video_codec: VideoCodecType::H264,
+            video_codec: VideoCodecType::default(),
             resolution: Resolution::HD720,
             input_format: PixelFormat::Mjpeg,
             bitrate_preset: BitratePreset::Balanced,

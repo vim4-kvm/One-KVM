@@ -21,9 +21,11 @@ use crate::error::Result;
 use crate::video::format::Resolution;
 
 /// Supported video codec types for WebRTC
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum VideoCodecType {
     /// H.264/AVC - widely supported, good compression
+    #[default]
     H264,
     /// VP8 - royalty-free, good browser support
     VP8,

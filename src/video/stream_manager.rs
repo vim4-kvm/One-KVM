@@ -560,9 +560,7 @@ impl VideoStreamManager {
 
         // 5. Update configuration store if available
         if let Some(ref config_store) = *self.config_store.read().await {
-            let mut config = (*config_store.get()).clone();
-            config.stream.mode = new_mode.clone();
-            if let Err(e) = config_store.set(config).await {
+            if let Err(e) = config_store.update(|config| config.stream.mode = new_mode.clone()).await {
                 warn!("Failed to persist stream mode to config: {}", e);
             }
         }

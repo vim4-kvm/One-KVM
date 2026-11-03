@@ -143,11 +143,13 @@ pub async fn stream_mode_set(
 
     if let Some(codec) = video_codec {
         info!("Setting WebRTC video codec to {:?}", codec);
-        if let Err(e) = state.stream_manager.set_video_codec(codec).await {
-            warn!("Failed to set video codec: {}", e);
-        }
+        state.stream_manager.set_video_codec(codec).await?;
         // Hardware geometry may have selected a safe codec while rebuilding.
-        requested_mode_str = codec_to_id(state.stream_manager.current_video_codec().await);
+        let active = state.stream_manager.current_video_codec().await;
+        requested_mode_str = codec_to_id(active);
+        if state.config.get().stream.video_codec != active {
+            state.config.update(|config| config.stream.video_codec = active).await?;
+        }
     }
 
     // For codec-only switch, emit events directly instead of going through
