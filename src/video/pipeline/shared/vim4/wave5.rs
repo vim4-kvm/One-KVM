@@ -212,21 +212,16 @@ pub(super) fn configure(
             controls.set("hevc_profile", 2i32);
         }
         let quality = config.output.hevc_quality;
-        let quality = if crate::platform::vim4::wave5_caps::current().supports(quality) {
-            quality
+        if crate::platform::vim4::wave5_caps::current().supports(quality) {
+            for (name, value) in crate::platform::vim4::wave5_caps::quality_controls(quality) {
+                controls.set(name, value);
+            }
         } else {
             warn!(
                 ?quality,
                 "Saved HEVC quality mode unavailable; using bitrate control"
             );
-            crate::platform::vim4::HevcQuality::Bitrate
-        };
-        for (name, value) in crate::platform::vim4::wave5_caps::quality_controls(quality) {
-            controls.set(name, value);
         }
-    } else {
-        // Bound recovery IDR size after a long run of static skips.
-        controls.set("h264_i_frame_minimum_qp_value", 26i32);
     }
     encoder.set_property("extra-controls", controls);
     let last_metadata = std::sync::Mutex::new(None);

@@ -286,7 +286,6 @@ Linux VIM4 另提供默认关闭的 `ONEKVM_UDP_BATCH=1` 实验开关，在同�
 范围、取消与背压语义见 [UDP 批处理](libs/webrtc-util/VIM4.md)，验收须同时报告
 完整发送路径和浏览器尾延迟，不能仅根据减少系统调用就启用。
 7.3 Wave5 默认关闭行刷新和周期 IDR，新观看者与 PLI/FIR 请求完整 IDR。
-码率控制下 I 帧的 QP 下限为 26，以控制静止画面后恢复帧的大小。
 5.15 VIM4 H.264 使用 `gop=0 intra-refresh-rows=3`，H.265 使用
 `gop=0 intra-refresh-rows=1`（HEVC 码率不高于 1 Mbps 时为 0 行），分别每帧刷新三行 MB、一行 CTU，避免周期
 整幅 I 帧造成编码和发送突发。保留厂商 QP 范围；静态画面也可能接近目标码率。
