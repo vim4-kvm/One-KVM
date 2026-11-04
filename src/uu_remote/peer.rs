@@ -390,6 +390,12 @@ impl DesktopCoordinator {
                 }
             }
         }
+        // A tool peer may have been created while the previous desktop was
+        // throttled. Capture the baseline only after that owner restores it.
+        if let Some(config) = next.deps.video.get_encoding_config().await {
+            next.default_bitrate
+                .store(u64::from(config.bitrate_kbps()), Ordering::Relaxed);
+        }
         next.deps
             .video
             .set_uu_negotiated_codec(Some(next.codec))
@@ -440,7 +446,8 @@ struct Shared {
     quality: AtomicU64,
     custom_kbps: AtomicU64,
     actual_kbps: AtomicU64,
-    default_bitrate: BitratePreset,
+    adaptive_kbps: AtomicU64,
+    default_bitrate: AtomicU64,
     settings_lock: Mutex<()>,
     #[cfg(feature = "vim4")]
     hdr_restore: Mutex<Option<bool>>,
@@ -466,7 +473,20 @@ impl Shared {
         self.deps.video.set_uu_negotiated_codec(None).await;
         self.video_diagnostics.lock().await.sender = None;
         #[cfg(feature = "vim4")]
-        self.restore_hdr().await;
+        {
+            self.restore_hdr().await;
+            let _guard = self.settings_lock.lock().await;
+            let target = self.adaptive_kbps.swap(0, Ordering::Relaxed);
+            if target > 0 {
+                if let Some(config) = self.deps.video.get_encoding_config().await {
+                    if u64::from(config.bitrate_kbps()) == target {
+                        let baseline =
+                            preset_for(self.default_bitrate.load(Ordering::Relaxed) as u32);
+                        let _ = self.deps.video.set_bitrate_preset(baseline).await;
+                    }
+                }
+            }
+        }
     }
 
     fn hdr_control_available(&self) -> bool {
@@ -545,7 +565,7 @@ impl Shared {
         if let Some(config) = self.deps.video.get_encoding_config().await {
             let kbps = u64::from(config.bitrate_kbps());
             let bitrate_changed = self.actual_kbps.swap(kbps, Ordering::Relaxed) != kbps;
-            if bitrate_changed {
+            if bitrate_changed && self.adaptive_kbps.load(Ordering::Relaxed) != kbps {
                 self.quality.store(wire::quality::CUSTOM, Ordering::Relaxed);
                 self.custom_kbps.store(kbps, Ordering::Relaxed);
             }
@@ -946,9 +966,10 @@ impl Peer {
             media: OnceLock::new(),
             desktop_task: parking_lot::Mutex::new(None),
             terminal_conn: parking_lot::Mutex::new(None),
-            default_bitrate,
+            default_bitrate: AtomicU64::new(u64::from(default_bitrate.bitrate_kbps())),
             custom_kbps: AtomicU64::new(u64::from(default_bitrate.bitrate_kbps())),
             actual_kbps: AtomicU64::new(u64::from(default_bitrate.bitrate_kbps())),
+            adaptive_kbps: AtomicU64::new(0),
             settings_lock: Mutex::new(()),
             #[cfg(feature = "vim4")]
             hdr_restore: Mutex::new(None),
@@ -1003,6 +1024,8 @@ impl Peer {
                 shared.closed.clone(),
                 read_video_feedback(video_sender, shared.clone()),
             );
+            #[cfg(feature = "vim4")]
+            spawn_until_closed(shared.closed.clone(), adapt_video_bitrate(shared.clone()));
             // The viewer always offers an Opus m-line.
             let audio_track = Arc::new(TrackLocalStaticSample::new(
                 RTCRtpCodecCapability {
@@ -1423,10 +1446,14 @@ async fn read_video_feedback(sender: Arc<RTCRtpSender>, shared: Arc<Shared>) {
     let video = &shared.deps.video;
     let mut last_request = Instant::now() - Duration::from_secs(1);
     while let Ok((packets, _)) = sender.read(&mut buffer).await {
+        let parameters = sender.get_parameters().await;
         let received_at = Instant::now();
         let wall_time = SystemTime::now();
         let mut diagnostics = shared.video_diagnostics.lock().await;
         let feedback = &mut diagnostics.feedback;
+        if let Some(encoding) = parameters.encodings.first() {
+            feedback.set_video_ssrc(encoding.ssrc);
+        }
         for packet in &packets {
             feedback.observe(packet.as_any(), wall_time, received_at);
         }
@@ -1442,6 +1469,79 @@ async fn read_video_feedback(sender: Arc<RTCRtpSender>, shared: Arc<Shared>) {
             last_request = Instant::now();
             if let Err(e) = video.request_keyframe().await {
                 debug!("UU keyframe request failed: {e}");
+            }
+        }
+    }
+}
+
+#[cfg(feature = "vim4")]
+async fn adapt_video_bitrate(shared: Arc<Shared>) {
+    let mut controller = super::adaptation::Controller::default();
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let _guard = shared.settings_lock.lock().await;
+        if !*shared.desktop.borrow()
+            || shared.quality.load(Ordering::Relaxed) != wire::quality::AUTO
+        {
+            controller = Default::default();
+            continue;
+        }
+        let Some(config) = shared.deps.video.get_encoding_config().await else {
+            continue;
+        };
+        // Only this backend has a runtime update path. Fixed-QP/lossless modes
+        // cannot meet a network bitrate budget without changing user semantics.
+        if crate::platform::vim4::VideoBackend::current()
+            != crate::platform::vim4::VideoBackend::Wave5
+            || (shared.codec == VideoCodecType::H265
+                && config.output.hevc_quality != crate::platform::vim4::HevcQuality::Bitrate)
+        {
+            continue;
+        }
+        let now = Instant::now();
+        let diagnostics = shared.video_diagnostics.lock().await;
+        let sample = diagnostics.feedback.observation();
+        let remb = diagnostics.feedback.remb(now);
+        let application_limited = diagnostics.sender.as_ref().is_none_or(|(at, sample)| {
+            now.duration_since(*at).as_secs() > 10
+                || sample.encoded_kbps < f64::from(config.bitrate_kbps()) * 0.8
+        });
+        drop(diagnostics);
+        let current = config.bitrate_kbps();
+        let ceiling = (shared.default_bitrate.load(Ordering::Relaxed) as u32).max(1000);
+        let next = if let Some(bps) = remb {
+            // Leave room for audio, packet headers and retransmissions.
+            let limit = ((bps * 0.85 / 1000.0) as u32).clamp(1000, ceiling);
+            if current > limit {
+                Some(limit)
+            } else {
+                sample.and_then(|s| controller.update(s, now, current, limit))
+            }
+        } else {
+            sample.and_then(|s| controller.update(s, now, current, ceiling))
+        };
+        let Some(kbps) = next else { continue };
+        if kbps > current && application_limited {
+            continue;
+        }
+        let preset = preset_for(kbps);
+        shared
+            .adaptive_kbps
+            .store(u64::from(preset.bitrate_kbps()), Ordering::Relaxed);
+        match shared
+            .deps
+            .video
+            .set_vim4_encoding(config.output, preset)
+            .await
+        {
+            Ok(()) => info!(kbps = preset.bitrate_kbps(), "UU adaptive bitrate applied"),
+            Err(error) => {
+                shared
+                    .adaptive_kbps
+                    .store(u64::from(current), Ordering::Relaxed);
+                warn!(%error, "UU adaptive bitrate was not applied");
             }
         }
     }
@@ -1600,6 +1700,9 @@ async fn stream_video(
                 shared.video_diagnostics.lock().await.sender = Some((
                     Instant::now(),
                     UuVideoSender {
+                        encoded_kbps: report_encoded_bytes as f64 * 8.0
+                            / report_at.elapsed().as_secs_f64()
+                            / 1000.0,
                         age_ms: 0.0,
                         window_ms: report_at.elapsed().as_secs_f64() * 1000.0,
                         fps,
@@ -2219,6 +2322,7 @@ async fn apply_capture_setting(
     if !*shared.desktop.borrow() || shared.closed.is_cancelled() {
         return Err("Desktop session is no longer active".into());
     }
+    shared.adaptive_kbps.store(0, Ordering::Relaxed);
     request.hdr = capture_hdr_setting(
         &request,
         shared.hdr_control_available(),
@@ -2236,7 +2340,7 @@ async fn apply_capture_setting(
         request.custom_bitrate = Some(kbps * 1_000);
     }
     let preset = if quality == wire::quality::AUTO {
-        shared.default_bitrate
+        preset_for(shared.default_bitrate.load(Ordering::Relaxed) as u32)
     } else {
         preset_for(request.bitrate_kbps().ok_or("Missing bitrate")?)
     };

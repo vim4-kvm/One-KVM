@@ -7,9 +7,11 @@ use tracing::info;
 use webrtc::rtcp::{
     payload_feedbacks::{
         full_intra_request::FullIntraRequest, picture_loss_indication::PictureLossIndication,
+        receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate,
     },
     receiver_report::ReceiverReport,
     reception_report::ReceptionReport,
+    transport_feedbacks::transport_layer_cc::TransportLayerCc,
     transport_feedbacks::transport_layer_nack::TransportLayerNack,
 };
 
@@ -59,6 +61,10 @@ fn report_rtt_ms(report: &ReceptionReport, now: SystemTime) -> Option<f64> {
 
 #[derive(Default)]
 pub(super) struct VideoFeedback {
+    video_ssrc: Option<u32>,
+    remb: Option<(Instant, f64)>,
+    remb_reports: u64,
+    twcc_reports: u64,
     nack_requests: u64,
     pli: u64,
     fir: u64,
@@ -77,6 +83,13 @@ pub(super) struct VideoDiagnostics {
 impl VideoDiagnostics {
     pub fn snapshot(&self, now: Instant) -> UuVideoStats {
         UuVideoStats {
+            remb_reports: self.feedback.remb_reports as f64,
+            twcc_reports: self.feedback.twcc_reports as f64,
+            remb_bps: self.feedback.remb.map(|(_, bps)| bps),
+            remb_age_ms: self
+                .feedback
+                .remb
+                .map(|(at, _)| now.duration_since(at).as_secs_f64() * 1000.0),
             nack_packet_requests: self.feedback.nack_requests as f64,
             pli: self.feedback.pli as f64,
             fir: self.feedback.fir as f64,
@@ -97,8 +110,49 @@ impl VideoDiagnostics {
 }
 
 impl VideoFeedback {
+    pub fn observation(&self) -> Option<super::adaptation::Observation> {
+        self.latest
+            .as_ref()
+            .map(|sample| super::adaptation::Observation {
+                source: sample.ssrc,
+                sequence: sample.last_sequence,
+                at: sample.received_at,
+                loss_percent: sample.loss_percent,
+                rtt_ms: sample.rtt_ms,
+            })
+    }
+
+    pub fn remb(&self, now: Instant) -> Option<f64> {
+        self.remb
+            .filter(|(at, _)| now.duration_since(*at).as_secs() < 10)
+            .map(|(_, bps)| bps)
+    }
+    pub fn set_video_ssrc(&mut self, ssrc: u32) {
+        if self.video_ssrc != Some(ssrc) {
+            self.video_ssrc = Some(ssrc);
+            self.latest = None;
+            self.remb = None;
+        }
+    }
+
     pub fn observe(&mut self, packet: &dyn Any, now: SystemTime, received_at: Instant) {
-        if let Some(nack) = packet.downcast_ref::<TransportLayerNack>() {
+        if let Some(remb) = packet.downcast_ref::<ReceiverEstimatedMaximumBitrate>() {
+            self.remb_reports += 1;
+            // REMB is a budget for all listed SSRCs, not necessarily video alone.
+            // Preserve it as a ceiling; never treat another stream's budget as ours.
+            if self
+                .video_ssrc
+                .is_some_and(|ssrc| remb.ssrcs.contains(&ssrc))
+                && remb.bitrate.is_finite()
+                && remb.bitrate >= 0.0
+            {
+                self.remb = Some((received_at, f64::from(remb.bitrate)));
+            }
+        } else if packet.is::<TransportLayerCc>() {
+            // TWCC is transport-wide. Counting reports does not claim that their
+            // sequence numbers have been matched to outgoing packet timestamps.
+            self.twcc_reports += 1;
+        } else if let Some(nack) = packet.downcast_ref::<TransportLayerNack>() {
             // Count requested packet IDs, including repeat requests. This is
             // neither unique packet loss nor confirmed successful retransmission.
             self.nack_requests += nack
@@ -115,7 +169,9 @@ impl VideoFeedback {
             // This sender owns one video track. Keep the latest report block;
             // include its SSRC so a source change is never presented as a delta.
             for block in &report.reports {
-                self.latest = Some(ReceiverSample::new(block, now, received_at));
+                if self.video_ssrc == Some(block.ssrc) {
+                    self.latest = Some(ReceiverSample::new(block, now, received_at));
+                }
             }
         }
     }
@@ -133,6 +189,10 @@ impl VideoFeedback {
             pli = self.pli,
             fir = self.fir,
             receiver_reports = self.receiver_reports,
+            remb_reports = self.remb_reports,
+            twcc_reports = self.twcc_reports,
+            remb_bps = ?self.remb.map(|(_, bps)| bps),
+            remb_age_ms = ?self.remb.map(|(at, _)| now.duration_since(at).as_millis() as u64),
             "UU video feedback totals"
         );
         if let Some(report) = &self.latest {
@@ -183,6 +243,7 @@ mod tests {
     fn session_snapshot_preserves_unknown_values_and_independent_sample_ages() {
         let now = Instant::now();
         let mut diagnostics = VideoDiagnostics::default();
+        diagnostics.feedback.set_video_ssrc(0);
         let empty = serde_json::to_value(diagnostics.snapshot(now)).unwrap();
         assert!(empty["receiver"].is_null());
         assert!(empty["sender"].is_null());
@@ -200,6 +261,7 @@ mod tests {
         diagnostics.sender = Some((
             now + Duration::from_secs(2),
             UuVideoSender {
+                encoded_kbps: 4000.0,
                 age_ms: 0.0,
                 window_ms: 5000.0,
                 fps: 60.0,
@@ -232,6 +294,56 @@ mod tests {
         assert_eq!(sample.loss_percent, 25.0);
         assert_eq!(sample.jitter_ms, 10.0);
         assert_eq!(sample.rtt_ms, None);
+    }
+
+    #[test]
+    fn feedback_follows_video_source_and_keeps_remb_scope() {
+        let now = Instant::now();
+        let mut feedback = VideoFeedback::default();
+        feedback.set_video_ssrc(42);
+        feedback.observe(
+            &ReceiverReport {
+                reports: vec![
+                    ReceptionReport {
+                        ssrc: 42,
+                        fraction_lost: 8,
+                        ..Default::default()
+                    },
+                    ReceptionReport {
+                        ssrc: 99,
+                        fraction_lost: 128,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            UNIX_EPOCH,
+            now,
+        );
+        assert_eq!(feedback.latest.as_ref().unwrap().ssrc, 42);
+        feedback.observe(
+            &ReceiverEstimatedMaximumBitrate {
+                bitrate: 2_000_000.0,
+                ssrcs: vec![42, 99],
+                ..Default::default()
+            },
+            UNIX_EPOCH,
+            now,
+        );
+        assert_eq!(feedback.remb.unwrap().1, 2_000_000.0);
+        feedback.observe(
+            &ReceiverEstimatedMaximumBitrate {
+                bitrate: 9_000_000.0,
+                ssrcs: vec![99],
+                ..Default::default()
+            },
+            UNIX_EPOCH,
+            now + Duration::from_secs(1),
+        );
+        assert_eq!(feedback.remb, Some((now, 2_000_000.0)));
+        feedback.set_video_ssrc(43);
+        assert!(feedback.latest.is_none());
+        assert!(feedback.remb.is_none());
     }
 
     #[test]

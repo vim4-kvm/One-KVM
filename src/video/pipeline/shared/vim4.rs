@@ -11,6 +11,27 @@ mod wave5;
 #[cfg(test)]
 mod queue_tests;
 
+v4l2r::nix::ioctl_readwrite!(set_runtime_control, b'V', 28, v4l2r::bindings::v4l2_control);
+
+/// Use the encoder's open file description: opening the device again would
+/// configure a different V4L2 encoder instance. Called by the capture owner.
+fn update_wave5_bitrate(pipeline: &gst::Pipeline, kbps: u32) -> Result<()> {
+    let encoder = pipeline
+        .by_name("encoder")
+        .ok_or_else(|| AppError::VideoError("Missing Wave5 encoder".into()))?;
+    let fd = encoder.property::<i32>("device-fd");
+    if fd < 0 {
+        return Err(AppError::VideoError("Wave5 encoder is not open".into()));
+    }
+    let mut control = v4l2r::bindings::v4l2_control {
+        id: v4l2r::bindings::V4L2_CID_MPEG_VIDEO_BITRATE,
+        value: (kbps.clamp(1000, 60000) * 1000) as i32,
+    };
+    unsafe { set_runtime_control(fd, &mut control) }
+        .map_err(|error| AppError::VideoError(format!("Wave5 runtime bitrate: {error}")))?;
+    Ok(())
+}
+
 fn check_scaler_clock(command: &mut std::process::Command) {
     let result = command
         .output()
@@ -57,7 +78,9 @@ fn output_fps(
     } else {
         source_fps
     };
-    config.output.h26x_frame_rate(source, budget, backend, config.output_codec)
+    config
+        .output
+        .h26x_frame_rate(source, budget, backend, config.output_codec)
 }
 
 fn description(
@@ -149,8 +172,8 @@ fn hdr_description(
     };
     // JPEG snapshots continue to use the independent SDR capture. They must
     // never reinterpret raw PQ samples as an ordinary eight-bit JPEG.
-    let snapshot = vendor_capture(Some("1"), source)?
-        .replace("name=source", "name=snapshot_source");
+    let snapshot =
+        vendor_capture(Some("1"), source)?.replace("name=source", "name=snapshot_source");
     Ok(format!(
         "{snapshot} ! {}fakesink sync=false async=false \
         {capture} ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! \
@@ -347,6 +370,8 @@ impl SharedVideoPipeline {
         config: &SharedVideoPipelineConfig,
         source: (Resolution, u32),
     ) -> Result<()> {
+        let mut active_config = config.clone();
+        let config = &mut active_config;
         // First open reserves a shared contiguous 200 MiB in the driver. Do
         // this before GPU/VDIN1 allocations split CMA. After the first encoded
         // frame the SDK owns its own reference; drop this bootstrap reference
@@ -419,7 +444,10 @@ impl SharedVideoPipeline {
             .set_state(gst::State::Playing)
             .map_err(|e| error(&e))?;
         let mut last_frame = Instant::now();
-        let _snapshot = self.snapshot_tap.attach(&capture.0).map_err(|e| error(&e))?;
+        let _snapshot = self
+            .snapshot_tap
+            .attach(&capture.0)
+            .map_err(|e| error(&e))?;
         let mut check = Instant::now();
         let mut source_changes = crate::platform::vim4::SignalChange::default();
         let mut frames = 0;
@@ -454,10 +482,28 @@ impl SharedVideoPipeline {
             if check.elapsed() >= Duration::from_millis(100) {
                 check = Instant::now();
                 let current = self.config.blocking_read();
-                if current.bitrate_preset != config.bitrate_preset
-                    || current.output != config.output
-                {
+                if current.output != config.output {
                     break;
+                }
+                if current.bitrate_preset != config.bitrate_preset {
+                    if VideoBackend::current() != VideoBackend::Wave5
+                        || (config.output_codec == VideoEncoderType::H265
+                            && config.output.hevc_quality
+                                != crate::platform::vim4::HevcQuality::Bitrate)
+                    {
+                        break;
+                    }
+                    if let Err(error) = update_wave5_bitrate(&capture.0, current.bitrate_kbps()) {
+                        let rejected = current.bitrate_preset;
+                        drop(current);
+                        let mut desired = self.config.blocking_write();
+                        if desired.bitrate_preset == rejected {
+                            desired.bitrate_preset = config.bitrate_preset;
+                        }
+                        warn!(%error, "Runtime bitrate rejected; retaining current stream");
+                        continue;
+                    }
+                    config.bitrate_preset = current.bitrate_preset;
                 }
                 drop(current);
                 if native_hdr(config) != capture_hdr {
@@ -544,14 +590,21 @@ impl SharedVideoPipeline {
             // running-time origin once per pipeline, not at each dequeue.
             let nominal = Duration::from_nanos(1_000_000_000 / u64::from(fps));
             let (pts_ms, duration) = if progress.is_some() {
-                let pts = buffer.pts().ok_or_else(|| AppError::VideoError("Missing Wave5 PTS".into()))?;
+                let pts = buffer
+                    .pts()
+                    .ok_or_else(|| AppError::VideoError("Missing Wave5 PTS".into()))?;
                 let (origin, start_ms) = *capture_epoch.get_or_insert_with(|| (pts, self.pts_ms()));
-                let elapsed = pts.checked_sub(origin)
-                    .ok_or_else(|| AppError::VideoError("Wave5 PTS precedes stream origin".into()))?;
+                let elapsed = pts.checked_sub(origin).ok_or_else(|| {
+                    AppError::VideoError("Wave5 PTS precedes stream origin".into())
+                })?;
                 let spacing = previous_pts.and_then(|prev| pts.checked_sub(prev));
                 previous_pts = Some(pts);
-                (start_ms + elapsed.mseconds() as i64,
-                 spacing.map(|gap| Duration::from_nanos(gap.nseconds())).unwrap_or(nominal))
+                (
+                    start_ms + elapsed.mseconds() as i64,
+                    spacing
+                        .map(|gap| Duration::from_nanos(gap.nseconds()))
+                        .unwrap_or(nominal),
+                )
             } else {
                 (self.pts_ms(), nominal)
             };

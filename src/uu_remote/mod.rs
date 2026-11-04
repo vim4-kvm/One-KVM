@@ -2,6 +2,7 @@
 //! KVM target through NetEase's cloud signaling and a WebRTC peer per connection.
 //! The HDMI input is the desktop; keyboard and mouse go through One-KVM HID.
 
+mod adaptation;
 mod capabilities;
 pub mod cloud;
 #[cfg(target_os = "linux")]

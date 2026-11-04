@@ -994,6 +994,7 @@ export interface UuVideoReceiver {
 }
 
 export interface UuVideoSender {
+	encoded_kbps: number;
 	age_ms: number;
 	window_ms: number;
 	fps: number;
@@ -1004,6 +1005,10 @@ export interface UuVideoSender {
 }
 
 export interface UuVideoStats {
+	remb_reports: number;
+	twcc_reports: number;
+	remb_bps?: number;
+	remb_age_ms?: number;
 	nack_packet_requests: number;
 	pli: number;
 	fir: number;
