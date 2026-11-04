@@ -393,8 +393,9 @@ impl DesktopCoordinator {
         // A tool peer may have been created while the previous desktop was
         // throttled. Capture the baseline only after that owner restores it.
         if let Some(config) = next.deps.video.get_encoding_config().await {
-            next.default_bitrate
-                .store(u64::from(config.bitrate_kbps()), Ordering::Relaxed);
+            let kbps = u64::from(config.bitrate_kbps());
+            next.default_bitrate.store(kbps, Ordering::Relaxed);
+            next.actual_kbps.store(kbps, Ordering::Relaxed);
         }
         next.deps
             .video
