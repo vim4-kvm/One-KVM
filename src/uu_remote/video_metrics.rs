@@ -83,6 +83,7 @@ pub(super) struct VideoDiagnostics {
 impl VideoDiagnostics {
     pub fn snapshot(&self, now: Instant) -> UuVideoStats {
         UuVideoStats {
+            twcc_estimate: None,
             remb_reports: self.feedback.remb_reports as f64,
             twcc_reports: self.feedback.twcc_reports as f64,
             remb_bps: self.feedback.remb.map(|(_, bps)| bps),

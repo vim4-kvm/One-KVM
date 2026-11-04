@@ -22,6 +22,7 @@ pub struct UuSessionStatus {
 #[typeshare]
 #[derive(Debug, Clone, Serialize)]
 pub struct UuVideoStats {
+    pub twcc_estimate: Option<UuTwccEstimate>,
     pub remb_reports: f64,
     pub twcc_reports: f64,
     /// Transport budget covering this video SSRC, possibly shared with audio.
@@ -32,6 +33,18 @@ pub struct UuVideoStats {
     pub fir: f64,
     pub receiver: Option<UuVideoReceiver>,
     pub sender: Option<UuVideoSender>,
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize)]
+pub struct UuTwccEstimate {
+    pub age_ms: f64,
+    pub transport_kbps: f64,
+    pub acknowledged_kbps: f64,
+    pub loss_percent: f64,
+    pub delay_slope_ms_per_second: f64,
+    pub feedback_reports: f64,
+    pub matched_packets: f64,
 }
 
 #[typeshare]

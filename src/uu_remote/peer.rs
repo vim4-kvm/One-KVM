@@ -458,6 +458,7 @@ struct Shared {
     hevc_receive_profile: u8,
     hdr_display_available: bool,
     video_diagnostics: Mutex<VideoDiagnostics>,
+    twcc: super::twcc::Transport,
 }
 
 impl Shared {
@@ -891,7 +892,11 @@ impl Peer {
                 )
                 .map_err(|e| format!("Register UU RTP metadata failed: {e}"))?;
         }
-        let registry = register_default_interceptors(Registry::new(), &mut media)
+        let twcc = super::twcc::Transport::default();
+        let mut registry = Registry::new();
+        // Innermost writer: NACK retransmissions also get fresh transport IDs.
+        registry.add(Box::new(twcc.clone()));
+        let registry = register_default_interceptors(registry, &mut media)
             .map_err(|e| format!("Register interceptors failed: {e}"))?;
         let mut settings = SettingEngine::default();
         settings
@@ -910,6 +915,13 @@ impl Peer {
                 .map_err(|e| format!("Create peer failed: {e}"))?,
         );
         let context = Arc::new(Mutex::new(Context::default()));
+        let path_twcc = twcc.clone();
+        pc.dtls_transport()
+            .ice_transport()
+            .on_selected_candidate_pair_change(Box::new(move |_| {
+                path_twcc.reset();
+                Box::pin(async {})
+            }));
 
         let initial = deps
             .video
@@ -982,6 +994,7 @@ impl Peer {
             input: SessionInput::new(deps.system, deps.reverse_scroll),
             codec,
             video_diagnostics: Mutex::new(VideoDiagnostics::default()),
+            twcc,
             hevc_receive_profile,
             hdr_display_available,
         });
@@ -1295,13 +1308,14 @@ impl Peer {
             .into(),
             link,
             video_stats: if state == PcState::Connected {
-                Some(
-                    self.shared
-                        .video_diagnostics
-                        .lock()
-                        .await
-                        .snapshot(Instant::now()),
-                )
+                let mut stats = self
+                    .shared
+                    .video_diagnostics
+                    .lock()
+                    .await
+                    .snapshot(Instant::now());
+                stats.twcc_estimate = self.shared.twcc.snapshot(Instant::now());
+                Some(stats)
             } else {
                 None
             },
@@ -1478,7 +1492,7 @@ async fn read_video_feedback(sender: Arc<RTCRtpSender>, shared: Arc<Shared>) {
 #[cfg(feature = "vim4")]
 async fn adapt_video_bitrate(shared: Arc<Shared>) {
     let mut controller = super::adaptation::Controller::default();
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
@@ -1487,6 +1501,7 @@ async fn adapt_video_bitrate(shared: Arc<Shared>) {
             || shared.quality.load(Ordering::Relaxed) != wire::quality::AUTO
         {
             controller = Default::default();
+            shared.twcc.reset();
             continue;
         }
         let Some(config) = shared.deps.video.get_encoding_config().await else {
@@ -1512,9 +1527,15 @@ async fn adapt_video_bitrate(shared: Arc<Shared>) {
         drop(diagnostics);
         let current = config.bitrate_kbps();
         let ceiling = (shared.default_bitrate.load(Ordering::Relaxed) as u32).max(1000);
-        let next = if let Some(bps) = remb {
+        let transport_ceiling = remb.map_or(ceiling, |bps| {
+            ((bps * 0.85 / 1000.0) as u32).clamp(1000, ceiling)
+        });
+        let transport_budget = shared.twcc.budget(now, current, transport_ceiling);
+        let next = if let Some(budget) = transport_budget {
+            (budget != current).then_some(budget)
+        } else if remb.is_some() {
             // Leave room for audio, packet headers and retransmissions.
-            let limit = ((bps * 0.85 / 1000.0) as u32).clamp(1000, ceiling);
+            let limit = transport_ceiling;
             if current > limit {
                 Some(limit)
             } else {

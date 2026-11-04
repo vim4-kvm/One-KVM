@@ -1005,6 +1005,7 @@ export interface UuVideoSender {
 }
 
 export interface UuVideoStats {
+	twcc_estimate?: UuTwccEstimate;
 	remb_reports: number;
 	twcc_reports: number;
 	remb_bps?: number;
@@ -1014,6 +1015,16 @@ export interface UuVideoStats {
 	fir: number;
 	receiver?: UuVideoReceiver;
 	sender?: UuVideoSender;
+}
+
+export interface UuTwccEstimate {
+	age_ms: number;
+	transport_kbps: number;
+	acknowledged_kbps: number;
+	loss_percent: number;
+	delay_slope_ms_per_second: number;
+	feedback_reports: number;
+	matched_packets: number;
 }
 
 export interface UuSessionStatus {

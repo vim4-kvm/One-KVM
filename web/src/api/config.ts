@@ -389,6 +389,15 @@ export interface UuIceEndpoint {
 }
 
 export interface UuVideoStats {
+  twcc_estimate: {
+    age_ms: number
+    transport_kbps: number
+    acknowledged_kbps: number
+    loss_percent: number
+    delay_slope_ms_per_second: number
+    feedback_reports: number
+    matched_packets: number
+  } | null
   nack_packet_requests: number
   pli: number
   fir: number
