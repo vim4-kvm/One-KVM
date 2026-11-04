@@ -329,18 +329,29 @@ impl Transport {
         {
             state.reset_measurements();
         }
-        if state.updated.is_none() {
+        // Audio feedback can arrive before the desktop encoder is ready and
+        // before budget() runs for the first time.
+        if state.target == 0 || state.updated.is_none() {
             state.target = current.saturating_mul(100) / 85;
         }
         state.target = state.target.min(ceiling.saturating_mul(100) / 85);
         state
             .updated
             .filter(|t| now.duration_since(*t) <= FRESH)
-            .map(|_| (state.target.saturating_mul(85) / 100).clamp(1000, ceiling.max(1000)))
+            .map(|_| {
+                state
+                    .target
+                    .saturating_mul(85)
+                    .div_ceil(100)
+                    .clamp(1000, ceiling.max(1000))
+            })
     }
 
     pub fn snapshot(&self, now: Instant) -> Option<super::status::UuTwccEstimate> {
         let s = self.0.lock().unwrap();
+        if s.target == 0 {
+            return None;
+        }
         Some(super::status::UuTwccEstimate {
             age_ms: now.duration_since(s.updated?).as_secs_f64() * 1000.0,
             transport_kbps: f64::from(s.target),

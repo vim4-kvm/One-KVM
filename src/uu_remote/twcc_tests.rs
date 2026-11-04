@@ -413,3 +413,14 @@ async fn nack_responder_retransmits_through_transport_numbering() {
     assert_eq!(transport.0.lock().unwrap().history.len(), 2);
     stream.close().await.unwrap();
 }
+
+#[test]
+fn feedback_before_encoder_initialization_cannot_select_zero_budget() {
+    let start = Instant::now();
+    let transport = Transport::default();
+    batch(&mut transport.0.lock().unwrap(), start, 5000);
+    let now = start + Duration::from_secs(1);
+    assert!(transport.snapshot(now).is_none());
+    assert_eq!(transport.budget(now, 8000, 8000), Some(8000));
+    assert!(transport.snapshot(now).unwrap().transport_kbps >= 8000.0);
+}
