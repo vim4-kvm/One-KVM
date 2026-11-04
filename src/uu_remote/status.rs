@@ -38,6 +38,9 @@ pub struct UuVideoStats {
 #[typeshare]
 #[derive(Debug, Clone, Serialize)]
 pub struct UuTwccEstimate {
+    pub usable_for_video: bool,
+    pub video_received_packets: f64,
+    pub audio_received_packets: f64,
     pub age_ms: f64,
     pub transport_kbps: f64,
     pub acknowledged_kbps: f64,

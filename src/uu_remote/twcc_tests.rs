@@ -25,7 +25,7 @@ fn feedback(base: u16, count: u16, reference: u32, delta: i64) -> TransportLayer
 fn batch(s: &mut Estimator, start: Instant, receive_delta: i64) {
     let base = s.next as u16;
     for i in 0..100 {
-        s.sent(start + Duration::from_millis(i * 5), 1200);
+        s.sent(start + Duration::from_millis(i * 5), 1200, true);
     }
     s.receive(
         &feedback(base, 100, (s.next / 100 * 16) as u32, receive_delta),
@@ -89,7 +89,7 @@ fn sequence_and_reference_wrap_and_negative_deltas() {
         ..Default::default()
     };
     for i in 0..30 {
-        s.sent(start + Duration::from_millis(i * 5), 1200);
+        s.sent(start + Duration::from_millis(i * 5), 1200, true);
     }
     let mut report = feedback(65_530, 30, 0, 5000);
     report.recv_deltas[0].delta = -250;
@@ -104,7 +104,7 @@ fn malformed_or_future_report_does_not_consume_history() {
     let start = Instant::now();
     let mut s = Estimator::default();
     for _ in 0..30 {
-        s.sent(start, 1200);
+        s.sent(start, 1200, true);
     }
     let mut malformed = feedback(0, 30, 0, 5000);
     malformed.recv_deltas.pop();
@@ -121,10 +121,11 @@ fn loss_only_feedback_and_sparse_reports_are_usable() {
     let start = Instant::now();
     let mut s = Estimator {
         target: 8000,
+        video_received: 1, // An established video stream then loses a batch.
         ..Default::default()
     };
     for _ in 0..20 {
-        s.sent(start, 1200);
+        s.sent(start, 1200, true);
     }
     for base in [0, 10] {
         let mut report = feedback(base, 10, 0, 0);
@@ -156,7 +157,7 @@ fn expiry_idle_and_path_reset_keep_sequence_but_clear_capacity() {
     );
     let mut s = transport.0.lock().unwrap();
     let next = s.next;
-    s.sent(start + Duration::from_secs(5), 100);
+    s.sent(start + Duration::from_secs(5), 100, true);
     assert_eq!(s.next, next + 1);
     assert!(s.updated.is_none());
     s.reset_measurements();
@@ -169,7 +170,7 @@ fn history_is_bounded_and_feedback_compression_cannot_inflate_rate() {
     let start = Instant::now();
     let mut s = Estimator::default();
     for _ in 0..HISTORY + 10 {
-        s.sent(start, 1200);
+        s.sent(start, 1200, true);
     }
     assert_eq!(s.history.len(), HISTORY);
     let mut s = Estimator {
@@ -209,8 +210,15 @@ async fn audio_video_and_retransmission_share_sequence_without_changing_rtp() {
             uri: URI.into(),
             id: 5,
         });
+    info.rtcp_feedback
+        .push(webrtc::interceptor::stream_info::RTCPFeedback {
+            typ: "transport-cc".into(),
+            ..Default::default()
+        });
+    info.mime_type = "video/H264".into();
     let video = transport.bind_local_stream(&info, sink.clone()).await;
     info.ssrc = 2;
+    info.mime_type = "audio/opus".into();
     let audio = transport.bind_local_stream(&info, sink.clone()).await;
     video.write(&packet, &Attributes::new()).await.unwrap();
     audio.write(&packet, &Attributes::new()).await.unwrap();
@@ -286,6 +294,7 @@ async fn failed_send_is_not_network_loss() {
         transport: transport.clone(),
         writer: Arc::new(FailingWriter),
         extension: 5,
+        video: true,
     };
     assert!(writer
         .write(&Default::default(), &Attributes::new())
@@ -304,7 +313,7 @@ fn overlapping_feedback_counts_each_transport_packet_once() {
         ..Default::default()
     };
     for i in 0..60 {
-        s.sent(start + Duration::from_millis(i * 5), 1200);
+        s.sent(start + Duration::from_millis(i * 5), 1200, true);
     }
     s.receive(&feedback(0, 40, 0, 5000), start + Duration::from_secs(1));
     s.receive(&feedback(20, 40, 1, 5000), start + Duration::from_secs(1));
@@ -329,7 +338,7 @@ fn capacity_recovers_after_a_congested_period() {
         let mut report = feedback(base, 100, (receive_us / 64000) as u32, delta);
         report.recv_deltas[0].delta += receive_us % 64000;
         for _ in 0..100 {
-            s.sent(start + Duration::from_micros(send_us), 1200);
+            s.sent(start + Duration::from_micros(send_us), 1200, true);
             send_us += 5000;
         }
         receive_us += delta * 100;
@@ -368,10 +377,16 @@ async fn nack_responder_retransmits_through_transport_numbering() {
     let stream = MockStream::new(
         &StreamInfo {
             ssrc: 1,
-            rtcp_feedback: vec![RTCPFeedback {
-                typ: "nack".into(),
-                ..Default::default()
-            }],
+            rtcp_feedback: vec![
+                RTCPFeedback {
+                    typ: "nack".into(),
+                    ..Default::default()
+                },
+                RTCPFeedback {
+                    typ: "transport-cc".into(),
+                    ..Default::default()
+                },
+            ],
             rtp_header_extensions: vec![RTPHeaderExtension {
                 uri: URI.into(),
                 id: 5,
@@ -423,4 +438,70 @@ fn feedback_before_encoder_initialization_cannot_select_zero_budget() {
     assert!(transport.snapshot(now).is_none());
     assert_eq!(transport.budget(now, 8000, 8000), Some(8000));
     assert!(transport.snapshot(now).unwrap().transport_kbps >= 8000.0);
+}
+
+#[test]
+fn audio_only_confirmations_cannot_drive_video_into_the_bitrate_floor() {
+    let now = Instant::now();
+    let transport = Transport::default();
+    transport.budget(now, 20000, 20000);
+    let mut s = transport.0.lock().unwrap();
+    for batch_index in 0..10 {
+        let at = now + Duration::from_secs(batch_index);
+        let base = s.next as u16;
+        for _ in 0..80 {
+            s.sent(at, 1200, true);
+        }
+        for _ in 0..20 {
+            s.sent(at, 24, false);
+        }
+        let mut report = feedback(base, 100, (batch_index * 16) as u32, 20000);
+        report.packet_chunks = vec![
+            PacketStatusChunk::RunLengthChunk(RunLengthChunk {
+                packet_status_symbol: Symbol::PacketNotReceived,
+                run_length: 80,
+                ..Default::default()
+            }),
+            PacketStatusChunk::RunLengthChunk(RunLengthChunk {
+                packet_status_symbol: Symbol::PacketReceivedLargeDelta,
+                run_length: 20,
+                ..Default::default()
+            }),
+        ];
+        report.recv_deltas.truncate(20);
+        s.receive(&report, at + Duration::from_millis(500));
+    }
+    assert_eq!(s.video_received, 0);
+    assert_eq!(s.audio_received, 200);
+    assert!(s.target >= 20000);
+    drop(s);
+    let at = now + Duration::from_millis(9500);
+    assert_eq!(transport.budget(at, 20000, 20000), None);
+    assert!(!transport.snapshot(at).unwrap().usable_for_video);
+}
+
+#[tokio::test]
+async fn header_extension_without_transport_feedback_does_not_number_packets() {
+    use webrtc::interceptor::stream_info::RTPHeaderExtension;
+    let transport = Transport::default();
+    let sink = Arc::new(Sink::default());
+    let writer = transport
+        .bind_local_stream(
+            &StreamInfo {
+                mime_type: "video/H265".into(),
+                rtp_header_extensions: vec![RTPHeaderExtension {
+                    uri: URI.into(),
+                    id: 5,
+                }],
+                ..Default::default()
+            },
+            sink.clone(),
+        )
+        .await;
+    writer
+        .write(&Default::default(), &Attributes::new())
+        .await
+        .unwrap();
+    assert!(sink.0.lock().unwrap()[0].header.get_extension(5).is_none());
+    assert!(transport.0.lock().unwrap().history.is_empty());
 }

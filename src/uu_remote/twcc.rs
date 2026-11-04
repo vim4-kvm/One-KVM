@@ -34,6 +34,7 @@ struct Sent {
     at: Instant,
     bytes: usize,
     reported: bool,
+    video: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -67,6 +68,8 @@ pub(super) struct Estimator {
     matched: u64,
     pending_total: u64,
     pending_lost: u64,
+    video_received: u64,
+    audio_received: u64,
 }
 
 /// Unwrap a counter around a known extended value, including reference time's
@@ -128,7 +131,7 @@ fn decode(report: &TransportLayerCc, reference: i64) -> Option<Vec<Option<i64>>>
 }
 
 impl Estimator {
-    fn sent(&mut self, now: Instant, bytes: usize) -> i64 {
+    fn sent(&mut self, now: Instant, bytes: usize, video: bool) -> i64 {
         if self
             .history
             .last_key_value()
@@ -152,6 +155,7 @@ impl Estimator {
                 at: now,
                 bytes,
                 reported: false,
+                video,
             },
         );
         seq
@@ -200,6 +204,13 @@ impl Estimator {
                 continue;
             }
             total += 1;
+            if time.is_some() {
+                if packet.video {
+                    self.video_received += 1;
+                } else {
+                    self.audio_received += 1;
+                }
+            }
             match time {
                 None => lost += 1,
                 Some(time) if time != i64::MIN => received.push(Arrival {
@@ -229,6 +240,13 @@ impl Estimator {
         }
         self.loss_percent = self.pending_lost as f64 * 100.0 / self.pending_total as f64;
         self.updated = Some(now);
+        if self.video_received == 0 {
+            // Some clients report only audio, even across transport sequence
+            // gaps occupied by video. Such gaps cannot establish video loss.
+            self.pending_total = 0;
+            self.pending_lost = 0;
+            return;
+        }
         if self.target == 0
             || self
                 .decision
@@ -331,10 +349,13 @@ impl Transport {
         }
         // Audio feedback can arrive before the desktop encoder is ready and
         // before budget() runs for the first time.
-        if state.target == 0 || state.updated.is_none() {
+        if state.target == 0 || state.updated.is_none() || state.video_received == 0 {
             state.target = current.saturating_mul(100) / 85;
         }
         state.target = state.target.min(ceiling.saturating_mul(100) / 85);
+        if state.video_received == 0 {
+            return None;
+        }
         state
             .updated
             .filter(|t| now.duration_since(*t) <= FRESH)
@@ -360,6 +381,9 @@ impl Transport {
             delay_slope_ms_per_second: s.delay_slope,
             feedback_reports: s.reports as f64,
             matched_packets: s.matched as f64,
+            video_received_packets: s.video_received as f64,
+            audio_received_packets: s.audio_received as f64,
+            usable_for_video: s.video_received > 0 && now.duration_since(s.updated?) <= FRESH,
         })
     }
 }
@@ -392,6 +416,13 @@ impl Interceptor for Transport {
         info: &StreamInfo,
         writer: Arc<dyn RTPWriter + Send + Sync>,
     ) -> Arc<dyn RTPWriter + Send + Sync> {
+        let feedback = info.rtcp_feedback.iter().any(|f| f.typ == "transport-cc");
+        tracing::info!(mime = %info.mime_type, transport_cc_feedback = feedback,
+            transport_cc_extension = info.rtp_header_extensions.iter().find(|e| e.uri == URI).map(|e| e.id),
+            "UU negotiated transport feedback");
+        if !feedback {
+            return writer;
+        }
         let Some(extension) = info
             .rtp_header_extensions
             .iter()
@@ -403,6 +434,7 @@ impl Interceptor for Transport {
             transport: self.clone(),
             writer,
             extension: extension.id as u8,
+            video: info.mime_type.to_ascii_lowercase().starts_with("video/"),
         })
     }
     async fn unbind_local_stream(&self, _info: &StreamInfo) {}
@@ -424,6 +456,7 @@ struct PacketWriter {
     transport: Transport,
     writer: Arc<dyn RTPWriter + Send + Sync>,
     extension: u8,
+    video: bool,
 }
 
 #[async_trait]
@@ -438,12 +471,11 @@ impl RTPWriter for PacketWriter {
         packet
             .header
             .set_extension(self.extension, Bytes::from_static(&[0, 0]))?;
-        let sequence = self
-            .transport
-            .0
-            .lock()
-            .unwrap()
-            .sent(Instant::now(), packet.marshal_size());
+        let sequence = self.transport.0.lock().unwrap().sent(
+            Instant::now(),
+            packet.marshal_size(),
+            self.video,
+        );
         packet.header.set_extension(
             self.extension,
             Bytes::copy_from_slice(&(sequence as u16).to_be_bytes()),

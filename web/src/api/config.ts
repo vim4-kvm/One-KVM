@@ -390,6 +390,9 @@ export interface UuIceEndpoint {
 
 export interface UuVideoStats {
   twcc_estimate: {
+    usable_for_video: boolean
+    video_received_packets: number
+    audio_received_packets: number
     age_ms: number
     transport_kbps: number
     acknowledged_kbps: number
