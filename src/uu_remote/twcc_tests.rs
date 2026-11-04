@@ -505,3 +505,33 @@ async fn header_extension_without_transport_feedback_does_not_number_packets() {
     assert!(sink.0.lock().unwrap()[0].header.get_extension(5).is_none());
     assert!(transport.0.lock().unwrap().history.is_empty());
 }
+
+#[test]
+fn timestamp_quantization_and_reordering_do_not_discard_delivered_video_bytes() {
+    for reordered in [false, true] {
+        let now = Instant::now();
+        let mut s = Estimator {
+            target: 4000,
+            ..Default::default()
+        };
+        let mut report = feedback(0, 400, 0, 0);
+        for frame in 0..50 {
+            for fragment in 0..8 {
+                s.sent(now + Duration::from_millis(frame * 20), 1000, true);
+                report.recv_deltas[(frame * 8 + fragment) as usize].delta = match fragment {
+                    0 => (if frame == 0 { 0 } else { 20000 }) + if reordered { 250 } else { 0 },
+                    1 if reordered => -250,
+                    _ => 0,
+                };
+            }
+        }
+        s.receive(&report, now + Duration::from_secs(1));
+        assert_eq!(s.video_received, 400);
+        assert!(
+            (3000.0..3500.0).contains(&s.acknowledged_kbps),
+            "8 fragments per frame at 50 fps must measure about 3.2 Mbps, got {}",
+            s.acknowledged_kbps
+        );
+        assert!(s.delay_slope.abs() < 1.0);
+    }
+}

@@ -278,28 +278,36 @@ impl Estimator {
     }
 
     fn arrival(&mut self, sample: Arrival) {
-        if self
-            .arrivals
-            .back()
-            .is_some_and(|last| sample.received <= last.received || sample.sent < last.sent)
-        {
-            return;
-        }
-        self.arrivals.push_back(sample);
+        let last = self.arrivals.back().copied().unwrap_or(sample);
+        let reordered = sample.received < last.received || sample.sent < last.sent;
+        // TWCC quantizes arrivals to 250 us: many fragments of a video frame
+        // legitimately share a timestamp. Count every delivered byte. Attribute
+        // reordered arrivals to the current rate window without feeding reversed
+        // time deltas into the delay regression.
+        let rate_sample = Arrival {
+            sent: sample.sent.max(last.sent),
+            received: sample.received.max(last.received),
+            bytes: sample.bytes,
+        };
+        self.arrivals.push_back(rate_sample);
         self.arrival_bytes += sample.bytes;
         while self.arrivals.len() > HISTORY
-            || (self.arrivals.len() > 2 && sample.received - self.arrivals[1].received > 500_000)
+            || (self.arrivals.len() > 2
+                && rate_sample.received - self.arrivals[1].received > 500_000)
         {
             self.arrival_bytes -= self.arrivals.pop_front().unwrap().bytes;
         }
         let first = self.arrivals.front().unwrap();
-        let receive_us = sample.received - first.received;
-        let send_us = sample.sent.duration_since(first.sent).as_micros() as i64;
+        let receive_us = rate_sample.received - first.received;
+        let send_us = rate_sample.sent.duration_since(first.sent).as_micros() as i64;
         if receive_us >= 100_000 && send_us >= 100_000 {
             let bytes = self.arrival_bytes - first.bytes;
             // Taking the larger interval prevents compressed feedback arrivals
             // from inventing bandwidth. Receiver times remove RTCP batching.
             self.acknowledged_kbps = bytes as f64 * 8000.0 / receive_us.max(send_us) as f64;
+        }
+        if reordered {
+            return;
         }
         let origin = *self.origin.get_or_insert(sample);
         if self
