@@ -38,6 +38,25 @@ impl Viewer {
         main10: bool,
         capabilities: ViewerCapabilities,
     ) -> Self {
+        Self::connect_with_feedback(
+            desktop,
+            capture_type,
+            configured_video,
+            main10,
+            capabilities,
+            false,
+        )
+        .await
+    }
+
+    async fn connect_with_feedback(
+        desktop: Arc<DesktopCoordinator>,
+        capture_type: u64,
+        configured_video: Option<Arc<VideoStreamManager>>,
+        main10: bool,
+        capabilities: ViewerCapabilities,
+        feedback: bool,
+    ) -> Self {
         let mut media = MediaEngine::default();
         media.register_default_codecs().unwrap();
         if main10 {
@@ -58,9 +77,28 @@ impl Viewer {
                 )
                 .unwrap();
         }
+        let registry = if feedback {
+            for uri in [
+                CAPTURE_INDEX_URI,
+                NEW_FRAME_URI,
+                crate::webrtc::color_space::URI,
+            ] {
+                media
+                    .register_header_extension(
+                        RTCRtpHeaderExtensionCapability { uri: uri.into() },
+                        RTPCodecType::Video,
+                        None,
+                    )
+                    .unwrap();
+            }
+            register_default_interceptors(Registry::new(), &mut media).unwrap()
+        } else {
+            Registry::new()
+        };
         let pc = Arc::new(
             APIBuilder::new()
                 .with_media_engine(media)
+                .with_interceptor_registry(registry)
                 .build()
                 .new_peer_connection(Default::default())
                 .await
@@ -294,6 +332,71 @@ impl Viewer {
         })
         .await
         .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn native_metadata_and_transport_feedback_survive_real_srtp_for_both_codecs() {
+    for hevc in [false, true] {
+        let capabilities = if hevc {
+            native_main10_capabilities()
+        } else {
+            ViewerCapabilities::default()
+        };
+        let mut viewer = Viewer::connect_with_feedback(
+            Arc::new(DesktopCoordinator::default()),
+            1,
+            None,
+            false,
+            capabilities,
+            true,
+        )
+        .await;
+        viewer.capture().await;
+        viewer
+            .host
+            .shared
+            .quality
+            .store(wire::quality::AUTO, Ordering::Relaxed);
+        let mut data = if hevc {
+            vec![0, 0, 0, 1, 0x26, 1]
+        } else {
+            vec![0, 0, 0, 1, 0x65]
+        };
+        data.resize(2400, 0x88); // Exercise fragmentation, not only a single RTP packet.
+        let sample = Sample {
+            data: Bytes::from(data),
+            duration: Duration::from_millis(16),
+            ..Default::default()
+        };
+        let mut packetizer = HevcPackets::new();
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut interval = tokio::time::interval(Duration::from_millis(16));
+            loop {
+                interval.tick().await;
+                viewer.host.shared.twcc.budget(Instant::now(), 4000, 4000);
+                viewer
+                    .host
+                    .shared
+                    .media
+                    .get()
+                    .unwrap()
+                    .video
+                    .write(&sample, &mut packetizer, None)
+                    .await
+                    .unwrap();
+                if let Some(stats) = viewer.host.shared.twcc.snapshot(Instant::now()) {
+                    if stats.usable_for_video && stats.video_received_packets >= 30.0 {
+                        break stats;
+                    }
+                }
+            }
+        })
+        .await;
+        viewer.close().await;
+        let stats = result.expect("Loopback SRTP did not produce video TWCC confirmations");
+        assert!(stats.video_received_packets >= 30.0);
+        assert!(stats.acknowledged_kbps > 0.0);
     }
 }
 
