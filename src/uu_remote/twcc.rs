@@ -20,6 +20,8 @@ use webrtc::util::MarshalSize;
 const URI: &str = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01";
 const HISTORY: usize = 32_000; // Less than half a transport sequence cycle.
 const FRESH: Duration = Duration::from_secs(3);
+const TIMING_TIMEOUT: Duration = Duration::from_secs(2);
+const HISTORY_AGE: Duration = Duration::from_secs(10);
 type Result<T> = std::result::Result<T, webrtc::interceptor::Error>;
 
 #[cfg(test)]
@@ -33,7 +35,9 @@ pub(super) struct Transport(pub Arc<Mutex<Estimator>>);
 struct Sent {
     at: Instant,
     bytes: usize,
-    reported: bool,
+    // None: unreported; Some(false): missing, still eligible for a late ACK.
+    received: Option<bool>,
+    loss_epoch: u64,
     video: bool,
 }
 
@@ -49,7 +53,6 @@ pub(super) struct Estimator {
     next: i64,
     history: BTreeMap<i64, Sent>,
     reference: Option<i64>,
-    last_sequence: Option<i64>,
     arrivals: VecDeque<Arrival>,
     arrival_bytes: usize,
     // Regression uses send-time groups, so a large fragmented frame does not
@@ -59,6 +62,7 @@ pub(super) struct Estimator {
     last_group: Option<Arrival>,
     target: u32,
     updated: Option<Instant>,
+    timing_updated: Option<Instant>,
     decision: Option<Instant>,
     acknowledged_kbps: f64,
     loss_percent: f64,
@@ -68,6 +72,7 @@ pub(super) struct Estimator {
     matched: u64,
     pending_total: u64,
     pending_lost: u64,
+    loss_epoch: u64,
     video_received: u64,
     audio_received: u64,
 }
@@ -143,7 +148,7 @@ impl Estimator {
             || self
                 .history
                 .first_key_value()
-                .is_some_and(|(_, p)| now.duration_since(p.at) > Duration::from_secs(10))
+                .is_some_and(|(_, p)| now.duration_since(p.at) > HISTORY_AGE)
         {
             self.history.pop_first();
         }
@@ -154,7 +159,8 @@ impl Estimator {
             Sent {
                 at: now,
                 bytes,
-                reported: false,
+                received: None,
+                loss_epoch: 0,
                 video,
             },
         );
@@ -188,22 +194,30 @@ impl Estimator {
             return;
         }
         let mut received = Vec::new();
-        let mut total = 0;
-        let mut lost = 0;
+        let mut changed = false;
         for (offset, time) in times.into_iter().enumerate() {
             let sequence = base + offset as i64;
             let Some(packet) = self.history.get_mut(&sequence) else {
                 continue;
             };
-            if packet.reported || now.duration_since(packet.at) > FRESH {
+            if packet.received == Some(true)
+                || packet.received == Some(false) && time.is_none()
+                || now.duration_since(packet.at) > HISTORY_AGE
+            {
                 continue;
             }
-            packet.reported = true;
-            // Reordered or overlapping reports must not rewind delay/rate state.
-            if self.last_sequence.is_some_and(|last| sequence <= last) {
-                continue;
+            changed = true;
+            if packet.received.is_none() {
+                self.matched += 1;
+                self.pending_total += 1;
+                self.pending_lost += u64::from(time.is_none());
+                packet.loss_epoch = self.loss_epoch;
+            } else if packet.loss_epoch == self.loss_epoch {
+                // Correct only the still-open loss window. A late ACK is not
+                // another transmitted packet and cannot undo an old decision.
+                self.pending_lost -= 1;
             }
-            total += 1;
+            packet.received = Some(time.is_some());
             if time.is_some() {
                 if packet.video {
                     self.video_received += 1;
@@ -212,26 +226,28 @@ impl Estimator {
                 }
             }
             match time {
-                None => lost += 1,
-                Some(time) if time != i64::MIN => received.push(Arrival {
-                    sent: packet.at,
-                    received: time,
-                    bytes: packet.bytes,
-                }),
+                Some(time) if time != i64::MIN && now.duration_since(packet.at) <= FRESH => {
+                    received.push(Arrival {
+                        sent: packet.at,
+                        received: time,
+                        bytes: packet.bytes,
+                    })
+                }
                 _ => (),
             }
-            self.last_sequence = Some(sequence);
         }
-        if total == 0 {
+        if !changed {
             return;
         }
-        self.reference = Some(reference);
+        self.reference = Some(self.reference.map_or(reference, |last| last.max(reference)));
         self.reports += 1;
-        self.matched += total;
-        self.pending_total += total;
-        self.pending_lost += lost;
+        self.expire_timing(now);
+        let mut new_timing = false;
         for arrival in received {
-            self.arrival(arrival);
+            if self.arrival(arrival) {
+                self.timing_updated = Some(now);
+                new_timing = true;
+            }
         }
         // A whole feedback batch may be lost, so a valid loss-only report still
         // drives a decrease. Sparse batches alone must not drive loss control.
@@ -243,8 +259,7 @@ impl Estimator {
         if self.video_received == 0 {
             // Some clients report only audio, even across transport sequence
             // gaps occupied by video. Such gaps cannot establish video loss.
-            self.pending_total = 0;
-            self.pending_lost = 0;
+            self.finish_loss_window();
             return;
         }
         if self.target == 0
@@ -254,20 +269,20 @@ impl Estimator {
         {
             return;
         }
-        self.pending_total = 0;
-        self.pending_lost = 0;
-        let congested =
-            self.loss_percent >= 10.0 || (self.groups.len() >= 10 && self.delay_slope > 12.5);
+        self.finish_loss_window();
+        let congested = self.loss_percent >= 10.0
+            || (new_timing && self.groups.len() >= 10 && self.delay_slope > 12.5);
         if congested {
             let mut next = self.target as f64 * 0.85;
             // Low delivered rate while application-limited is not a capacity
             // estimate. Only cap against throughput when we are filling the link.
-            if self.acknowledged_kbps >= self.target as f64 * 0.5 {
+            if new_timing && self.acknowledged_kbps >= self.target as f64 * 0.5 {
                 next = next.min(self.acknowledged_kbps * 0.9);
             }
             self.target = (next as u32).max(1000);
             self.decision = Some(now);
         } else if self.loss_percent < 2.0
+            && new_timing
             && self.groups.len() >= 10
             && self.delay_slope < 5.0
             && self.acknowledged_kbps >= self.target as f64 * 0.8
@@ -277,7 +292,31 @@ impl Estimator {
         }
     }
 
-    fn arrival(&mut self, sample: Arrival) {
+    fn finish_loss_window(&mut self) {
+        self.pending_total = 0;
+        self.pending_lost = 0;
+        self.loss_epoch += 1;
+    }
+
+    fn expire_timing(&mut self, now: Instant) {
+        if self
+            .timing_updated
+            .is_some_and(|at| now.duration_since(at) > TIMING_TIMEOUT)
+        {
+            self.arrivals.clear();
+            self.arrival_bytes = 0;
+            self.groups.clear();
+            self.origin = None;
+            self.last_group = None;
+            self.acknowledged_kbps = 0.0;
+            self.delay_slope = 0.0;
+            self.smoothed_delay = 0.0;
+            self.timing_updated = None;
+        }
+    }
+
+    // Only new, forward-moving delay groups can refresh the delay detector.
+    fn arrival(&mut self, sample: Arrival) -> bool {
         let last = self.arrivals.back().copied().unwrap_or(sample);
         let reordered = sample.received < last.received || sample.sent < last.sent;
         // TWCC quantizes arrivals to 250 us: many fragments of a video frame
@@ -307,14 +346,14 @@ impl Estimator {
             self.acknowledged_kbps = bytes as f64 * 8000.0 / receive_us.max(send_us) as f64;
         }
         if reordered {
-            return;
+            return false;
         }
         let origin = *self.origin.get_or_insert(sample);
         if self
             .last_group
             .is_some_and(|last| sample.sent.duration_since(last.sent) < Duration::from_millis(5))
         {
-            return;
+            return false;
         }
         self.last_group = Some(sample);
         let sent_ms = sample.sent.duration_since(origin.sent).as_secs_f64() * 1000.0;
@@ -337,6 +376,7 @@ impl Estimator {
                 .sum::<f64>()
                 / variance;
         }
+        true
     }
 }
 
@@ -349,6 +389,7 @@ impl Transport {
     /// RR must not independently increase the rate while TWCC holds it steady.
     pub fn budget(&self, now: Instant, current: u32, ceiling: u32) -> Option<u32> {
         let mut state = self.0.lock().unwrap();
+        state.expire_timing(now);
         if state
             .updated
             .is_some_and(|at| now.duration_since(at) > FRESH)
@@ -377,7 +418,8 @@ impl Transport {
     }
 
     pub fn snapshot(&self, now: Instant) -> Option<super::status::UuTwccEstimate> {
-        let s = self.0.lock().unwrap();
+        let mut s = self.0.lock().unwrap();
+        s.expire_timing(now);
         if s.target == 0 {
             return None;
         }

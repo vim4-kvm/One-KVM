@@ -411,6 +411,144 @@ fn native_main10_capabilities() -> ViewerCapabilities {
 }
 
 #[tokio::test]
+async fn bitrate_rollback_keeps_auto_without_blocking_video_health_refresh() {
+    let output = Arc::new(BitrateOutput(Mutex::new(Default::default())));
+    let video =
+        VideoStreamManager::with_webrtc_streamer(crate::video::streamer::Streamer::new(), output);
+    let viewer = Viewer::connect_configured(
+        Arc::new(DesktopCoordinator::default()),
+        8,
+        Some(video.clone()),
+        false,
+        ViewerCapabilities::default(),
+    )
+    .await;
+    let shared = &viewer.host.shared;
+    video.set_bitrate_preset(preset_for(8000)).await.unwrap();
+    shared.actual_kbps.store(8000, Ordering::Relaxed);
+    shared.quality.store(wire::quality::AUTO, Ordering::Relaxed);
+
+    let guard = shared.settings_lock.lock().await;
+    shared.adaptive_kbps.store(6400, Ordering::Relaxed);
+    video.set_bitrate_preset(preset_for(6400)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), shared.refresh_screen())
+        .await
+        .unwrap();
+    // Reproduce the encoder rejecting a request before the setter returns.
+    video.set_bitrate_preset(preset_for(8000)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), shared.refresh_screen())
+        .await
+        .unwrap();
+    assert_eq!(shared.quality.load(Ordering::Relaxed), wire::quality::AUTO);
+    shared.adaptive_kbps.store(8000, Ordering::Relaxed);
+    drop(guard);
+    shared.refresh_screen().await;
+    assert_eq!(shared.quality.load(Ordering::Relaxed), wire::quality::AUTO);
+    assert_eq!(shared.actual_kbps.load(Ordering::Relaxed), 8000);
+
+    // A successful automatic change also keeps AUTO; a subsequent panel edit
+    // must still select CUSTOM, rather than being hidden by the synchronization.
+    let guard = shared.settings_lock.lock().await;
+    shared.adaptive_kbps.store(6400, Ordering::Relaxed);
+    video.set_bitrate_preset(preset_for(6400)).await.unwrap();
+    drop(guard);
+    shared.refresh_screen().await;
+    assert_eq!(shared.quality.load(Ordering::Relaxed), wire::quality::AUTO);
+    video.set_bitrate_preset(preset_for(4000)).await.unwrap();
+    shared.refresh_screen().await;
+    assert_eq!(
+        shared.quality.load(Ordering::Relaxed),
+        wire::quality::CUSTOM
+    );
+    assert_eq!(shared.custom_kbps.load(Ordering::Relaxed), 4000);
+    viewer.close().await;
+}
+
+// A controllable desired-config boundary: no capture device or encoder thread
+// is needed to reproduce observations before/after a rejected bitrate request.
+struct BitrateOutput(Mutex<crate::video::pipeline::SharedVideoPipelineConfig>);
+
+#[async_trait::async_trait]
+impl crate::video::traits::VideoOutput for BitrateOutput {
+    async fn get_pipeline_config(
+        &self,
+    ) -> Option<crate::video::pipeline::SharedVideoPipelineConfig> {
+        Some(self.0.lock().await.clone())
+    }
+    async fn set_bitrate_preset(
+        &self,
+        preset: crate::video::codec::BitratePreset,
+    ) -> crate::error::Result<()> {
+        self.0.lock().await.bitrate_preset = preset;
+        Ok(())
+    }
+    async fn set_event_bus(&self, _: Arc<crate::events::EventBus>) {}
+    async fn update_video_config(
+        &self,
+        _: crate::video::types::Resolution,
+        _: crate::video::PixelFormat,
+        _: u32,
+    ) {
+        unimplemented!()
+    }
+    async fn set_capture_device(
+        &self,
+        _: std::path::PathBuf,
+        _: u8,
+        _: Option<crate::video::device::VideoDeviceInfo>,
+    ) {
+        unimplemented!()
+    }
+    async fn current_video_codec(&self) -> VideoCodecType {
+        VideoCodecType::H264
+    }
+    async fn is_hardware_encoding(&self) -> bool {
+        false
+    }
+    async fn close_all_sessions(&self) {}
+    async fn close_all_sessions_and_release_device(&self) -> crate::error::Result<usize> {
+        Ok(0)
+    }
+    async fn session_count(&self) -> usize {
+        0
+    }
+    async fn set_hid_controller(&self, _: Arc<crate::hid::HidController>) {}
+    async fn set_audio_enabled(&self, _: bool) -> crate::error::Result<()> {
+        Ok(())
+    }
+    async fn is_audio_enabled(&self) -> bool {
+        false
+    }
+    async fn reconnect_audio_sources(&self) {}
+    async fn ensure_video_pipeline_for_external(
+        &self,
+    ) -> crate::error::Result<Arc<crate::video::pipeline::SharedVideoPipeline>> {
+        Err(crate::error::AppError::VideoError(
+            "No test capture device".into(),
+        ))
+    }
+    async fn set_video_codec(&self, _: VideoCodecType) -> crate::error::Result<()> {
+        Ok(())
+    }
+    async fn request_keyframe(&self) -> crate::error::Result<()> {
+        Ok(())
+    }
+    async fn current_video_geometry(
+        &self,
+    ) -> (
+        crate::video::types::Resolution,
+        crate::video::PixelFormat,
+        u32,
+    ) {
+        let config = self.0.lock().await;
+        (config.resolution, config.input_format, config.fps)
+    }
+    async fn pipeline_stats(&self) -> Option<crate::video::pipeline::SharedVideoPipelineStats> {
+        None
+    }
+}
+
+#[tokio::test]
 async fn native_main10_capability_keeps_main_sdp_and_transport_binding() {
     let viewer = Viewer::connect_configured(
         Arc::new(DesktopCoordinator::default()),

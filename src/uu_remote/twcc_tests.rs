@@ -96,7 +96,7 @@ fn sequence_and_reference_wrap_and_negative_deltas() {
     s.receive(&report, start + Duration::from_secs(1));
     assert_eq!(s.matched, 30);
     assert_eq!(s.reference, Some(1 << 24));
-    assert_eq!(s.last_sequence, Some(65_559));
+    assert_eq!(s.video_received, 30);
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn malformed_or_future_report_does_not_consume_history() {
     s.receive(&malformed, start);
     s.receive(&feedback(20, 30, 0, 5000), start);
     assert_eq!(s.matched, 0);
-    assert!(s.history.values().all(|p| !p.reported));
+    assert!(s.history.values().all(|p| p.received.is_none()));
     s.receive(&feedback(0, 30, 0, 5000), start);
     assert_eq!(s.matched, 30);
 }
@@ -534,4 +534,120 @@ fn timestamp_quantization_and_reordering_do_not_discard_delivered_video_bytes() 
         );
         assert!(s.delay_slope.abs() < 1.0);
     }
+}
+
+fn untimed_feedback(base: u16, count: u16, received: bool) -> TransportLayerCc {
+    let mut report = feedback(base, count, 0, 0);
+    report.recv_deltas.clear();
+    if let PacketStatusChunk::RunLengthChunk(c) = &mut report.packet_chunks[0] {
+        c.packet_status_symbol = if received {
+            Symbol::PacketReceivedWithoutDelta
+        } else {
+            Symbol::PacketNotReceived
+        };
+    }
+    report
+}
+
+#[test]
+fn late_delivery_corrects_open_loss_window_without_double_counting() {
+    let start = Instant::now();
+    let mut s = Estimator {
+        target: 8000,
+        ..Default::default()
+    };
+    for i in 0..30 {
+        s.sent(start + Duration::from_millis(i * 5), 1200, true);
+    }
+    let now = start + Duration::from_millis(200);
+    let lost = untimed_feedback(0, 10, false);
+    s.receive(&lost, now);
+    s.receive(&lost, now);
+    s.receive(&feedback(0, 10, 0, 5000), now);
+    s.receive(&lost, now); // A reordered missing report cannot revoke an ACK.
+    s.receive(&feedback(0, 30, 0, 5000), now);
+    assert_eq!(s.video_received, 30);
+    assert_eq!(s.matched, 30);
+    assert_eq!(s.loss_percent, 0.0);
+    assert_eq!(s.target, 8000);
+}
+
+#[test]
+fn late_delivery_after_loss_decision_is_counted_once_and_does_not_underflow() {
+    let start = Instant::now();
+    let mut s = Estimator {
+        target: 8000,
+        video_received: 1,
+        ..Default::default()
+    };
+    for _ in 0..30 {
+        s.sent(start, 1200, true);
+    }
+    s.receive(&untimed_feedback(0, 30, false), start);
+    assert_eq!(s.target, 6800);
+    let now = start + Duration::from_millis(600);
+    s.receive(&feedback(0, 30, 0, 5000), now);
+    s.receive(&feedback(0, 30, 0, 5000), now);
+    assert_eq!(s.video_received, 31);
+    assert_eq!(s.matched, 30);
+    assert_eq!(s.pending_lost, 0);
+    assert_eq!(s.target, 6800);
+}
+
+#[test]
+fn reordered_disjoint_reports_account_for_all_delivered_packets() {
+    let start = Instant::now();
+    let mut s = Estimator {
+        target: 8000,
+        ..Default::default()
+    };
+    for i in 0..40 {
+        s.sent(start + Duration::from_millis(i * 5), 1200, true);
+    }
+    let now = start + Duration::from_millis(300);
+    s.receive(&feedback(20, 20, 2, 5000), now);
+    let groups = s.groups.clone();
+    s.receive(&feedback(0, 20, 0, 5000), now);
+    assert_eq!(s.video_received, 40);
+    assert_eq!(s.matched, 40);
+    assert_eq!(
+        s.groups, groups,
+        "old reports must not reverse the delay clock"
+    );
+    assert_eq!(s.reference, Some(2));
+}
+
+#[test]
+fn untimed_feedback_cannot_reuse_congestion_and_timed_measurements_expire() {
+    let start = Instant::now();
+    let mut s = Estimator {
+        target: 8000,
+        ..Default::default()
+    };
+    batch(&mut s, start, 6000);
+    assert!(s.delay_slope > 100.0);
+    let target = s.target;
+    for seconds in 1..5 {
+        let now = start + Duration::from_secs(seconds);
+        let base = s.next as u16;
+        for _ in 0..30 {
+            s.sent(now, 1200, true);
+        }
+        s.receive(&untimed_feedback(base, 30, true), now);
+        assert_eq!(s.target, target);
+    }
+    assert_eq!(s.delay_slope, 0.0);
+    assert_eq!(s.acknowledged_kbps, 0.0);
+    assert!(s.groups.is_empty());
+    // Valid new loss still reduces the rate even without any arrival times.
+    let now = start + Duration::from_secs(5);
+    let base = s.next as u16;
+    for _ in 0..30 {
+        s.sent(now, 1200, true);
+    }
+    s.receive(&untimed_feedback(base, 30, false), now);
+    assert!(s.target < target);
+    // Fresh timing starts a new trend rather than bridging the untimed gap.
+    batch(&mut s, start + Duration::from_secs(6), 5000);
+    assert!(s.delay_slope.abs() < 1.0);
 }

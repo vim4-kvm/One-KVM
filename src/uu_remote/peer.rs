@@ -564,6 +564,16 @@ impl Shared {
     }
 
     async fn refresh_screen(&self) {
+        // A pending encoder request can expose both its desired bitrate and a
+        // rollback. Neither is a manual quality change. Never make the video
+        // task wait for the encoder acknowledgement held by settings_lock.
+        let Ok(_guard) = self.settings_lock.try_lock() else {
+            return;
+        };
+        self.refresh_screen_locked().await;
+    }
+
+    async fn refresh_screen_locked(&self) {
         if let Some(config) = self.deps.video.get_encoding_config().await {
             let kbps = u64::from(config.bitrate_kbps());
             let bitrate_changed = self.actual_kbps.swap(kbps, Ordering::Relaxed) != kbps;
@@ -2425,7 +2435,7 @@ async fn apply_capture_setting(
         );
     }
     shared.quality.store(quality, Ordering::Relaxed);
-    shared.refresh_screen().await;
+    shared.refresh_screen_locked().await;
     if request.hdr.is_some() {
         shared.report_hdr_capability().await;
     }
