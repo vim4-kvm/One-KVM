@@ -11,7 +11,7 @@ struct Viewer {
     binary: Arc<RTCDataChannel>,
     _file: Arc<RTCDataChannel>,
     incoming: mpsc::UnboundedReceiver<(u8, Vec<u8>)>,
-    packets: mpsc::UnboundedReceiver<bool>,
+    packets: mpsc::UnboundedReceiver<webrtc::rtp::packet::Packet>,
     _directory: tempfile::TempDir,
 }
 
@@ -121,7 +121,7 @@ impl Viewer {
             Box::pin(async move {
                 if track.kind() == RTPCodecType::Video {
                     while let Ok((packet, _)) = track.read_rtp().await {
-                        let _ = packets.send(packet.header.marker);
+                        let _ = packets.send(packet);
                     }
                 }
             })
@@ -548,6 +548,201 @@ impl crate::video::traits::VideoOutput for BitrateOutput {
     }
 }
 
+/// Payload bytes of the next complete RTP frame, or None after `limit` without one.
+async fn next_frame_bytes(viewer: &mut Viewer, limit: Duration) -> Option<usize> {
+    tokio::time::timeout(limit, async {
+        let mut bytes = 0;
+        loop {
+            let packet = viewer.packets.recv().await.expect("Video receiver closed");
+            bytes += packet.payload.len();
+            if packet.header.marker {
+                return bytes;
+            }
+        }
+    })
+    .await
+    .ok()
+}
+
+#[tokio::test]
+async fn no_signal_placeholder_replaces_silence_until_the_source_returns() {
+    for main10 in [false, true] {
+        let pipeline = crate::video::pipeline::SharedVideoPipeline::new(
+            crate::video::pipeline::SharedVideoPipelineConfig::h264(
+                crate::video::types::Resolution::HD720,
+                BitratePreset::Balanced,
+            ),
+        )
+        .unwrap();
+        pipeline.publish_signal_for_test(true);
+        let video = VideoStreamManager::with_webrtc_streamer(
+            crate::video::streamer::Streamer::new(),
+            Arc::new(PipelineOutput(pipeline.clone())),
+        );
+        // A HDMI bridge without signal: subscribing must not need a real device.
+        video
+            .streamer()
+            .init_with_device(
+                serde_json::from_value(serde_json::json!({
+                    "path": "/dev/video-no-signal", "name": "test", "driver": "test",
+                    "bus_info": "", "card": "test", "formats": [],
+                    "capabilities": {"video_capture": true, "video_capture_mplane": false,
+                        "video_output": false, "streaming": true, "read_write": false},
+                    "is_capture_card": true, "priority": 0, "has_signal": false,
+                    "control_mode": "source_following",
+                    "input_status": {"state": "no_signal", "format": null, "width": null,
+                        "height": null, "fps": null},
+                    "subdev_path": null, "bridge_kind": null
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut viewer = Viewer::connect_configured(
+            Arc::new(DesktopCoordinator::default()),
+            1,
+            Some(video),
+            main10,
+            ViewerCapabilities::default(),
+        )
+        .await;
+        let codec = viewer.host.codec;
+        assert_eq!(
+            codec,
+            if main10 {
+                VideoCodecType::H265
+            } else {
+                VideoCodecType::H264
+            }
+        );
+        viewer.capture().await;
+        // The official viewers keep loading until a decodable frame arrives.
+        let placeholder = no_signal::frame(codec).len();
+        for _ in 0..2 {
+            let bytes = next_frame_bytes(&mut viewer, Duration::from_secs(3))
+                .await
+                .expect("No placeholder while the source has no signal");
+            assert!(bytes > placeholder / 2, "{codec:?} frame of {bytes} bytes");
+        }
+
+        let keyframe: &'static [u8] = if main10 {
+            &[0, 0, 0, 1, 0x26, 0x01, 0xaf, 0x00, 0x10]
+        } else {
+            &[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, 0x10]
+        };
+        pipeline.publish_signal_for_test(false);
+        pipeline.publish_frame_for_test(Arc::new(crate::video::pipeline::EncodedVideoFrame {
+            color_space: None,
+            encoded_at: Instant::now(),
+            data: Bytes::from_static(keyframe),
+            pts_ms: 0,
+            is_keyframe: true,
+            sequence: 1,
+            duration: Duration::from_millis(33),
+            codec: if main10 {
+                VideoEncoderType::H265
+            } else {
+                VideoEncoderType::H264
+            },
+        }));
+        // A placeholder may already be in flight; the real keyframe follows it.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while next_frame_bytes(&mut viewer, Duration::from_secs(3))
+                .await
+                .expect("No frame after the signal returned")
+                > keyframe.len()
+            {}
+        })
+        .await
+        .expect("Real keyframe did not replace the placeholder");
+        assert_eq!(
+            next_frame_bytes(&mut viewer, Duration::from_millis(2500)).await,
+            None,
+            "Placeholder continued after the signal returned"
+        );
+        viewer.close().await;
+    }
+}
+
+/// The real shared pipeline without capture or encoder threads: tests publish
+/// its signal state and encoded frames directly.
+struct PipelineOutput(Arc<crate::video::pipeline::SharedVideoPipeline>);
+
+#[async_trait::async_trait]
+impl crate::video::traits::VideoOutput for PipelineOutput {
+    async fn get_pipeline_config(
+        &self,
+    ) -> Option<crate::video::pipeline::SharedVideoPipelineConfig> {
+        Some(self.0.config().await)
+    }
+    async fn video_signal_lost(&self) -> bool {
+        self.0.signal_lost()
+    }
+    async fn ensure_video_pipeline_for_external(
+        &self,
+    ) -> crate::error::Result<Arc<crate::video::pipeline::SharedVideoPipeline>> {
+        Ok(self.0.clone())
+    }
+    async fn set_event_bus(&self, _: Arc<crate::events::EventBus>) {}
+    async fn update_video_config(
+        &self,
+        _: crate::video::types::Resolution,
+        _: crate::video::PixelFormat,
+        _: u32,
+    ) {
+    }
+    async fn set_capture_device(
+        &self,
+        _: std::path::PathBuf,
+        _: u8,
+        _: Option<crate::video::device::VideoDeviceInfo>,
+    ) {
+    }
+    async fn current_video_codec(&self) -> VideoCodecType {
+        VideoCodecType::H264
+    }
+    async fn is_hardware_encoding(&self) -> bool {
+        false
+    }
+    async fn close_all_sessions(&self) {}
+    async fn close_all_sessions_and_release_device(&self) -> crate::error::Result<usize> {
+        Ok(0)
+    }
+    async fn session_count(&self) -> usize {
+        0
+    }
+    async fn set_hid_controller(&self, _: Arc<crate::hid::HidController>) {}
+    async fn set_audio_enabled(&self, _: bool) -> crate::error::Result<()> {
+        Ok(())
+    }
+    async fn is_audio_enabled(&self) -> bool {
+        false
+    }
+    async fn reconnect_audio_sources(&self) {}
+    async fn set_video_codec(&self, _: VideoCodecType) -> crate::error::Result<()> {
+        Ok(())
+    }
+    async fn set_bitrate_preset(&self, _: BitratePreset) -> crate::error::Result<()> {
+        Ok(())
+    }
+    async fn request_keyframe(&self) -> crate::error::Result<()> {
+        Ok(())
+    }
+    async fn current_video_geometry(
+        &self,
+    ) -> (
+        crate::video::types::Resolution,
+        crate::video::PixelFormat,
+        u32,
+    ) {
+        let config = self.0.config().await;
+        (config.resolution, config.input_format, config.fps)
+    }
+    async fn pipeline_stats(&self) -> Option<crate::video::pipeline::SharedVideoPipelineStats> {
+        None
+    }
+}
+
 #[tokio::test]
 async fn native_main10_capability_keeps_main_sdp_and_transport_binding() {
     let viewer = Viewer::connect_configured(
@@ -651,7 +846,7 @@ async fn live_uu_hdr_switch_and_takeover_restore_the_default() {
         tokio::time::timeout(Duration::from_secs(30), async {
             let mut frames = 0;
             while frames < 240 {
-                if first.packets.recv().await.expect("Video receiver closed") {
+                if first.packets.recv().await.expect("Video receiver closed").header.marker {
                     frames += 1;
                 }
             }
@@ -683,7 +878,7 @@ async fn live_uu_hdr_switch_and_takeover_restore_the_default() {
         tokio::time::timeout(Duration::from_secs(30), async {
             let mut frames = 0;
             while frames < 30 {
-                if first.packets.recv().await.expect("Video receiver closed") {
+                if first.packets.recv().await.expect("Video receiver closed").header.marker {
                     frames += 1;
                 }
             }
@@ -786,7 +981,7 @@ async fn live_uu_resolution_with_saved_hdr_on_an_sdr_viewer() {
         tokio::time::timeout(Duration::from_secs(15), async {
             let mut frames = 0;
             while frames < 120 {
-                if viewer.packets.recv().await.expect("Video receiver closed") {
+                if viewer.packets.recv().await.expect("Video receiver closed").header.marker {
                     frames += 1;
                 }
             }

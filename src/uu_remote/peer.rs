@@ -36,6 +36,7 @@ use webrtc::track::track_local::TrackLocal;
 use super::capabilities::ViewerCapabilities;
 use super::ice::SessionIce;
 use super::input::{self, HidAction, SessionInput, SessionInputEvent};
+use super::no_signal;
 use super::signaling::{SignalingClient, SoacMessage};
 use super::status::UuVideoSender;
 use super::video_metrics::{FrameAgeStats, VideoDiagnostics};
@@ -1589,6 +1590,31 @@ async fn wait_connected(pc: &RTCPeerConnection) -> bool {
     }
 }
 
+/// Sends one access unit; false ends the subscription after a send failure or close.
+async fn write_frame(
+    pc: &RTCPeerConnection,
+    track: &VideoTrack,
+    sample: &Sample,
+    hevc: &mut HevcPackets,
+    color_space: Option<[u8; 4]>,
+    health: &mut tokio::time::Interval,
+) -> bool {
+    let send = track.write(sample, hevc, color_space);
+    tokio::pin!(send);
+    loop {
+        tokio::select! {
+            result = &mut send => return match result {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!("UU video send failed: {e}");
+                    false
+                }
+            },
+            _ = health.tick() => if closed(pc.connection_state()) { return false; },
+        }
+    }
+}
+
 async fn stream_video(
     pc: Arc<RTCPeerConnection>,
     track: Arc<VideoTrack>,
@@ -1610,6 +1636,8 @@ async fn stream_video(
     health.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut sent = 0u64;
     let mut hevc = HevcPackets::new();
+    let mut last_sent = Instant::now();
+    let mut placeholder_frames = 0u64;
     'subscribe: while !closed(pc.connection_state()) {
         shared.video_diagnostics.lock().await.sender = None;
         let subscribed_at = Instant::now();
@@ -1658,6 +1686,23 @@ async fn stream_video(
                 _ = health.tick() => {
                     if closed(pc.connection_state()) { break 'subscribe; }
                     shared.refresh_screen().await;
+                    if last_sent.elapsed() >= no_signal::INTERVAL && video.video_signal_lost().await {
+                        if placeholder_frames == 0 {
+                            info!("UU video source has no signal; sending placeholder");
+                        }
+                        let sample = Sample {
+                            data: Bytes::from_static(no_signal::frame(codec)),
+                            duration: timeline.duration_after(Instant::now()),
+                            ..Default::default()
+                        };
+                        if !write_frame(&pc, &track, &sample, &mut hevc, None, &mut health).await {
+                            break 'subscribe;
+                        }
+                        placeholder_frames += 1;
+                        last_sent = Instant::now();
+                        // The decoder now holds the placeholder's parameter sets.
+                        waiting_for_keyframe = true;
+                    }
                     continue;
                 }
             };
@@ -1709,18 +1754,15 @@ async fn stream_video(
                 duration: timeline.duration_after(Instant::now()),
                 ..Default::default()
             };
-            let send = track.write(&sample, &mut hevc, frame.color_space);
-            tokio::pin!(send);
-            loop {
-                tokio::select! {
-                    result = &mut send => {
-                        if let Err(e) = result { warn!("UU video send failed: {e}"); break 'subscribe; }
-                        break;
-                    }
-                    _ = health.tick() => if closed(pc.connection_state()) { break 'subscribe; },
-                }
+            if !write_frame(&pc, &track, &sample, &mut hevc, frame.color_space, &mut health).await {
+                break 'subscribe;
             }
             sent += 1;
+            last_sent = Instant::now();
+            if placeholder_frames > 0 {
+                info!(placeholder_frames, "UU video source signal restored");
+                placeholder_frames = 0;
+            }
             frame_ages.observe(frame.encoded_at, arrived, Instant::now(), subscribed_at);
             let elapsed_us = arrived.elapsed().as_micros();
             send_us += elapsed_us;

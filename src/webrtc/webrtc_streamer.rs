@@ -780,6 +780,14 @@ impl WebRtcStreamer {
         }
     }
 
+    pub async fn video_signal_lost(&self) -> bool {
+        self.video_pipeline
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|pipeline| pipeline.signal_lost())
+    }
+
     pub async fn current_video_geometry(&self) -> (Resolution, PixelFormat, u32) {
         if let Some(cfg) = self.get_pipeline_config().await {
             (cfg.resolution, cfg.input_format, cfg.fps)
@@ -1584,6 +1592,10 @@ impl crate::video::traits::VideoOutput for WebRtcStreamer {
 
     async fn get_pipeline_config(&self) -> Option<SharedVideoPipelineConfig> {
         self.get_pipeline_config().await
+    }
+
+    async fn video_signal_lost(&self) -> bool {
+        self.video_signal_lost().await
     }
 
     async fn set_video_codec(&self, codec: VideoCodecType) -> Result<()> {

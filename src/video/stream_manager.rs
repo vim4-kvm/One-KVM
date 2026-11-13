@@ -865,6 +865,11 @@ impl VideoStreamManager {
         self.webrtc_streamer.get_pipeline_config().await
     }
 
+    /// Whether the shared pipeline is running without a usable source signal.
+    pub async fn video_signal_lost(&self) -> bool {
+        self.webrtc_streamer.video_signal_lost().await
+    }
+
     /// Get current video codec type
     pub async fn current_video_codec(&self) -> crate::video::codec::VideoCodecType {
         self.webrtc_streamer.current_video_codec().await

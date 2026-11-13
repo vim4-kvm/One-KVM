@@ -713,6 +713,28 @@ impl SharedVideoPipeline {
         }
     }
 
+    /// Whether the last published state reports a missing or unusable source signal.
+    pub fn signal_lost(&self) -> bool {
+        self.last_state_notification
+            .lock()
+            .is_some_and(|notification| notification.state == "no_signal")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_signal_for_test(&self, lost: bool) {
+        self.notify_state(if lost {
+            PipelineStateNotification::no_signal(SignalStatus::NoSignal, None)
+        } else {
+            PipelineStateNotification::streaming(Resolution::HD720, PixelFormat::Nv12, 30)
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_frame_for_test(&self, frame: Arc<EncodedVideoFrame>) {
+        let reservations = self.reserve_outputs().unwrap_or_default();
+        self.broadcast_encoded_batch(vec![frame].into(), reservations);
+    }
+
     /// Subscribe to encoded frames
     pub fn subscribe(&self) -> EncodedVideoFrameReceiver {
         // VIM4 captures continuously. A large IDR can take several frame periods

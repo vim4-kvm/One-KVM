@@ -12,6 +12,8 @@ numbers, PTY process groups, scrollback and reattach redraw) and the tool-peer
 isolation/routing in src/main.rs and src/webrtc.rs. One-KVM adds an explicit
 target picker, per-service session ownership, serial/SSH targets and private
 SSH host-key management (2026-10-17).
+The no-signal placeholder video (no_signal.rs) adapts the synthetic keyframe
+used for locked desktops in src/locked_video.rs (2026-11-12).
 
 Upstream work:
   uu-remote-linux - https://github.com/VallierDev/uu-remote-linux

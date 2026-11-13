@@ -49,6 +49,10 @@ pub trait VideoOutput: Send + Sync {
     async fn reconnect_audio_sources(&self);
     async fn ensure_video_pipeline_for_external(&self) -> Result<Arc<SharedVideoPipeline>>;
     async fn get_pipeline_config(&self) -> Option<SharedVideoPipelineConfig>;
+    /// True only while a running pipeline reports that its source has no usable signal.
+    async fn video_signal_lost(&self) -> bool {
+        false
+    }
     #[cfg(feature = "vim4")]
     async fn vim4_output_settings(&self) -> Option<crate::platform::vim4::OutputSettings> {
         self.get_pipeline_config().await.map(|config| config.output)

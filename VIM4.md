@@ -295,6 +295,12 @@ HID 日志只含计数和耗时，USB 写完不等于主机已处理或画面已
 [缩放记录](https://github.com/vim4-kvm/vim4-kvm/blob/main/docs/bringup/2026-10-24-uu-scaled-60fps.md)，
 不能外推显示器共存、耐久、全部内容和网络；高刷待官方客户端实测。
 
+HDMI 无信号时编码器静默，官方客户端拿不到首帧会一直加载，也可能不启用输入。
+共享管线报告无信号且视频静默超过[间隔](src/uu_remote/no_signal.rs)后，按间隔发送独立的
+提示关键帧；上报的屏幕和输入坐标不变，真实关键帧到达即切回。提示画面由
+[生成脚本](src/uu_remote/no_signal/generate.py)重建，HEVC 须为 Main 而非 Main Intra。
+官方客户端的显示、切回和无信号时键鼠唤醒尚待上板验收。
+
 ### UU 文件传输（板子目录）
 
 [文件实现](src/uu_remote/files/mod.rs)与
